@@ -20,7 +20,6 @@ export default defineConfig(({ mode }) => ({
     },
   },
   build: {
-    // Fixed manualChunks format (changed from Object to Function)
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -38,14 +37,10 @@ export default defineConfig(({ mode }) => ({
         },
       },
     },
-    // Reduce chunk size warnings threshold
     chunkSizeWarningLimit: 1000,
-    // Enable source maps for debugging in development
     sourcemap: mode === 'development',
-    // Minify in production
-    minify: mode === 'production' ? 'esbuild' : false,
+    // ❌ REMOVED: minify: mode === 'production' ? 'esbuild' : false,
   },
-  // Environment variables validation
   define: {
     'import.meta.env.VITE_API_URL': JSON.stringify(process.env.VITE_API_URL),
   },
