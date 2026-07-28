@@ -20,17 +20,21 @@ export default defineConfig(({ mode }) => ({
     },
   },
   build: {
-    // Optimize chunk splitting
+    // Fixed manualChunks format (changed from Object to Function)
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          'vendor-ui': ['lucide-react', 'recharts', 'react-hot-toast'],
-          'vendor-mediapipe': [
-            '@mediapipe/camera_utils',
-            '@mediapipe/hands',
-            '@mediapipe/pose'
-          ],
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('react') || id.includes('react-dom') || id.includes('react-router-dom')) {
+              return 'vendor-react';
+            }
+            if (id.includes('lucide-react') || id.includes('recharts') || id.includes('react-hot-toast')) {
+              return 'vendor-ui';
+            }
+            if (id.includes('@mediapipe')) {
+              return 'vendor-mediapipe';
+            }
+          }
         },
       },
     },
