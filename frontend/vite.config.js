@@ -1,10 +1,8 @@
-// frontend/vite.config.js
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
 export default defineConfig(({ mode }) => ({
-  base: '/',
   plugins: [react()],
   resolve: {
     alias: {
@@ -20,7 +18,18 @@ export default defineConfig(({ mode }) => ({
       },
     },
   },
+  optimizeDeps: {
+    include: [
+      '@mediapipe/camera_utils',
+      '@mediapipe/hands',
+      '@mediapipe/pose',
+      '@mediapipe/drawing_utils',
+    ],
+  },
   build: {
+    commonjsOptions: {
+      include: [/node_modules/],
+    },
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -31,18 +40,12 @@ export default defineConfig(({ mode }) => ({
             if (id.includes('lucide-react') || id.includes('recharts') || id.includes('react-hot-toast')) {
               return 'vendor-ui';
             }
-            if (id.includes('@mediapipe')) {
-              return 'vendor-mediapipe';
-            }
+            // ⚠️ DO NOT bundle @mediapipe into manualChunks; let Vite handle it automatically
           }
         },
       },
     },
     chunkSizeWarningLimit: 1000,
     sourcemap: mode === 'development',
-    // ❌ REMOVED: minify: mode === 'production' ? 'esbuild' : false,
-  },
-  define: {
-    'import.meta.env.VITE_API_URL': JSON.stringify(process.env.VITE_API_URL),
   },
 }))
