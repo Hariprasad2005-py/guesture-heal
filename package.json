@@ -10,7 +10,8 @@
     "seed": "cd backend && npm run seed"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "esbuild": "^0.28.1"
   },
   "dependencies": {
     "@mediapipe/camera_utils": "^0.3.1675466862",
