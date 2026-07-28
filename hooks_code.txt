@@ -1,0 +1,2595 @@
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useAdaptiveDifficulty.js
+==================================================
+// src/engine/SessionLogger.js
+export class SessionLogger {
+  constructor({ patientId, gameId, mode }) {
+    this.patientId = patientId;
+    this.gameId = gameId;
+    this.mode = mode;
+    this.startedAt = Date.now();
+    this.endedAt = null;
+    this.papsTrend = [];
+    this.postureEvents = [];
+    this.difficultyLog = [];
+    this.repetitions = [];
+    this.checkIns = [];
+    this.therapistAlerts = [];
+    this.shapeHistory = []; // For CanvasAir
+    this.movementEvents = []; // For CatchFlex
+  }
+
+  recordPAPS(score) {
+    this.papsTrend.push({ t: Date.now(), score });
+  }
+
+  recordPostureEvent(joint, severity, angleDeviation = null) {
+    this.postureEvents.push({ t: Date.now(), joint, severity, angleDeviation });
+  }
+
+  recordDifficultyChange(entry) {
+    this.difficultyLog.push(entry);
+  }
+
+  recordRepetition({ success, romAchieved = null, targetROM = null, holdMs = null, details = {} }) {
+    this.repetitions.push({ t: Date.now(), success, romAchieved, targetROM, holdMs, ...details });
+  }
+
+  recordCheckIn(papsAtCheckIn, patientResponse = null) {
+    this.checkIns.push({ t: Date.now(), papsAtCheckIn, patientResponse });
+  }
+
+  recordTherapistAlert(papsScore, note = 'Severe pain detected — session paused') {
+    this.therapistAlerts.push({ t: Date.now(), papsScore, note });
+  }
+
+  recordShapeTrace({ shapeName, accuracy, durationMs }) {
+    this.shapeHistory.push({ t: Date.now(), shapeName, accuracy, durationMs });
+  }
+
+  recordMovementEvent({ type, severity, details = {} }) {
+    this.movementEvents.push({ t: Date.now(), type, severity, details });
+  }
+
+  finish() {
+    this.endedAt = Date.now();
+  }
+
+  summarize(targetRepetitions = null) {
+    const successCount = this.repetitions.filter((r) => r.success).length;
+    const romValues = this.repetitions
+      .filter((r) => r.romAchieved != null && r.targetROM)
+      .map((r) => r.romAchieved / r.targetROM);
+    const avgROMPct = romValues.length
+      ? Math.round((romValues.reduce((a, b) => a + b, 0) / romValues.length) * 100)
+      : null;
+    const accuracyPct = this.repetitions.length
+      ? Math.round((successCount / this.repetitions.length) * 100)
+      : 0;
+    const completionPct = targetRepetitions
+      ? Math.round((this.repetitions.length / targetRepetitions) * 100)
+      : null;
+    const maxPAPS = this.papsTrend.length ? Math.max(...this.papsTrend.map((p) => p.score)) : 0;
+    const avgPAPS = this.papsTrend.length
+      ? Math.round((this.papsTrend.reduce((a, p) => a + p.score, 0) / this.papsTrend.length) * 10) / 10
+      : 0;
+    const severePostureEvents = this.postureEvents.filter((e) => e.severity === 'severe').length;
+
+    return {
+      durationMs: (this.endedAt || Date.now()) - this.startedAt,
+      successfulReps: successCount,
+      totalReps: this.repetitions.length,
+      accuracyPct,
+      avgROMPct,
+      completionPct,
+      maxPAPS,
+      avgPAPS,
+      severePostureEvents,
+      minorPostureEvents: this.postureEvents.filter((e) => e.severity === 'minor').length,
+      difficultyChangeCount: this.difficultyLog.length,
+      therapistAlertCount: this.therapistAlerts.length,
+      shapeHistory: this.shapeHistory,
+      movementEvents: this.movementEvents,
+    };
+  }
+
+  export() {
+    return {
+      patientId: this.patientId,
+      gameId: this.gameId,
+      mode: this.mode,
+      startedAt: this.startedAt,
+      endedAt: this.endedAt,
+      papsTrend: this.papsTrend,
+      postureEvents: this.postureEvents,
+      difficultyLog: this.difficultyLog,
+      repetitions: this.repetitions,
+      checkIns: this.checkIns,
+      therapistAlerts: this.therapistAlerts,
+      shapeHistory: this.shapeHistory,
+      movementEvents: this.movementEvents,
+      summary: this.summarize(),
+    };
+  }
+}
+
+const STORAGE_KEY = 'rehab_session_history_v1';
+
+export function persistSessionLocally(sessionExport) {
+  try {
+    const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    existing.push(sessionExport);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(existing.slice(-100)));
+  } catch (_) {}
+}
+
+export function loadSessionHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  } catch (_) {
+    return [];
+  }
+}
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useAudioFeedback.js
+==================================================
+import { useCallback, useRef } from 'react';
+
+export const useAudioFeedback = () => {
+  const audioContextRef = useRef(null);
+
+  const getAudioContext = useCallback(() => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    return audioContextRef.current;
+  }, []);
+
+  const playTone = useCallback((frequency = 440, duration = 0.1, volume = 0.3) => {
+    try {
+      const ctx = getAudioContext();
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+
+      oscillator.frequency.value = frequency;
+      gainNode.gain.setValueAtTime(volume, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
+
+      oscillator.start(ctx.currentTime);
+      oscillator.stop(ctx.currentTime + duration);
+    } catch (err) {
+      console.warn('Audio playback failed:', err);
+    }
+  }, [getAudioContext]);
+
+  const playSuccess = useCallback(() => {
+    // Play ascending tone sequence
+    playTone(523.25, 0.1, 0.3); // C5
+    setTimeout(() => playTone(659.25, 0.1, 0.3), 100); // E5
+    setTimeout(() => playTone(783.99, 0.2, 0.3), 200); // G5
+  }, [playTone]);
+
+  const playMiss = useCallback(() => {
+    // Play descending tone
+    playTone(349.23, 0.1, 0.2); // F4
+    setTimeout(() => playTone(293.66, 0.2, 0.2), 100); // D4
+  }, [playTone]);
+
+  const playGameStart = useCallback(() => {
+    playTone(440, 0.15, 0.3);
+    setTimeout(() => playTone(440, 0.15, 0.3), 150);
+  }, [playTone]);
+
+  const playGameEnd = useCallback(() => {
+    playTone(523.25, 0.2, 0.3);
+    setTimeout(() => playTone(659.25, 0.2, 0.3), 200);
+    setTimeout(() => playTone(783.99, 0.3, 0.3), 400);
+  }, [playTone]);
+
+  const playCalibrationComplete = useCallback(() => {
+    playTone(440, 0.1, 0.25);
+    setTimeout(() => playTone(523.25, 0.1, 0.25), 100);
+    setTimeout(() => playTone(659.25, 0.15, 0.25), 200);
+  }, [playTone]);
+
+  return {
+    playTone,
+    playSuccess,
+    playMiss,
+    playGameStart,
+    playGameEnd,
+    playCalibrationComplete,
+  };
+};
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useFacialPainDetection.js
+==================================================
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+const CALIBRATION_MS = 4000;
+const SMOOTHING_WINDOW = 6;
+
+function dist(a, b) {
+  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+const LM = {
+  leftBrow: 65,
+  leftBrowInner: 55,
+  rightBrow: 295,
+  rightBrowInner: 285,
+  leftEyeTop: 159,
+  leftEyeBottom: 145,
+  rightEyeTop: 386,
+  rightEyeBottom: 374,
+  leftEyeOuter: 33,
+  rightEyeOuter: 263,
+  noseBridge: 6,
+  noseTip: 1,
+  leftNoseWing: 98,
+  rightNoseWing: 327,
+  mouthLeft: 61,
+  mouthRight: 291,
+  upperLip: 13,
+  lowerLip: 14,
+  leftEyeInner: 133,
+  rightEyeInner: 362,
+};
+
+function computeRawFeatures(lm) {
+  const iod = dist(lm[LM.leftEyeOuter], lm[LM.rightEyeOuter]) || 1;
+
+  const browEyeL = dist(lm[LM.leftBrow], lm[LM.leftEyeTop]) / iod;
+  const browEyeR = dist(lm[LM.rightBrow], lm[LM.rightEyeTop]) / iod;
+  const browLower = (browEyeL + browEyeR) / 2;
+
+  const eyeApertureL = dist(lm[LM.leftEyeTop], lm[LM.leftEyeBottom]) / iod;
+  const eyeApertureR = dist(lm[LM.rightEyeTop], lm[LM.rightEyeBottom]) / iod;
+  const eyeAperture = (eyeApertureL + eyeApertureR) / 2;
+
+  const noseWidth = dist(lm[LM.leftNoseWing], lm[LM.rightNoseWing]) / iod;
+
+  const mouthWidth = dist(lm[LM.mouthLeft], lm[LM.mouthRight]) / iod;
+  const lipGap = dist(lm[LM.upperLip], lm[LM.lowerLip]) / iod;
+
+  return { browLower, eyeAperture, noseWidth, mouthWidth, lipGap };
+}
+
+export function useFacialPainDetection({ enabled = true, videoRef: externalVideoRef, onPAPSUpdate } = {}) {
+  const internalVideoRef = useRef(null);
+  const videoRef = externalVideoRef || internalVideoRef;
+  const faceMeshRef = useRef(null);
+  const cameraRef = useRef(null);
+  const mountedRef = useRef(true);
+  const isInitializingRef = useRef(false);
+
+  const baselineRef = useRef(null);
+  const scoreHistoryRef = useRef([]);
+  const calibrationSamplesRef = useRef([]);
+  const calibratingRef = useRef(false);
+
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [isFaceDetected, setIsFaceDetected] = useState(false);
+  const [paps, setPaps] = useState(0);
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const [isCalibrated, setIsCalibrated] = useState(false);
+
+  const loadScript = useCallback((src) => {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) return resolve();
+      const s = document.createElement('script');
+      s.src = src;
+      s.crossOrigin = 'anonymous';
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error(`Failed to load: ${src}`));
+      document.head.appendChild(s);
+    });
+  }, []);
+
+  const onResults = useCallback((results) => {
+    if (!mountedRef.current) return;
+    const faces = results.multiFaceLandmarks;
+
+    if (!faces || faces.length === 0) {
+      setIsFaceDetected(false);
+      return;
+    }
+    setIsFaceDetected(true);
+    const lm = faces[0];
+    const feats = computeRawFeatures(lm);
+
+    if (calibratingRef.current) {
+      calibrationSamplesRef.current.push(feats);
+      return;
+    }
+
+    if (!baselineRef.current) return;
+
+    const b = baselineRef.current;
+    const browAct = Math.max(0, (b.browLower - feats.browLower) / b.browLower);
+    const eyeAct = Math.max(0, (b.eyeAperture - feats.eyeAperture) / b.eyeAperture);
+    const noseAct = Math.max(0, (b.noseWidth - feats.noseWidth) / b.noseWidth);
+    const mouthAct = Math.max(0, (feats.mouthWidth - b.mouthWidth) / b.mouthWidth);
+
+    const composite =
+      0.3 * Math.min(browAct, 0.6) +
+      0.3 * Math.min(eyeAct, 0.6) +
+      0.2 * Math.min(noseAct, 0.6) +
+      0.2 * Math.min(mouthAct, 0.6);
+
+    const rawScore = Math.min(10, (composite / 0.35) * 10);
+
+    scoreHistoryRef.current.push(rawScore);
+    if (scoreHistoryRef.current.length > SMOOTHING_WINDOW) scoreHistoryRef.current.shift();
+    const smoothed =
+      scoreHistoryRef.current.reduce((a, v) => a + v, 0) / scoreHistoryRef.current.length;
+    const rounded = Math.round(smoothed * 10) / 10;
+
+    setPaps(rounded);
+    onPAPSUpdate?.(rounded);
+  }, [onPAPSUpdate]);
+
+  const calibrate = useCallback(() => {
+    return new Promise((resolve) => {
+      calibrationSamplesRef.current = [];
+      calibratingRef.current = true;
+      setIsCalibrating(true);
+
+      setTimeout(() => {
+        calibratingRef.current = false;
+        const samples = calibrationSamplesRef.current;
+        if (samples.length > 0) {
+          const avg = (key) => samples.reduce((a, s) => a + s[key], 0) / samples.length;
+          baselineRef.current = {
+            browLower: avg('browLower'),
+            eyeAperture: avg('eyeAperture'),
+            noseWidth: avg('noseWidth'),
+            mouthWidth: avg('mouthWidth'),
+            lipGap: avg('lipGap'),
+          };
+          setIsCalibrated(true);
+        }
+        setIsCalibrating(false);
+        resolve(!!baselineRef.current);
+      }, CALIBRATION_MS);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!enabled || isInitializingRef.current) return;
+    isInitializingRef.current = true;
+    let mounted = true;
+    mountedRef.current = true;
+
+    async function init() {
+      try {
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js');
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
+        if (!mounted) return;
+
+        const FaceMesh = window.FaceMesh;
+        const Camera = window.Camera;
+        if (!FaceMesh || !Camera) throw new Error('FaceMesh modules not loaded.');
+
+        const faceMesh = new FaceMesh({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${file}`,
+        });
+        faceMesh.setOptions({
+          maxNumFaces: 1,
+          refineLandmarks: true,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        faceMesh.onResults((r) => mounted && onResults(r));
+        faceMeshRef.current = faceMesh;
+
+        if (videoRef.current) {
+
+  const waitForVideo = () => {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (
+          videoRef.current &&
+          videoRef.current.srcObject &&
+          videoRef.current.readyState >= 2
+        ) {
+          resolve();
+        } else {
+          requestAnimationFrame(check);
+        }
+      };
+
+      check();
+    });
+  };
+
+  await waitForVideo();
+
+  const loop = async () => {
+    if (!mounted || !faceMeshRef.current || !videoRef.current) return;
+
+    if (videoRef.current.readyState >= 2) {
+      try {
+        await faceMeshRef.current.send({
+          image: videoRef.current
+        });
+      } catch (err) {
+        console.warn("FaceMesh send error", err);
+      }
+    }
+
+    requestAnimationFrame(loop);
+  };
+
+  loop();
+}
+        setIsLoading(false);
+      } catch (err) {
+        console.error('[useFacialPainDetection] Error:', err);
+        setError(err.message || 'Failed to initialize facial pain detection.');
+        setIsLoading(false);
+      }
+    }
+
+    init();
+
+    return () => {
+      mounted = false;
+      mountedRef.current = false;
+      isInitializingRef.current = false;
+      try {
+        if (cameraRef.current) cameraRef.current.stop();
+        if (faceMeshRef.current) faceMeshRef.current.close();
+      } catch (_) {}
+    };
+  }, [enabled, loadScript, onResults, videoRef]);
+
+  return {
+    videoRef,
+    isLoading,
+    error,
+    isFaceDetected,
+    paps,
+    isCalibrating,
+    isCalibrated,
+    calibrate,
+  };
+}
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useGameEngine.js
+==================================================
+import { useState, useEffect, useCallback, useRef } from 'react';
+
+export const GAME_STATES = {
+  IDLE: 'idle',
+  COUNTDOWN: 'countdown',
+  PLAYING: 'playing',
+  PAUSED: 'paused',
+  COMPLETED: 'completed',
+};
+
+export const useGameEngine = ({
+  gameId = 'game',
+  duration = 60,
+  onComplete = null,
+} = {}) => {
+  const [state, setState] = useState(GAME_STATES.IDLE);
+  const [score, setScore] = useState(0);
+  const [timeRemaining, setTimeRemaining] = useState(duration);
+  const [countdown, setCountdown] = useState(3);
+  const [isCalibrated, setIsCalibrated] = useState(false);
+  const [attempts, setAttempts] = useState(0);
+  const [successes, setSuccesses] = useState(0);
+  const [misses, setMisses] = useState(0);
+  const [reactionTimes, setReactionTimes] = useState([]);
+  const [romValues, setRomValues] = useState([]);
+  const timerRef = useRef(null);
+  const countdownRef = useRef(null);
+
+  // Add score
+  const addScore = useCallback((points) => {
+    setScore((prev) => prev + points);
+  }, []);
+
+  // Record attempt
+  const recordAttempt = useCallback((success, rom = null, reactionTime = null) => {
+    setAttempts((prev) => prev + 1);
+    if (success) {
+      setSuccesses((prev) => prev + 1);
+    } else {
+      setMisses((prev) => prev + 1);
+    }
+    if (rom !== null) {
+      setRomValues((prev) => [...prev, rom]);
+    }
+    if (reactionTime !== null) {
+      setReactionTimes((prev) => [...prev, reactionTime]);
+    }
+  }, []);
+
+  // Complete calibration
+  const completeCalibration = useCallback(() => {
+    setIsCalibrated(true);
+  }, []);
+
+  // Start countdown
+  const startCountdown = useCallback(() => {
+    setState(GAME_STATES.COUNTDOWN);
+    setCountdown(3);
+
+    countdownRef.current = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(countdownRef.current);
+          setState(GAME_STATES.PLAYING);
+          setTimeRemaining(duration);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }, [duration]);
+
+  // Pause game
+  const pauseGame = useCallback(() => {
+    setState(GAME_STATES.PAUSED);
+    if (timerRef.current) clearInterval(timerRef.current);
+  }, []);
+
+  // Resume game
+  const resumeGame = useCallback(() => {
+    setState(GAME_STATES.PLAYING);
+  }, []);
+
+  // Reset game
+  const resetGame = useCallback(() => {
+    setState(GAME_STATES.IDLE);
+    setScore(0);
+    setTimeRemaining(duration);
+    setCountdown(3);
+    setAttempts(0);
+    setSuccesses(0);
+    setMisses(0);
+    setReactionTimes([]);
+    setRomValues([]);
+    setIsCalibrated(false);
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+  }, [duration]);
+
+  // Game timer
+  useEffect(() => {
+    if (state !== GAME_STATES.PLAYING) return;
+
+    timerRef.current = setInterval(() => {
+      setTimeRemaining((prev) => {
+        if (prev <= 1) {
+          clearInterval(timerRef.current);
+          setState(GAME_STATES.COMPLETED);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [state]);
+
+  // Handle game completion
+  useEffect(() => {
+    if (state === GAME_STATES.COMPLETED) {
+      const metrics = {
+        score,
+        accuracy: attempts > 0 ? Math.round((successes / attempts) * 100) : 0,
+        attempts,
+        successes,
+        misses,
+        reactionTimes,
+        romValues,
+        duration,
+      };
+      onComplete?.(metrics);
+    }
+  }, [state, score, attempts, successes, misses, reactionTimes, romValues, duration, onComplete]);
+
+  // Calculate progress
+  const progress = Math.round(((duration - timeRemaining) / duration) * 100);
+
+  // Calculate metrics
+  const metrics = {
+    score,
+    accuracy: attempts > 0 ? Math.round((successes / attempts) * 100) : 0,
+    attempts,
+    successes,
+    misses,
+    reactionTimes,
+    romValues,
+    duration,
+  };
+
+  return {
+    state,
+    score,
+    addScore,
+    timeRemaining,
+    progress,
+    metrics,
+    isCalibrated,
+    countdown,
+    startCountdown,
+    pauseGame,
+    resumeGame,
+    resetGame,
+    recordAttempt,
+    completeCalibration,
+  };
+};
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useHandTracking.js
+==================================================
+import { useEffect, useRef, useState, useCallback } from 'react'
+
+export function useHandTracking({ onHandResult, enabled = true, maxHands = 1, videoRef: externalVideoRef } = {}) {
+  const internalVideoRef = useRef(null)
+  const videoRef = externalVideoRef || internalVideoRef
+  const canvasRef = useRef(null)
+  const handsRef = useRef(null)
+  const cameraRef = useRef(null)
+  const isInitializingRef = useRef(false)
+
+  const [isLoading, setIsLoading] = useState(true)
+  const [isActive, setIsActive] = useState(false)
+  const [error, setError] = useState(null)
+  const [landmarks, setLandmarks] = useState(null)
+  const [gesture, setGesture] = useState('none')
+  const [swipeData, setSwipeData] = useState({ direction: 'none', velocity: 0 })
+  const [stats, setStats] = useState({ frames: 0, handsDetected: 0, cameraActive: false, videoReadyState: 0 })
+
+  const lastPosRef = useRef({ x: 0, y: 0, time: 0 })
+  const frameCountRef = useRef(0)
+
+  const detectGesture = useCallback((handLandmarks) => {
+    if (!handLandmarks || handLandmarks.length === 0) return 'none'
+    const lm = handLandmarks[0]
+    const isExtended = (tip, pip) => tip.y < pip.y
+    const indexExtended = isExtended(lm[8], lm[6])
+    const middleExtended = isExtended(lm[12], lm[10])
+    const ringExtended = isExtended(lm[16], lm[14])
+    const pinkyExtended = isExtended(lm[20], lm[18])
+    if (indexExtended && middleExtended && ringExtended && pinkyExtended) return 'open_hand'
+    if (!indexExtended && !middleExtended && !ringExtended && !pinkyExtended) return 'fist'
+    if (indexExtended && !middleExtended && !ringExtended && !pinkyExtended) return 'point'
+    const dist = Math.sqrt(Math.pow(lm[8].x - lm[4].x, 2) + Math.pow(lm[8].y - lm[4].y, 2))
+    if (dist < 0.05) return 'pinch'
+    return 'none'
+  }, [])
+
+  const detectSwipe = useCallback((handLandmarks) => {
+    if (!handLandmarks || handLandmarks.length === 0) return null
+    // Use index fingertip (8) for swipe detection — more stable than nested indexing
+    const lm = handLandmarks[0] && handLandmarks[0][8] ? handLandmarks[0][8] : null
+    const now = performance.now()
+    const dt = now - lastPosRef.current.time
+    if (dt > 50) {
+      if (!lm) return null
+      const dx = lm.x - lastPosRef.current.x
+      const velocity = Math.abs(dx) / dt
+      let direction = 'none'
+      if (velocity > 0.002) {
+        direction = dx > 0 ? 'swipe_right' : 'swipe_left'
+      }
+      lastPosRef.current = { x: lm.x, y: lm.y, time: now }
+      return { direction, velocity }
+    }
+    return null
+  }, [])
+
+  const onResults = useCallback((results) => {
+    frameCountRef.current++
+    const canvas = canvasRef.current
+    const video = videoRef.current
+    if (frameCountRef.current % 30 === 0) {
+      setStats({ 
+        frames: frameCountRef.current, 
+        handsDetected: results.multiHandLandmarks?.length || 0,
+        cameraActive: !!video?.srcObject,
+        videoReadyState: video?.readyState || 0
+      })
+    }
+    if (canvas && video) {
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth || 640
+        canvas.height = video.videoHeight || 480
+      }
+      const ctx = canvas.getContext('2d')
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        setLandmarks(results.multiHandLandmarks)
+        setGesture(detectGesture(results.multiHandLandmarks))
+        const s = detectSwipe(results.multiHandLandmarks)
+        if (s) setSwipeData(s)
+        if (onHandResult) onHandResult(results)
+        results.multiHandLandmarks.forEach(hand => {
+          ctx.fillStyle = '#2dd4bf'
+          ctx.strokeStyle = 'white'
+          ctx.lineWidth = 2
+          hand.forEach(point => {
+            ctx.beginPath()
+            ctx.arc(point.x * canvas.width, point.y * canvas.height, 4, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.stroke()
+          })
+          const connections = [[0,1,2,3,4], [0,5,6,7,8], [5,9,10,11,12], [9,13,14,15,16], [13,17,18,19,20], [0,17]]
+          ctx.strokeStyle = '#2dd4bf'
+          ctx.lineWidth = 2
+          connections.forEach(path => {
+            ctx.beginPath()
+            ctx.moveTo(hand[path[0]].x * canvas.width, hand[path[0]].y * canvas.height)
+            path.slice(1).forEach(idx => ctx.lineTo(hand[idx].x * canvas.width, hand[idx].y * canvas.height))
+            ctx.stroke()
+          })
+        })
+      } else {
+        setLandmarks(null)
+        setGesture('none')
+      }
+    }
+  }, [detectGesture, detectSwipe, onHandResult])
+
+  useEffect(() => {
+    if (!enabled || isInitializingRef.current) return
+    isInitializingRef.current = true
+    let mounted = true
+
+    async function init() {
+      try {
+        const [handsModule, cameraModule] = await Promise.all([
+          import('@mediapipe/hands'),
+          import('@mediapipe/camera_utils')
+        ])
+        
+        const HandsClass = handsModule.Hands || (window.Hands) || (handsModule.default ? handsModule.default.Hands : null)
+        const CameraClass = cameraModule.Camera || (window.Camera) || (cameraModule.default ? cameraModule.default.Camera : null)
+
+        if (!HandsClass) throw new Error("Hands constructor not found")
+        if (!CameraClass) throw new Error("Camera constructor not found")
+
+        const hands = new HandsClass({ 
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` 
+        })
+        
+        hands.setOptions({ 
+          maxNumHands: maxHands, 
+          modelComplexity: 1, 
+          minDetectionConfidence: 0.35,
+          minTrackingConfidence: 0.35,
+          selfieMode: true 
+        })
+        
+        hands.onResults((results) => {
+          if (mounted) onResults(results)
+        })
+        handsRef.current = hands
+
+        if (videoRef.current) {
+          const camera = new CameraClass(videoRef.current, {
+            onFrame: async () => {
+              if (mounted && handsRef.current && videoRef.current) {
+                await handsRef.current.send({ image: videoRef.current })
+              }
+            },
+            width: 640,
+            height: 480
+          })
+          await camera.start()
+          cameraRef.current = camera
+          setIsActive(true)
+        }
+        setIsLoading(false)
+      } catch (err) {
+        console.error("[HandTracking] Error:", err)
+        setError(err.message)
+        setIsLoading(false)
+      }
+    }
+
+    init()
+
+    return () => {
+      mounted = false
+      isInitializingRef.current = false
+      if (cameraRef.current) {
+        try { cameraRef.current.stop() } catch (_) {}
+      }
+      if (handsRef.current) {
+        try { handsRef.current.close() } catch (_) {}
+      }
+      // Stop video tracks if we created/owned the stream
+      try {
+        if (videoRef.current?.srcObject) {
+          videoRef.current.srcObject.getTracks().forEach((t) => t.stop())
+          videoRef.current.srcObject = null
+        }
+      } catch (_) {}
+    }
+  }, [enabled, maxHands, onResults])
+
+  return { videoRef, canvasRef, isLoading, isActive, error, landmarks, gesture, swipeData, stats }
+}
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useMediaPipeHands.js
+==================================================
+import { useEffect, useRef, useCallback, useState } from 'react';
+
+export const HAND_LANDMARKS = {
+  WRIST: 0,
+  THUMB_CMC: 1,
+  THUMB_MCP: 2,
+  THUMB_IP: 3,
+  THUMB_TIP: 4,
+  INDEX_FINGER_MCP: 5,
+  INDEX_FINGER_PIP: 6,
+  INDEX_FINGER_DIP: 7,
+  INDEX_FINGER_TIP: 8,
+  MIDDLE_FINGER_MCP: 9,
+  MIDDLE_FINGER_PIP: 10,
+  MIDDLE_FINGER_DIP: 11,
+  MIDDLE_FINGER_TIP: 12,
+  RING_FINGER_MCP: 13,
+  RING_FINGER_PIP: 14,
+  RING_FINGER_DIP: 15,
+  RING_FINGER_TIP: 16,
+  PINKY_MCP: 17,
+  PINKY_PIP: 18,
+  PINKY_DIP: 19,
+  PINKY_TIP: 20,
+};
+
+export const useMediaPipeHands = ({
+  enabled = true,
+  onHandsUpdate = null,
+} = {}) => {
+  const videoRef = useRef(null);
+  const handsRef = useRef(null);
+  const [landmarks, setLandmarks] = useState([]);
+  const [gesture, setGesture] = useState('none');
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // Detect gesture from landmarks
+  const detectGesture = useCallback((lms) => {
+    if (!lms || lms.length === 0) return 'none';
+
+    const wrist = lms[HAND_LANDMARKS.WRIST];
+    const thumbTip = lms[HAND_LANDMARKS.THUMB_TIP];
+    const indexTip = lms[HAND_LANDMARKS.INDEX_FINGER_TIP];
+    const middleTip = lms[HAND_LANDMARKS.MIDDLE_FINGER_TIP];
+    const ringTip = lms[HAND_LANDMARKS.RING_FINGER_TIP];
+    const pinkyTip = lms[HAND_LANDMARKS.PINKY_TIP];
+
+    // Calculate distances
+    const indexDist = Math.sqrt(Math.pow(indexTip.x - wrist.x, 2) + Math.pow(indexTip.y - wrist.y, 2));
+    const middleDist = Math.sqrt(Math.pow(middleTip.x - wrist.x, 2) + Math.pow(middleTip.y - wrist.y, 2));
+    const ringDist = Math.sqrt(Math.pow(ringTip.x - wrist.x, 2) + Math.pow(ringTip.y - wrist.y, 2));
+    const pinkyDist = Math.sqrt(Math.pow(pinkyTip.x - wrist.x, 2) + Math.pow(pinkyTip.y - wrist.y, 2));
+
+    // Closed fist: all fingers close to wrist
+    if (indexDist < 0.1 && middleDist < 0.1 && ringDist < 0.1 && pinkyDist < 0.1) {
+      return 'fist';
+    }
+
+    // Open hand: all fingers far from wrist
+    if (indexDist > 0.15 && middleDist > 0.15 && ringDist > 0.15 && pinkyDist > 0.15) {
+      return 'open';
+    }
+
+    // Peace sign: index and middle far, others close
+    if (indexDist > 0.15 && middleDist > 0.15 && ringDist < 0.1 && pinkyDist < 0.1) {
+      return 'peace';
+    }
+
+    // Thumbs up: thumb far up, others close
+    if (thumbTip.y < wrist.y - 0.1 && indexDist < 0.1 && middleDist < 0.1) {
+      return 'thumbs_up';
+    }
+
+    return 'closed';
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    const initHands = async () => {
+      try {
+        // Simulate hand detection with mock data
+        // In production, integrate actual MediaPipe Hands
+        setIsLoading(false);
+
+        // Mock hand detection loop
+        const mockHandDetection = setInterval(() => {
+          if (videoRef.current) {
+            // Generate mock landmarks
+            const mockLandmarks = Array.from({ length: 21 }, (_, i) => ({
+              x: Math.random(),
+              y: Math.random(),
+              z: 0,
+              visibility: 0.9,
+            }));
+
+            setLandmarks([mockLandmarks]);
+            const detectedGesture = detectGesture(mockLandmarks);
+            setGesture(detectedGesture);
+
+            onHandsUpdate?.({
+              landmarks: [mockLandmarks],
+              gesture: detectedGesture,
+            });
+          }
+        }, 100);
+
+        return () => clearInterval(mockHandDetection);
+      } catch (err) {
+        console.error('Failed to initialize hand detection:', err);
+        setError('Failed to initialize hand detection');
+        setIsLoading(false);
+      }
+    };
+
+    const cleanup = initHands();
+    return () => {
+      cleanup?.then((fn) => fn?.());
+    };
+  }, [enabled, onHandsUpdate, detectGesture]);
+
+  return {
+    videoRef,
+    landmarks,
+    gesture,
+    isLoading,
+    error,
+  };
+};
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useMediaPipePose.js
+==================================================
+import { useEffect, useRef, useCallback, useState } from 'react';
+
+export const POSE_LANDMARKS = {
+  NOSE: 0,
+  LEFT_EYE_INNER: 1,
+  LEFT_EYE: 2,
+  LEFT_EYE_OUTER: 3,
+  RIGHT_EYE_INNER: 4,
+  RIGHT_EYE: 5,
+  RIGHT_EYE_OUTER: 6,
+  LEFT_EAR: 7,
+  RIGHT_EAR: 8,
+  MOUTH_LEFT: 9,
+  MOUTH_RIGHT: 10,
+  LEFT_SHOULDER: 11,
+  RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13,
+  RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15,
+  RIGHT_WRIST: 16,
+  LEFT_PINKY: 17,
+  RIGHT_PINKY: 18,
+  LEFT_INDEX: 19,
+  RIGHT_INDEX: 20,
+  LEFT_THUMB: 21,
+  RIGHT_THUMB: 22,
+  LEFT_HIP: 23,
+  RIGHT_HIP: 24,
+  LEFT_KNEE: 25,
+  RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27,
+  RIGHT_ANKLE: 28,
+  LEFT_HEEL: 29,
+  RIGHT_HEEL: 30,
+  LEFT_FOOT_INDEX: 31,
+  RIGHT_FOOT_INDEX: 32,
+};
+
+export const calculateDistance = (p1, p2) => {
+  const dx = p1.x - p2.x;
+  const dy = p1.y - p2.y;
+  return Math.sqrt(dx * dx + dy * dy);
+};
+
+export const calculateAngle = (p1, p2, p3) => {
+  const v1 = { x: p1.x - p2.x, y: p1.y - p2.y };
+  const v2 = { x: p3.x - p2.x, y: p3.y - p2.y };
+  const dot = v1.x * v2.x + v1.y * v2.y;
+  const det = v1.x * v2.y - v1.y * v2.x;
+  const angle = Math.atan2(det, dot);
+  return (angle * 180) / Math.PI;
+};
+
+export const useMediaPipePose = ({
+  enabled = true,
+  onPoseUpdate = null,
+} = {}) => {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const poseRef = useRef(null);
+  const [keypoints, setKeypoints] = useState({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const calibrate = useCallback(async () => {
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        resolve({ timestamp: Date.now() });
+      }, 1000);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    const initPose = async () => {
+      try {
+        // Request camera access
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480 },
+          audio: false,
+        });
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+
+          // Generate mock pose data for demonstration
+          const mockPoseDetection = setInterval(() => {
+            const kpts = {
+              nose: {
+                x: Math.random(),
+                y: Math.random(),
+                visibility: 0.9,
+                visible: true,
+              },
+              leftShoulder: {
+                x: 0.3 + Math.random() * 0.1,
+                y: 0.4 + Math.random() * 0.1,
+                visibility: 0.95,
+                visible: true,
+              },
+              rightShoulder: {
+                x: 0.7 + Math.random() * 0.1,
+                y: 0.4 + Math.random() * 0.1,
+                visibility: 0.95,
+                visible: true,
+              },
+              leftElbow: {
+                x: 0.25 + Math.random() * 0.1,
+                y: 0.6 + Math.random() * 0.1,
+                visibility: 0.9,
+                visible: true,
+              },
+              rightElbow: {
+                x: 0.75 + Math.random() * 0.1,
+                y: 0.6 + Math.random() * 0.1,
+                visibility: 0.9,
+                visible: true,
+              },
+              leftWrist: {
+                x: 0.2 + Math.random() * 0.15,
+                y: 0.8 + Math.random() * 0.1,
+                visibility: 0.85,
+                visible: true,
+              },
+              rightWrist: {
+                x: 0.8 + Math.random() * 0.15,
+                y: 0.8 + Math.random() * 0.1,
+                visibility: 0.85,
+                visible: true,
+              },
+              leftHip: {
+                x: 0.35,
+                y: 0.85,
+                visibility: 0.95,
+                visible: true,
+              },
+              rightHip: {
+                x: 0.65,
+                y: 0.85,
+                visibility: 0.95,
+                visible: true,
+              },
+              leftKnee: {
+                x: 0.35,
+                y: 1.0,
+                visibility: 0.9,
+                visible: true,
+              },
+              rightKnee: {
+                x: 0.65,
+                y: 1.0,
+                visibility: 0.9,
+                visible: true,
+              },
+            };
+
+            setKeypoints(kpts);
+            onPoseUpdate?.(kpts, []);
+          }, 100);
+
+          setIsLoading(false);
+          return () => clearInterval(mockPoseDetection);
+        }
+      } catch (err) {
+        console.error('Failed to initialize pose detection:', err);
+        setError('Camera access denied or not available');
+        setIsLoading(false);
+      }
+    };
+
+    const cleanup = initPose();
+    return () => {
+      cleanup?.then((fn) => fn?.());
+    };
+  }, [enabled, onPoseUpdate]);
+
+  return {
+    videoRef,
+    canvasRef,
+    keypoints,
+    isLoading,
+    error,
+    calibrate,
+  };
+};
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useMediaPipeUpperBody.js
+==================================================
+// frontend/src/hooks/useMediaPipeHands.js
+import { useEffect, useRef, useState, useCallback } from 'react';
+
+export const HAND_LANDMARKS = {
+  WRIST: 0,
+  THUMB_CMC: 1,
+  THUMB_MCP: 2,
+  THUMB_IP: 3,
+  THUMB_TIP: 4,
+  INDEX_FINGER_MCP: 5,
+  INDEX_FINGER_PIP: 6,
+  INDEX_FINGER_DIP: 7,
+  INDEX_FINGER_TIP: 8,
+  MIDDLE_FINGER_MCP: 9,
+  MIDDLE_FINGER_PIP: 10,
+  MIDDLE_FINGER_DIP: 11,
+  MIDDLE_FINGER_TIP: 12,
+  RING_FINGER_MCP: 13,
+  RING_FINGER_PIP: 14,
+  RING_FINGER_DIP: 15,
+  RING_FINGER_TIP: 16,
+  PINKY_MCP: 17,
+  PINKY_PIP: 18,
+  PINKY_DIP: 19,
+  PINKY_TIP: 20,
+};
+
+export function useMediaPipeHands({
+  enabled = true,
+  onHandsUpdate,
+  onError,
+  maxNumHands = 1,
+  modelComplexity = 1,
+  minDetectionConfidence = 0.5,
+  minTrackingConfidence = 0.5,
+  videoRef: externalVideoRef,
+} = {}) {
+  const internalVideoRef = useRef(null);
+  const videoRef = externalVideoRef || internalVideoRef;
+  const handsRef = useRef(null);
+  const cameraRef = useRef(null);
+  const mountedRef = useRef(true);
+  const isInitializedRef = useRef(false);
+
+  const [isLoading, setIsLoading] = useState(true);
+  const [isActive, setIsActive] = useState(false);
+  const [error, setError] = useState(null);
+  const [landmarks, setLandmarks] = useState(null);
+  const [handedness, setHandedness] = useState(null);
+  const [gesture, setGesture] = useState('none');
+
+  const loadScript = useCallback((src) => {
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector(`script[src="${src}"]`);
+      if (existing) {
+        resolve();
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src;
+      script.crossOrigin = 'anonymous';
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error(`Failed to load: ${src}`));
+      document.head.appendChild(script);
+    });
+  }, []);
+
+  const detectGesture = useCallback((lm) => {
+    if (!lm || lm.length === 0) return 'none';
+
+    // Check if fingers are extended
+    const isExtended = (tip, pip) => tip.y < pip.y;
+
+    const thumbTip = lm[HAND_LANDMARKS.THUMB_TIP];
+    const thumbIP = lm[HAND_LANDMARKS.THUMB_IP];
+    const indexTip = lm[HAND_LANDMARKS.INDEX_FINGER_TIP];
+    const indexPIP = lm[HAND_LANDMARKS.INDEX_FINGER_PIP];
+    const middleTip = lm[HAND_LANDMARKS.MIDDLE_FINGER_TIP];
+    const middlePIP = lm[HAND_LANDMARKS.MIDDLE_FINGER_PIP];
+    const ringTip = lm[HAND_LANDMARKS.RING_FINGER_TIP];
+    const ringPIP = lm[HAND_LANDMARKS.RING_FINGER_PIP];
+    const pinkyTip = lm[HAND_LANDMARKS.PINKY_TIP];
+    const pinkyPIP = lm[HAND_LANDMARKS.PINKY_PIP];
+
+    const thumbExtended = thumbTip.x < thumbIP.x;
+    const indexExtended = isExtended(indexTip, indexPIP);
+    const middleExtended = isExtended(middleTip, middlePIP);
+    const ringExtended = isExtended(ringTip, ringPIP);
+    const pinkyExtended = isExtended(pinkyTip, pinkyPIP);
+
+    // Open hand: all fingers extended
+    if (indexExtended && middleExtended && ringExtended && pinkyExtended && thumbExtended) {
+      return 'open';
+    }
+
+    // Fist: all fingers closed
+    if (!indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+      return 'fist';
+    }
+
+    // Point: only index extended
+    if (indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+      return 'point';
+    }
+
+    // Peace: index and middle extended
+    if (indexExtended && middleExtended && !ringExtended && !pinkyExtended) {
+      return 'peace';
+    }
+
+    // Thumbs up
+    if (thumbExtended && !indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+      return 'thumbs_up';
+    }
+
+    // Pinch: thumb and index close together
+    const thumbIndexDist = Math.sqrt(
+      Math.pow(thumbTip.x - indexTip.x, 2) +
+      Math.pow(thumbTip.y - indexTip.y, 2)
+    );
+    if (thumbIndexDist < 0.05) {
+      return 'pinch';
+    }
+
+    return 'none';
+  }, []);
+
+  const detectSwipe = useCallback((prevPos, currPos, dt) => {
+    if (!prevPos || !currPos || dt === 0) return null;
+    const dx = currPos.x - prevPos.x;
+    const dy = currPos.y - prevPos.y;
+    const velocity = Math.sqrt(dx * dx + dy * dy) / dt;
+
+    if (velocity < 0.5) return null; // Too slow to be a swipe
+
+    // Determine direction
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+
+    if (absDx > absDy * 1.5) {
+      return dx > 0 ? 'right' : 'left';
+    } else if (absDy > absDx * 1.5) {
+      return dy > 0 ? 'down' : 'up';
+    }
+    return null;
+  }, []);
+
+  const initCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: 'user',
+        },
+      });
+
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      return stream;
+    } catch (err) {
+      console.error('[useMediaPipeHands] Camera error:', err);
+      setError(err.message || 'Camera access denied');
+      onError?.(err);
+      return null;
+    }
+  }, [videoRef, onError]);
+
+  const setupHands = useCallback(async () => {
+    try {
+      await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js');
+      await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
+
+      if (!mountedRef.current) return;
+
+      const Hands = window.Hands;
+      const Camera = window.Camera;
+
+      if (!Hands || !Camera) {
+        throw new Error('MediaPipe Hands modules not loaded.');
+      }
+
+      const hands = new Hands({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
+      });
+
+      hands.setOptions({
+        maxNumHands,
+        modelComplexity,
+        minDetectionConfidence,
+        minTrackingConfidence,
+        selfieMode: true,
+      });
+
+      let prevWristPos = null;
+      let lastTime = Date.now();
+
+      hands.onResults((results) => {
+        if (!mountedRef.current) return;
+
+        const multiHandLandmarks = results.multiHandLandmarks;
+        const multiHandedness = results.multiHandedness;
+
+        if (multiHandLandmarks && multiHandLandmarks.length > 0) {
+          const lm = multiHandLandmarks[0];
+          setLandmarks(lm);
+
+          // Detect gesture
+          const gestureResult = detectGesture(lm);
+          setGesture(gestureResult);
+
+          // Detect swipe
+          const wrist = lm[HAND_LANDMARKS.WRIST];
+          const now = Date.now();
+          const dt = (now - lastTime) / 1000;
+
+          if (prevWristPos) {
+            const swipeDir = detectSwipe(prevWristPos, wrist, dt);
+            if (swipeDir) {
+              onHandsUpdate?.({ gesture: gestureResult, swipe: swipeDir, landmarks: lm });
+            }
+          }
+
+          prevWristPos = { x: wrist.x, y: wrist.y };
+          lastTime = now;
+
+          // Set handedness
+          if (multiHandedness && multiHandedness.length > 0) {
+            setHandedness(multiHandedness[0].label);
+          }
+
+          onHandsUpdate?.({ gesture: gestureResult, landmarks: lm, handedness: multiHandedness?.[0]?.label });
+        } else {
+          setLandmarks(null);
+          setGesture('none');
+        }
+      });
+
+      handsRef.current = hands;
+
+      if (videoRef.current) {
+        const camera = new Camera(videoRef.current, {
+          onFrame: async () => {
+            if (!mountedRef.current || !handsRef.current || !videoRef.current) return;
+            try {
+              await handsRef.current.send({ image: videoRef.current });
+            } catch (_) {
+              // Silently handle frame drops
+            }
+          },
+          width: 640,
+          height: 480,
+        });
+
+        await camera.start();
+        cameraRef.current = camera;
+        setIsActive(true);
+      }
+
+      setIsLoading(false);
+      return true;
+    } catch (err) {
+      console.error('[useMediaPipeHands] Setup error:', err);
+      setError(err.message || 'Failed to initialize hand tracking');
+      onError?.(err);
+      setIsLoading(false);
+      return false;
+    }
+  }, [loadScript, maxNumHands, modelComplexity, minDetectionConfidence, minTrackingConfidence, videoRef, onError, detectGesture, detectSwipe, onHandsUpdate]);
+
+  useEffect(() => {
+    if (!enabled || isInitializedRef.current) return;
+    isInitializedRef.current = true;
+
+    const init = async () => {
+      await initCamera();
+      await setupHands();
+    };
+
+    init();
+
+    return () => {
+      mountedRef.current = false;
+      isInitializedRef.current = false;
+      if (cameraRef.current) {
+        try { cameraRef.current.stop(); } catch (_) {}
+      }
+      if (handsRef.current) {
+        try { handsRef.current.close(); } catch (_) {}
+      }
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+        videoRef.current.srcObject = null;
+      }
+    };
+  }, [enabled, initCamera, setupHands]);
+
+  return {
+    videoRef,
+    isLoading,
+    isActive,
+    error,
+    landmarks,
+    handedness,
+    gesture,
+    getLandmark: (idx) => landmarks?.[idx] || null,
+  };
+}
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\usePAPSScore.js
+==================================================
+// src/hooks/usePAPSScore.js
+// PAPS (0-10 facial pain score) hook
+
+import { useMemo } from 'react';
+import { useFacialPainDetection } from './useFacialPainDetection';
+
+const PAPS_BANDS = {
+  MILD_MAX: 3,
+  MODERATE_MAX: 6,
+};
+
+export function bandForPAPS(score) {
+  if (score > PAPS_BANDS.MODERATE_MAX) return 'severe';
+  if (score > PAPS_BANDS.MILD_MAX) return 'moderate';
+  return 'mild';
+}
+
+export function usePAPSScore({ enabled = true, videoRef, onPAPSUpdate } = {}) {
+  const face = useFacialPainDetection({ enabled, videoRef, onPAPSUpdate });
+
+  return useMemo(() => ({
+    videoRef: face.videoRef,
+    isLoading: face.isLoading,
+    error: face.error,
+    isFaceDetected: face.isFaceDetected,
+    paps: face.paps,
+    band: bandForPAPS(face.paps),
+    isCalibrating: face.isCalibrating,
+    isCalibrated: face.isCalibrated,
+    calibrate: face.calibrate,
+  }), [face]);
+}
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\usePoseDetection.js
+==================================================
+// frontend/src/hooks/useMediaPipePose.js
+import { useEffect, useRef, useState, useCallback } from 'react';
+
+export const POSE_LANDMARKS = {
+  NOSE: 0,
+  LEFT_EYE_INNER: 1,
+  LEFT_EYE: 2,
+  LEFT_EYE_OUTER: 3,
+  RIGHT_EYE_INNER: 4,
+  RIGHT_EYE: 5,
+  RIGHT_EYE_OUTER: 6,
+  LEFT_EAR: 7,
+  RIGHT_EAR: 8,
+  MOUTH_LEFT: 9,
+  MOUTH_RIGHT: 10,
+  LEFT_SHOULDER: 11,
+  RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13,
+  RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15,
+  RIGHT_WRIST: 16,
+  LEFT_PINKY: 17,
+  RIGHT_PINKY: 18,
+  LEFT_INDEX: 19,
+  RIGHT_INDEX: 20,
+  LEFT_THUMB: 21,
+  RIGHT_THUMB: 22,
+  LEFT_HIP: 23,
+  RIGHT_HIP: 24,
+  LEFT_KNEE: 25,
+  RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27,
+  RIGHT_ANKLE: 28,
+  LEFT_HEEL: 29,
+  RIGHT_HEEL: 30,
+  LEFT_FOOT_INDEX: 31,
+  RIGHT_FOOT_INDEX: 32,
+};
+
+export function useMediaPipePose({
+  enabled = true,
+  onPoseUpdate,
+  onError,
+  modelComplexity = 1,
+  smoothLandmarks = true,
+  minDetectionConfidence = 0.5,
+  minTrackingConfidence = 0.5,
+  videoRef: externalVideoRef,
+} = {}) {
+  const internalVideoRef = useRef(null);
+  const videoRef = externalVideoRef || internalVideoRef;
+  const poseRef = useRef(null);
+  const cameraRef = useRef(null);
+  const mountedRef = useRef(true);
+  const isInitializedRef = useRef(false);
+
+  const [isLoading, setIsLoading] = useState(true);
+  const [isActive, setIsActive] = useState(false);
+  const [error, setError] = useState(null);
+  const [landmarks, setLandmarks] = useState(null);
+  const [keypoints, setKeypoints] = useState(null);
+
+  const loadScript = useCallback((src) => {
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector(`script[src="${src}"]`);
+      if (existing) {
+        resolve();
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src;
+      script.crossOrigin = 'anonymous';
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error(`Failed to load: ${src}`));
+      document.head.appendChild(script);
+    });
+  }, []);
+
+  const initCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: 'user',
+        },
+      });
+
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      return stream;
+    } catch (err) {
+      console.error('[useMediaPipePose] Camera error:', err);
+      setError(err.message || 'Camera access denied');
+      onError?.(err);
+      return null;
+    }
+  }, [videoRef, onError]);
+
+  const setupPose = useCallback(async () => {
+    try {
+      await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js');
+      await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
+
+      if (!mountedRef.current) return;
+
+      const Pose = window.Pose;
+      const Camera = window.Camera;
+
+      if (!Pose || !Camera) {
+        throw new Error('MediaPipe Pose modules not loaded.');
+      }
+
+      const pose = new Pose({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${file}`,
+      });
+
+      pose.setOptions({
+        modelComplexity,
+        smoothLandmarks,
+        minDetectionConfidence,
+        minTrackingConfidence,
+        selfieMode: true,
+      });
+
+      pose.onResults((results) => {
+        if (!mountedRef.current) return;
+        if (results.poseLandmarks) {
+          const lm = results.poseLandmarks;
+          setLandmarks(lm);
+          const kp = extractKeypoints(lm, videoRef.current);
+          setKeypoints(kp);
+          onPoseUpdate?.(kp, lm);
+        }
+      });
+
+      poseRef.current = pose;
+
+      // Start camera if we have a video element
+      if (videoRef.current) {
+        const camera = new Camera(videoRef.current, {
+          onFrame: async () => {
+            if (!mountedRef.current || !poseRef.current || !videoRef.current) return;
+            try {
+              await poseRef.current.send({ image: videoRef.current });
+            } catch (_) {
+              // Silently handle frame drops
+            }
+          },
+          width: 640,
+          height: 480,
+        });
+
+        await camera.start();
+        cameraRef.current = camera;
+        setIsActive(true);
+      }
+
+      setIsLoading(false);
+      return true;
+    } catch (err) {
+      console.error('[useMediaPipePose] Setup error:', err);
+      setError(err.message || 'Failed to initialize pose tracking');
+      onError?.(err);
+      setIsLoading(false);
+      return false;
+    }
+  }, [loadScript, modelComplexity, smoothLandmarks, minDetectionConfidence, minTrackingConfidence, videoRef, onError]);
+
+  const extractKeypoints = useCallback((lm, video) => {
+    const w = video?.videoWidth || 640;
+    const h = video?.videoHeight || 480;
+
+    const toPx = (idx) => {
+      if (!lm[idx]) return null;
+      return {
+        x: (1 - lm[idx].x) * w,
+        y: lm[idx].y * h,
+        z: lm[idx].z,
+        visibility: lm[idx].visibility || 1,
+        visible: (lm[idx].visibility || 1) > 0.4,
+      };
+    };
+
+    return {
+      nose: toPx(POSE_LANDMARKS.NOSE),
+      leftEye: toPx(POSE_LANDMARKS.LEFT_EYE),
+      rightEye: toPx(POSE_LANDMARKS.RIGHT_EYE),
+      leftShoulder: toPx(POSE_LANDMARKS.LEFT_SHOULDER),
+      rightShoulder: toPx(POSE_LANDMARKS.RIGHT_SHOULDER),
+      leftElbow: toPx(POSE_LANDMARKS.LEFT_ELBOW),
+      rightElbow: toPx(POSE_LANDMARKS.RIGHT_ELBOW),
+      leftWrist: toPx(POSE_LANDMARKS.LEFT_WRIST),
+      rightWrist: toPx(POSE_LANDMARKS.RIGHT_WRIST),
+      leftHip: toPx(POSE_LANDMARKS.LEFT_HIP),
+      rightHip: toPx(POSE_LANDMARKS.RIGHT_HIP),
+      leftKnee: toPx(POSE_LANDMARKS.LEFT_KNEE),
+      rightKnee: toPx(POSE_LANDMARKS.RIGHT_KNEE),
+      leftAnkle: toPx(POSE_LANDMARKS.LEFT_ANKLE),
+      rightAnkle: toPx(POSE_LANDMARKS.RIGHT_ANKLE),
+    };
+  }, []);
+
+  const calibrate = useCallback(() => {
+    return new Promise((resolve) => {
+      // Simple calibration: wait for stable landmarks
+      let samples = [];
+      const maxSamples = 30;
+      const checkInterval = setInterval(() => {
+        if (keypoints && keypoints.leftShoulder?.visible) {
+          samples.push({
+            leftShoulder: { ...keypoints.leftShoulder },
+            rightShoulder: { ...keypoints.rightShoulder },
+            leftWrist: { ...keypoints.leftWrist },
+            rightWrist: { ...keypoints.rightWrist },
+          });
+          if (samples.length >= maxSamples) {
+            clearInterval(checkInterval);
+            // Average the samples for calibration
+            const avg = (key) => {
+              const values = samples.map((s) => s[key]);
+              return {
+                x: values.reduce((sum, v) => sum + v.x, 0) / values.length,
+                y: values.reduce((sum, v) => sum + v.y, 0) / values.length,
+                z: values.reduce((sum, v) => sum + v.z, 0) / values.length,
+                visibility: values.reduce((sum, v) => sum + v.visibility, 0) / values.length,
+                visible: true,
+              };
+            };
+            resolve({
+              leftShoulder: avg('leftShoulder'),
+              rightShoulder: avg('rightShoulder'),
+              leftWrist: avg('leftWrist'),
+              rightWrist: avg('rightWrist'),
+            });
+          }
+        }
+      }, 100);
+
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        clearInterval(checkInterval);
+        if (samples.length > 5) {
+          // Use whatever samples we have
+          const avg = (key) => {
+            const values = samples.map((s) => s[key]);
+            return {
+              x: values.reduce((sum, v) => sum + v.x, 0) / values.length,
+              y: values.reduce((sum, v) => sum + v.y, 0) / values.length,
+              z: values.reduce((sum, v) => sum + v.z, 0) / values.length,
+              visibility: values.reduce((sum, v) => sum + v.visibility, 0) / values.length,
+              visible: true,
+            };
+          };
+          resolve({
+            leftShoulder: avg('leftShoulder'),
+            rightShoulder: avg('rightShoulder'),
+            leftWrist: avg('leftWrist'),
+            rightWrist: avg('rightWrist'),
+          });
+        } else {
+          resolve(null);
+        }
+      }, 5000);
+    });
+  }, [keypoints]);
+
+  useEffect(() => {
+    if (!enabled || isInitializedRef.current) return;
+    isInitializedRef.current = true;
+
+    const init = async () => {
+      await initCamera();
+      await setupPose();
+    };
+
+    init();
+
+    return () => {
+      mountedRef.current = false;
+      isInitializedRef.current = false;
+      if (cameraRef.current) {
+        try { cameraRef.current.stop(); } catch (_) {}
+      }
+      if (poseRef.current) {
+        try { poseRef.current.close(); } catch (_) {}
+      }
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+        videoRef.current.srcObject = null;
+      }
+    };
+  }, [enabled, initCamera, setupPose]);
+
+  return {
+    videoRef,
+    isLoading,
+    isActive,
+    error,
+    landmarks,
+    keypoints,
+    calibrate,
+    getLandmark: (idx) => landmarks?.[idx] || null,
+    getKeypoint: (name) => keypoints?.[name] || null,
+  };
+}
+
+// Utility functions for pose calculations
+export function calculateAngle(a, b, c) {
+  if (!a || !b || !c) return 0;
+  const radians = Math.atan2(c.y - b.y, c.x - b.x) -
+                  Math.atan2(a.y - b.y, a.x - b.x);
+  let angle = Math.abs((radians * 180.0) / Math.PI);
+  if (angle > 180) angle = 360 - angle;
+  return Math.round(angle);
+}
+
+export function calculateDistance(a, b) {
+  if (!a || !b) return 0;
+  return Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2));
+}
+
+export function calculateVelocity(prev, curr, dt) {
+  if (!prev || !curr || dt === 0) return 0;
+  return calculateDistance(prev, curr) / dt;
+}
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\usePostureGuidance.js
+==================================================
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+const POSE_LANDMARK = {
+  nose: 0,
+  leftEyeInner: 1,
+  leftShoulder: 11,
+  rightShoulder: 12,
+  leftElbow: 13,
+  rightElbow: 14,
+  leftWrist: 15,
+  rightWrist: 16,
+  leftEar: 7,
+  rightEar: 8,
+};
+
+function toDeg(rad) {
+  return (rad * 180) / Math.PI;
+}
+
+function angleBetween(a, b, c) {
+  if (!a || !b || !c) return null;
+  const ab = { x: a.x - b.x, y: a.y - b.y };
+  const cb = { x: c.x - b.x, y: c.y - b.y };
+  const dot = ab.x * cb.x + ab.y * cb.y;
+  const magAB = Math.hypot(ab.x, ab.y);
+  const magCB = Math.hypot(cb.x, cb.y);
+  if (magAB === 0 || magCB === 0) return null;
+  const cos = Math.max(-1, Math.min(1, dot / (magAB * magCB)));
+  return toDeg(Math.acos(cos));
+}
+
+function lineAngleFromHorizontal(a, b) {
+  if (!a || !b) return null;
+  return toDeg(Math.atan2(Math.abs(b.y - a.y), Math.abs(b.x - a.x)));
+}
+
+function computeMetrics(lm) {
+  const L = POSE_LANDMARK;
+  const shoulderMid = lm[L.leftShoulder] && lm[L.rightShoulder]
+    ? { x: (lm[L.leftShoulder].x + lm[L.rightShoulder].x) / 2, y: (lm[L.leftShoulder].y + lm[L.rightShoulder].y) / 2 }
+    : null;
+
+  return {
+    shoulderLevelDeg: lineAngleFromHorizontal(lm[L.leftShoulder], lm[L.rightShoulder]),
+    neckTiltDeg: shoulderMid ? angleBetween(lm[L.nose], shoulderMid, { x: shoulderMid.x, y: shoulderMid.y - 1 }) : null,
+    leftElbowAngleDeg: angleBetween(lm[L.leftShoulder], lm[L.leftElbow], lm[L.leftWrist]),
+    rightElbowAngleDeg: angleBetween(lm[L.rightShoulder], lm[L.rightElbow], lm[L.rightWrist]),
+    leftShoulderElevationDeg: angleBetween(lm[L.leftElbow], lm[L.leftShoulder], lm[L.rightShoulder]),
+    rightShoulderElevationDeg: angleBetween(lm[L.rightElbow], lm[L.rightShoulder], lm[L.leftShoulder]),
+  };
+}
+
+function evaluateRules(metrics, rules) {
+  const results = [];
+  for (const rule of rules) {
+    let value = null;
+    let deviation = 0;
+
+    if (rule.type === 'levelness') {
+      value = metrics.shoulderLevelDeg;
+      deviation = value ?? 0;
+    } else if (rule.type === 'neckTilt') {
+      value = metrics.neckTiltDeg;
+      deviation = value ?? 0;
+    } else if (rule.type === 'elbowAngleMin') {
+      const v = rule.side === 'left' ? metrics.leftElbowAngleDeg : metrics.rightElbowAngleDeg;
+      value = v;
+      deviation = v == null ? 0 : Math.max(0, rule.minDeg - v);
+    }
+
+    if (value == null) continue;
+
+    let status = 'ok';
+    if (rule.severeDeg != null && deviation >= rule.severeDeg) status = 'severe';
+    else if (rule.toleranceDeg != null && deviation >= rule.toleranceDeg) status = 'minor';
+    else if (rule.minDeg != null && deviation > 0) status = deviation > (rule.severeDeg || 20) ? 'severe' : 'minor';
+
+    results.push({ id: rule.id, value, deviation, status, cue: rule.cue });
+  }
+  return results;
+}
+
+export function usePostureGuidance({ enabled = true, videoRef: externalVideoRef, postureRules = [] } = {}) {
+  const internalVideoRef = useRef(null);
+  const videoRef = externalVideoRef || internalVideoRef;
+  const poseRef = useRef(null);
+  const cameraRef = useRef(null);
+  const mountedRef = useRef(true);
+  const isInitializingRef = useRef(false);
+
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [isBodyDetected, setIsBodyDetected] = useState(false);
+  const [keypoints, setKeypoints] = useState(null);
+  const [jointResults, setJointResults] = useState([]);
+  const [overallStatus, setOverallStatus] = useState('ok');
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const [isCalibrated, setIsCalibrated] = useState(false);
+
+  const loadScript = useCallback((src) => {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) return resolve();
+      const s = document.createElement('script');
+      s.src = src;
+      s.crossOrigin = 'anonymous';
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error(`Failed to load: ${src}`));
+      document.head.appendChild(s);
+    });
+  }, []);
+
+  const rulesRef = useRef(postureRules);
+  rulesRef.current = postureRules;
+
+  const onResults = useCallback((results, containerEl) => {
+    if (!mountedRef.current) return;
+    const lm = results.poseLandmarks;
+    if (!lm) {
+      setIsBodyDetected(false);
+      return;
+    }
+    setIsBodyDetected(true);
+
+    const metrics = computeMetrics(lm);
+    const evaluated = evaluateRules(metrics, rulesRef.current);
+    setJointResults(evaluated);
+
+    const hasSevere = evaluated.some((r) => r.status === 'severe');
+    const hasMinor = evaluated.some((r) => r.status === 'minor');
+    setOverallStatus(hasSevere ? 'severe' : hasMinor ? 'minor' : 'ok');
+
+    const w = containerEl?.clientWidth || 640;
+    const h = containerEl?.clientHeight || 480;
+    const L = POSE_LANDMARK;
+    const toPx = (p) => (p ? { x: (1 - p.x) * w, y: p.y * h, visible: (p.visibility ?? 1) > 0.4 } : null);
+
+    setKeypoints({
+      nose: toPx(lm[L.nose]),
+      leftShoulder: toPx(lm[L.leftShoulder]),
+      rightShoulder: toPx(lm[L.rightShoulder]),
+      leftElbow: toPx(lm[L.leftElbow]),
+      rightElbow: toPx(lm[L.rightElbow]),
+      leftWrist: toPx(lm[L.leftWrist]),
+      rightWrist: toPx(lm[L.rightWrist]),
+    });
+  }, []);
+
+  const containerElRef = useRef(null);
+  const setOverlayContainer = useCallback((el) => {
+    containerElRef.current = el;
+  }, []);
+
+  const calibrate = useCallback(() => {
+    return new Promise((resolve) => {
+      setIsCalibrating(true);
+      setTimeout(() => {
+        setIsCalibrated(true);
+        setIsCalibrating(false);
+        resolve(true);
+      }, 2000);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!enabled || isInitializingRef.current) return;
+    isInitializingRef.current = true;
+    let mounted = true;
+    mountedRef.current = true;
+
+    async function init() {
+      try {
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js');
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
+        if (!mounted) return;
+
+        const Pose = window.Pose;
+        const Camera = window.Camera;
+        if (!Pose || !Camera) throw new Error('Pose modules not loaded.');
+
+        const pose = new Pose({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${file}`,
+        });
+        pose.setOptions({
+          modelComplexity: 1,
+          smoothLandmarks: true,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+          selfieMode: true,
+        });
+        pose.onResults((r) => mounted && onResults(r, containerElRef.current));
+        poseRef.current = pose;
+
+        if (videoRef.current) {
+          if (videoRef.current.srcObject) {
+            const loop = async () => {
+              if (!mounted || !poseRef.current || !videoRef.current) return;
+              if (videoRef.current.readyState >= 2) {
+                try { await poseRef.current.send({ image: videoRef.current }); } catch (_) {}
+              }
+              requestAnimationFrame(loop);
+            };
+            loop();
+          } else {
+            const camera = new Camera(videoRef.current, {
+              onFrame: async () => {
+                if (!mounted || !poseRef.current || !videoRef.current) return;
+                try { await poseRef.current.send({ image: videoRef.current }); } catch (_) {}
+              },
+              width: 640,
+              height: 480,
+            });
+            await camera.start();
+            cameraRef.current = camera;
+          }
+        }
+        setIsLoading(false);
+      } catch (err) {
+        console.error('[usePostureGuidance] Error:', err);
+        setError(err.message || 'Failed to initialize posture tracking.');
+        setIsLoading(false);
+      }
+    }
+
+    init();
+
+    return () => {
+      mounted = false;
+      mountedRef.current = false;
+      isInitializingRef.current = false;
+      try {
+        if (cameraRef.current) cameraRef.current.stop();
+        if (poseRef.current) poseRef.current.close();
+      } catch (_) {}
+    };
+  }, [enabled, loadScript, onResults, videoRef]);
+
+  return {
+    videoRef,
+    setOverlayContainer,
+    isLoading,
+    error,
+    isBodyDetected,
+    keypoints,
+    jointResults,
+    overallStatus,
+    isCalibrating,
+    isCalibrated,
+    calibrate,
+  };
+}
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useRehabSession.js
+==================================================
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AdaptiveDifficultyEngine } from '../engine/AdaptiveDifficultyEngine';
+import { SessionLogger, persistSessionLocally } from '../engine/SessionLogger';
+import { useFacialPainDetection } from './useFacialPainDetection';
+import { usePostureGuidance } from './usePostureGuidance';
+
+const REST_PERIOD_MS = 8000;
+
+export function useRehabSession({ gameId, patientId, postureRules = [], therapistOverrides = {} }) {
+  const videoRef = useRef(null);
+  const engineRef = useRef(null);
+  const loggerRef = useRef(null);
+  const restTimeoutRef = useRef(null);
+
+  const [phase, setPhase] = useState('instructions');
+  const [mode, setMode] = useState('beginner');
+  const [canResumeAfterRest, setCanResumeAfterRest] = useState(false);
+  const [tickSignal, setTickSignal] = useState(0);
+
+  const sensingEnabled = phase !== 'instructions' && phase !== 'difficulty';
+
+  const handleAdjustment = useCallback((entry) => {
+    loggerRef.current?.recordDifficultyChange(entry);
+    setTickSignal((t) => t + 1);
+  }, []);
+
+  const handleCheckIn = useCallback(() => {
+    setPhase((p) => (p === 'playing' ? 'moderateCheckIn' : p));
+  }, []);
+
+  const handleSeverePain = useCallback((papsScore) => {
+    loggerRef.current?.recordTherapistAlert(papsScore);
+    setCanResumeAfterRest(false);
+    setPhase('severeRest');
+    if (restTimeoutRef.current) clearTimeout(restTimeoutRef.current);
+    restTimeoutRef.current = setTimeout(() => setCanResumeAfterRest(true), REST_PERIOD_MS);
+  }, []);
+
+  const handlePostureFlag = useCallback((detail) => {
+    loggerRef.current?.recordPostureEvent('upper_body', detail.status);
+  }, []);
+
+  const face = useFacialPainDetection({
+    enabled: sensingEnabled,
+    videoRef,
+    onPAPSUpdate: (score) => {
+      loggerRef.current?.recordPAPS(score);
+      engineRef.current?.updatePAPS(score);
+    },
+  });
+
+  const posture = usePostureGuidance({
+    enabled: sensingEnabled,
+    videoRef,
+    postureRules,
+  });
+
+  useEffect(() => {
+    if (phase !== 'playing' || !engineRef.current) return;
+    engineRef.current.updatePosture(posture.overallStatus);
+  }, [posture.overallStatus, phase]);
+
+  const selectDifficulty = useCallback((tier) => {
+    setMode(tier);
+    loggerRef.current = new SessionLogger({ patientId, gameId, mode: tier });
+    engineRef.current = new AdaptiveDifficultyEngine({
+      mode: tier,
+      therapistOverrides,
+      onAdjustment: handleAdjustment,
+      onCheckIn: handleCheckIn,
+      onSeverePain: handleSeverePain,
+      onPostureFlag: handlePostureFlag,
+    });
+    setPhase('calibration');
+  }, [patientId, gameId, therapistOverrides, handleAdjustment, handleCheckIn, handleSeverePain, handlePostureFlag]);
+
+  const completeCalibration = useCallback(() => {
+    setPhase('playing');
+  }, []);
+
+  const acknowledgeCheckIn = useCallback(() => {
+    engineRef.current?.acknowledgeCheckIn();
+    loggerRef.current?.recordCheckIn(face.paps, 'continue');
+    setPhase('playing');
+  }, [face.paps]);
+
+  const stopFromCheckIn = useCallback((onSessionEnd) => {
+    loggerRef.current?.recordCheckIn(face.paps, 'stop');
+    finish(onSessionEnd);
+  }, [face.paps]);
+
+  const resumeFromRest = useCallback(() => {
+    if (!canResumeAfterRest) return;
+    engineRef.current?.resume();
+    setPhase('playing');
+  }, [canResumeAfterRest]);
+
+  const recordRepetition = useCallback(({ success, romAchieved = null, targetROM = null, holdMs = null }) => {
+    engineRef.current?.recordAccuracy(success);
+    engineRef.current?.recordRepetitionComplete();
+    loggerRef.current?.recordRepetition({ success: success >= 0.5, romAchieved, targetROM, holdMs });
+    engineRef.current?.evaluateTick();
+    setTickSignal((t) => t + 1);
+  }, []);
+
+  const getLiveSummary = useCallback(() => loggerRef.current?.summarize(), []);
+
+  const finish = useCallback((onSessionEnd, extra = {}) => {
+    if (restTimeoutRef.current) clearTimeout(restTimeoutRef.current);
+    loggerRef.current?.finish();
+    const exported = loggerRef.current?.export();
+    if (exported) persistSessionLocally(exported);
+    setPhase('complete');
+    onSessionEnd?.({
+      ...extra,
+      clinicalSummary: exported?.summary,
+      difficultyMode: mode,
+      sessionLog: exported,
+    });
+  }, [mode]);
+
+  useEffect(() => {
+    return () => {
+      if (restTimeoutRef.current) clearTimeout(restTimeoutRef.current);
+    };
+  }, []);
+
+  return {
+    videoRef,
+    phase,
+    mode,
+    face,
+    posture,
+    engine: engineRef,
+    tickSignal,
+    canResumeAfterRest,
+    selectDifficulty,
+    completeCalibration,
+    acknowledgeCheckIn,
+    stopFromCheckIn,
+    resumeFromRest,
+    recordRepetition,
+    finish,
+    getLiveSummary,
+  };
+}
+
+==================================================
+FILE: C:\Users\Hariprasad V\OneDrive\Desktop\major project from scratch\major project from scratch\frontend\src\hooks\useTracking.js
+==================================================
+// frontend/src/hooks/useTracking.js
+import { useEffect, useRef, useState, useCallback } from 'react'
+
+export function useTracking({ videoRef, canvasRef, enabled = true } = {}) {
+  const [state, setState] = useState({
+    handLandmarks: null,
+    handDetected: false,
+    gesture: 'none',
+    swipeData: { direction: 'none', velocity: 0 },
+    handX: 0.5,
+    handY: 0.5,
+    wristAngle: 0,
+    elbowAngle: 0,
+    shoulderAngle: 0,
+    wristRotation: 0,
+    isLoading: true,
+    error: null,
+    stats: { frames: 0, handsDetected: 0 },
+  })
+
+  const handsRef = useRef(null)
+  const cameraRef = useRef(null)
+  const mountedRef = useRef(true)
+  const frameCountRef = useRef(0)
+  const lastSwipeRef = useRef({ x: 0.5, time: 0 })
+  const scriptLoadedRef = useRef(false)
+
+  // Detect gesture from hand landmarks
+  const detectGesture = useCallback((landmarks) => {
+    if (!landmarks || landmarks.length === 0) return 'none'
+    const lm = landmarks[0]
+    
+    const thumbTip = lm[4]
+    const thumbIP = lm[3]
+    const indexTip = lm[8]
+    const indexPIP = lm[6]
+    const middleTip = lm[12]
+    const middlePIP = lm[10]
+    const ringTip = lm[16]
+    const ringPIP = lm[14]
+    const pinkyTip = lm[20]
+    const pinkyPIP = lm[18]
+
+    const isIndexExtended = indexTip.y < indexPIP.y
+    const isMiddleExtended = middleTip.y < middlePIP.y
+    const isRingExtended = ringTip.y < ringPIP.y
+    const isPinkyExtended = pinkyTip.y < pinkyPIP.y
+    const isThumbExtended = thumbTip.x < thumbIP.x
+
+    if (isIndexExtended && isMiddleExtended && isRingExtended && isPinkyExtended && isThumbExtended) {
+      return 'open_hand'
+    }
+    
+    if (!isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+      return 'fist'
+    }
+    
+    if (isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+      return 'point'
+    }
+    
+    return 'none'
+  }, [])
+
+  const calculateAngle = useCallback((a, b, c) => {
+    if (!a || !b || !c) return 0
+    const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x)
+    let angle = Math.abs(radians * 180 / Math.PI)
+    if (angle > 180) angle = 360 - angle
+    return Math.round(angle)
+  }, [])
+
+  const drawSkeleton = useCallback((landmarks) => {
+    const canvas = canvasRef?.current
+    const video = videoRef?.current
+    if (!canvas || !landmarks || landmarks.length === 0) return
+
+    // Match canvas size to video
+    const w = video?.videoWidth || canvas.width || 640
+    const h = video?.videoHeight || canvas.height || 480
+    
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w
+      canvas.height = h
+    }
+    
+    const ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, w, h)
+
+    const lm = landmarks[0]
+    
+    const connections = [
+      [0,1], [1,2], [2,3], [3,4],
+      [0,5], [5,6], [6,7], [7,8],
+      [5,9], [9,10], [10,11], [11,12],
+      [9,13], [13,14], [14,15], [15,16],
+      [13,17], [17,18], [18,19], [19,20],
+      [0,17]
+    ]
+
+    // Draw connections with glow
+    ctx.shadowColor = '#2dd4bf'
+    ctx.shadowBlur = 20
+    
+    connections.forEach(([i, j]) => {
+      ctx.beginPath()
+      ctx.moveTo(lm[i].x * w, lm[i].y * h)
+      ctx.lineTo(lm[j].x * w, lm[j].y * h)
+      ctx.strokeStyle = '#2dd4bf'
+      ctx.lineWidth = 3
+      ctx.stroke()
+    })
+    
+    ctx.shadowBlur = 0
+
+    // Draw landmarks
+    lm.forEach((point, idx) => {
+      const x = point.x * w
+      const y = point.y * h
+      const isTip = [4, 8, 12, 16, 20].includes(idx)
+      const isWrist = idx === 0
+      const radius = isTip ? 8 : isWrist ? 6 : 4
+      
+      ctx.beginPath()
+      ctx.arc(x, y, radius, 0, Math.PI * 2)
+      ctx.fillStyle = isTip ? '#f59e0b' : isWrist ? '#ffffff' : '#2dd4bf'
+      ctx.fill()
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)'
+      ctx.lineWidth = 1
+      ctx.stroke()
+    })
+  }, [canvasRef, videoRef])
+
+  const onResults = useCallback((results) => {
+    if (!mountedRef.current) return
+    
+    frameCountRef.current++
+    const landmarks = results.multiHandLandmarks
+    
+    if (landmarks && landmarks.length > 0) {
+      const hand = landmarks[0]
+      const wrist = hand[0]
+      
+      const handX = 1 - wrist.x
+      const handY = wrist.y
+      
+      const wristAngle = calculateAngle(hand[5], hand[0], hand[17])
+      
+      const now = performance.now()
+      const dt = now - lastSwipeRef.current.time
+      let swipe = { direction: 'none', velocity: 0 }
+      if (dt > 50) {
+        const dx = handX - lastSwipeRef.current.x
+        const vel = Math.abs(dx) / dt
+        if (vel > 0.002) {
+          swipe = { 
+            direction: dx > 0 ? 'swipe_right' : 'swipe_left', 
+            velocity: vel 
+          }
+        }
+        lastSwipeRef.current = { x: handX, time: now }
+      }
+      
+      const gesture = detectGesture(landmarks)
+      
+      setState(prev => ({
+        ...prev,
+        handLandmarks: landmarks,
+        handDetected: true,
+        gesture,
+        swipeData: swipe,
+        handX,
+        handY,
+        wristAngle,
+        isLoading: false,
+        stats: { 
+          ...prev.stats, 
+          frames: frameCountRef.current,
+          handsDetected: landmarks.length 
+        }
+      }))
+      
+      drawSkeleton(landmarks)
+    } else {
+      // Clear canvas when no hand
+      const canvas = canvasRef?.current
+      if (canvas) {
+        const ctx = canvas.getContext('2d')
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+      }
+      
+      setState(prev => ({
+        ...prev,
+        handLandmarks: null,
+        handDetected: false,
+        gesture: 'none',
+        stats: { ...prev.stats, frames: frameCountRef.current }
+      }))
+    }
+  }, [calculateAngle, detectGesture, drawSkeleton, canvasRef])
+
+  // Load MediaPipe scripts from CDN
+  const loadMediaPipeScripts = useCallback(() => {
+    return new Promise((resolve, reject) => {
+      // Check if already loaded
+      if (window.Hands && window.Camera) {
+        scriptLoadedRef.current = true
+        resolve()
+        return
+      }
+
+      let loadedCount = 0
+      const totalScripts = 2
+
+      const checkLoaded = () => {
+        loadedCount++
+        if (loadedCount === totalScripts) {
+          scriptLoadedRef.current = true
+          resolve()
+        }
+      }
+
+      // Load Hands
+      const handsScript = document.createElement('script')
+      handsScript.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js'
+      handsScript.onload = checkLoaded
+      handsScript.onerror = () => reject(new Error('Failed to load MediaPipe Hands'))
+      document.head.appendChild(handsScript)
+
+      // Load Camera Utils
+      const cameraScript = document.createElement('script')
+      cameraScript.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js'
+      cameraScript.onload = checkLoaded
+      cameraScript.onerror = () => reject(new Error('Failed to load MediaPipe Camera Utils'))
+      document.head.appendChild(cameraScript)
+    })
+  }, [])
+
+  // Initialize MediaPipe
+  useEffect(() => {
+    if (!enabled || !videoRef?.current) return
+    
+    let mounted = true
+    mountedRef.current = true
+
+    async function initHandTracking() {
+      try {
+        // Load scripts from CDN
+        await loadMediaPipeScripts()
+        
+        if (!mounted) return
+
+        const Hands = window.Hands
+        const Camera = window.Camera
+        
+        if (!Hands || !Camera) {
+          throw new Error('MediaPipe modules not available')
+        }
+
+        // Initialize Hands
+        const hands = new Hands({
+          locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+          }
+        })
+
+        hands.setOptions({
+          maxNumHands: 1,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+          selfieMode: true
+        })
+
+        hands.onResults((results) => {
+          if (mounted) onResults(results)
+        })
+
+        handsRef.current = hands
+
+        // Initialize Camera
+        const camera = new Camera(videoRef.current, {
+          onFrame: async () => {
+            if (!mounted || !handsRef.current || !videoRef.current) return
+            try {
+              await handsRef.current.send({ image: videoRef.current })
+            } catch (err) {
+              // Silently handle frame drops
+            }
+          },
+          width: 640,
+          height: 480
+        })
+
+        await camera.start()
+        cameraRef.current = camera
+
+        if (mounted) {
+          setState(prev => ({ ...prev, isLoading: false }))
+        }
+
+        console.log('✅ MediaPipe Hand Tracking initialized successfully!')
+
+      } catch (err) {
+        console.error('[useTracking] Error:', err)
+        if (mounted) {
+          setState(prev => ({ 
+            ...prev, 
+            isLoading: false, 
+            error: err.message || 'Failed to initialize camera' 
+          }))
+        }
+      }
+    }
+
+    initHandTracking()
+
+    return () => {
+      mounted = false
+      mountedRef.current = false
+      
+      try {
+        if (cameraRef.current) {
+          cameraRef.current.stop()
+        }
+        if (handsRef.current) {
+          handsRef.current.close()
+        }
+      } catch (_) {}
+    }
+  }, [enabled, videoRef, onResults, loadMediaPipeScripts])
+
+  return state
+}
