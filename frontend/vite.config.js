@@ -23,7 +23,6 @@ export default defineConfig(({ mode }) => ({
       '@mediapipe/camera_utils',
       '@mediapipe/hands',
       '@mediapipe/pose',
-      '@mediapipe/drawing_utils',
     ],
   },
   build: {
@@ -40,7 +39,6 @@ export default defineConfig(({ mode }) => ({
             if (id.includes('lucide-react') || id.includes('recharts') || id.includes('react-hot-toast')) {
               return 'vendor-ui';
             }
-            // ⚠️ DO NOT bundle @mediapipe into manualChunks; let Vite handle it automatically
           }
         },
       },
