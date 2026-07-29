@@ -1,5 +1,5 @@
 // frontend/src/utils/apiService.js
-const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:5000/api";
+const API_BASE = import.meta.env.VITE_API_URL || "https://gestureheal-backend.onrender.com/api";
 
 // FIX #4: Fixed getToken function
 const getToken = () => {
