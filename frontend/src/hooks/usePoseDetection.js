@@ -1,4 +1,4 @@
-// frontend/src/hooks/useMediaPipePose.js
+// frontend/src/hooks/usePoseDetection.js
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 export const POSE_LANDMARKS = {
@@ -46,13 +46,13 @@ export function useMediaPipePose({
   minDetectionConfidence = 0.5,
   minTrackingConfidence = 0.5,
   videoRef: externalVideoRef,
+  silent = false, // If true, avoids setLandmarks/setKeypoints state updates
 } = {}) {
   const internalVideoRef = useRef(null);
   const videoRef = externalVideoRef || internalVideoRef;
   const poseRef = useRef(null);
   const cameraRef = useRef(null);
   const mountedRef = useRef(true);
-  const isInitializedRef = useRef(false);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isActive, setIsActive] = useState(false);
@@ -95,109 +95,6 @@ export function useMediaPipePose({
     });
   }, []);
 
-  const initCamera = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: 'user',
-        },
-      });
-
-      if (!mountedRef.current) {
-        stream.getTracks().forEach((t) => t.stop());
-        return;
-      }
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-
-      return stream;
-    } catch (err) {
-      console.error('[useMediaPipePose] Camera error:', err);
-      setError(err.message || 'Camera access denied');
-      onErrorRef.current?.(err);
-      return null;
-    }
-  }, [videoRef]);
-
-  const setupPose = useCallback(async () => {
-    try {
-      await loadScript('https://unpkg.com/@mediapipe/pose@0.5.1675469404/pose.js');
-      await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
-
-      if (!mountedRef.current) return;
-
-      const Pose = window.Pose;
-      const Camera = window.Camera;
-
-      if (!Pose || !Camera) {
-        throw new Error('MediaPipe Pose modules not loaded.');
-      }
-
-      const pose = new Pose({
-        locateFile: (file) =>
-          `https://unpkg.com/@mediapipe/pose@0.5.1675469404/${file}`,
-      });
-
-      pose.setOptions({
-        modelComplexity,
-        smoothLandmarks,
-        minDetectionConfidence,
-        minTrackingConfidence,
-        selfieMode: true,
-      });
-
-      pose.onResults((results) => {
-        if (!mountedRef.current) return;
-        if (results.poseLandmarks) {
-          const lm = results.poseLandmarks;
-          setLandmarks(lm);
-          const kp = extractKeypoints(lm, videoRef.current);
-          setKeypoints(kp);
-          onPoseUpdateRef.current?.(kp, lm);
-        }
-      });
-
-      poseRef.current = pose;
-
-      // Start camera if we have a video element
-      if (videoRef.current) {
-        const camera = new Camera(videoRef.current, {
-          onFrame: async () => {
-            if (!mountedRef.current || !poseRef.current || !videoRef.current) return;
-            try {
-              await poseRef.current.send({ image: videoRef.current });
-            } catch (_) {
-              // Silently handle frame drops
-            }
-          },
-          width: 640,
-          height: 480,
-        });
-
-        await camera.start();
-        cameraRef.current = camera;
-        setIsActive(true);
-      }
-
-      setIsLoading(false);
-      return true;
-    } catch (err) {
-      console.error('[useMediaPipePose] Setup error:', err);
-      setError(err.message || 'Failed to initialize pose tracking');
-      onErrorRef.current?.(err);
-      setIsLoading(false);
-      return false;
-    }
-    // NOTE: onPoseUpdate/onError intentionally excluded — they're read via
-    // refs (onPoseUpdateRef/onErrorRef) above so passing a new inline
-    // function each render does not tear down and reload the model.
-  }, [loadScript, modelComplexity, smoothLandmarks, minDetectionConfidence, minTrackingConfidence, videoRef]);
-
   const extractKeypoints = useCallback((lm, video) => {
     const w = video?.videoWidth || 640;
     const h = video?.videoHeight || 480;
@@ -232,6 +129,116 @@ export function useMediaPipePose({
     };
   }, []);
 
+  // FIX: setupPose now takes an `isCancelled` check and calls it after every
+  // await, plus immediately after creating the Pose/Camera instances. Root
+  // cause of the bug this replaces: React.StrictMode runs this effect's
+  // cleanup SYNCHRONOUSLY while init() is still mid-await (loading scripts).
+  // The old code's `isInitializedRef` guard didn't help, because cleanup
+  // reset it to false before the in-flight init() had assigned poseRef/
+  // cameraRef — so cleanup found nothing to stop, a second mount started a
+  // second full init (second getUserMedia call, second Pose instance,
+  // second Camera loop), and the FIRST mount's init eventually finished too,
+  // leaving two live camera+pose pipelines both calling pose.send() on every
+  // frame forever. That's what produced ~270 console errors and single-digit
+  // FPS. Fix: a per-invocation `cancelled` flag, not a shared ref, checked
+  // at every resumption point, with immediate teardown of anything created
+  // after cancellation was signalled.
+  const setupPose = useCallback(async (isCancelled) => {
+    try {
+      await loadScript('https://unpkg.com/@mediapipe/pose@0.5.1675469404/pose.js');
+      if (isCancelled()) return false;
+      await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
+      if (isCancelled()) return false;
+
+      const Pose = window.Pose;
+      const Camera = window.Camera;
+
+      if (!Pose || !Camera) {
+        throw new Error('MediaPipe Pose modules not loaded.');
+      }
+
+      const pose = new Pose({
+        locateFile: (file) =>
+          `https://unpkg.com/@mediapipe/pose@0.5.1675469404/${file}`,
+      });
+
+      if (isCancelled()) {
+        try { pose.close(); } catch (_) {}
+        return false;
+      }
+
+      pose.setOptions({
+        modelComplexity,
+        smoothLandmarks,
+        minDetectionConfidence,
+        minTrackingConfidence,
+        selfieMode: true,
+      });
+
+      pose.onResults((results) => {
+        if (isCancelled() || !mountedRef.current) return;
+        if (results.poseLandmarks) {
+          const lm = results.poseLandmarks;
+          if (!silent) {
+            setLandmarks(lm);
+          }
+          const kp = extractKeypoints(lm, videoRef.current);
+          if (!silent) {
+            setKeypoints(kp);
+          }
+          onPoseUpdateRef.current?.(kp, lm);
+        }
+      });
+
+      poseRef.current = pose;
+
+      if (videoRef.current) {
+        const camera = new Camera(videoRef.current, {
+          onFrame: async () => {
+            if (isCancelled() || !mountedRef.current || !poseRef.current || !videoRef.current) return;
+            try {
+              await poseRef.current.send({ image: videoRef.current });
+            } catch (_) {
+              // Silently handle frame drops
+            }
+          },
+          width: 640,
+          height: 480,
+        });
+
+        await camera.start();
+
+        if (isCancelled()) {
+          // This mount was cleaned up while the camera was starting —
+          // stop it immediately instead of leaving it running unassigned.
+          try { camera.stop(); } catch (_) {}
+          try { pose.close(); } catch (_) {}
+          if (videoRef.current?.srcObject) {
+            videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+            videoRef.current.srcObject = null;
+          }
+          return false;
+        }
+
+        cameraRef.current = camera;
+        setIsActive(true);
+      }
+
+      setIsLoading(false);
+      return true;
+    } catch (err) {
+      if (isCancelled()) return false;
+      console.error('[useMediaPipePose] Setup error:', err);
+      setError(err.message || 'Failed to initialize pose tracking');
+      onErrorRef.current?.(err);
+      setIsLoading(false);
+      return false;
+    }
+    // NOTE: onPoseUpdate/onError intentionally excluded — they're read via
+    // refs (onPoseUpdateRef/onErrorRef) above so passing a new inline
+    // function each render does not tear down and reload the model.
+  }, [loadScript, modelComplexity, smoothLandmarks, minDetectionConfidence, minTrackingConfidence, videoRef, silent, extractKeypoints]);
+
   const calibrate = useCallback(() => {
     return new Promise((resolve) => {
       // Simple calibration: wait for stable landmarks
@@ -247,7 +254,6 @@ export function useMediaPipePose({
           });
           if (samples.length >= maxSamples) {
             clearInterval(checkInterval);
-            // Average the samples for calibration
             const avg = (key) => {
               const values = samples.map((s) => s[key]);
               return {
@@ -268,11 +274,9 @@ export function useMediaPipePose({
         }
       }, 100);
 
-      // Timeout after 5 seconds
       setTimeout(() => {
         clearInterval(checkInterval);
         if (samples.length > 5) {
-          // Use whatever samples we have
           const avg = (key) => {
             const values = samples.map((s) => s[key]);
             return {
@@ -297,23 +301,47 @@ export function useMediaPipePose({
   }, [keypoints]);
 
   useEffect(() => {
-    if (!enabled || isInitializedRef.current) return;
-    isInitializedRef.current = true;
+    if (!enabled) return;
+
+    let cancelled = false;
+    const isCancelled = () => cancelled;
     mountedRef.current = true;
 
     const init = async () => {
-      // NOTE: we intentionally do NOT call initCamera() here. MediaPipe's own
-      // Camera utility (created inside setupPose, via `new Camera(videoRef.current, ...)`)
-      // calls getUserMedia() itself. Calling getUserMedia twice on the same
-      // <video> element causes the second call to silently hang forever with
-      // no error — producing an infinite "Loading..." state. (Same bug that
-      // was already fixed in useMediaPipeUpperBody.js.)
-      const setupTimeout = new Promise((_, reject) =>
+      // Development-time mock support: if a mock provider is present, use
+      // it instead of initializing the real MediaPipe pose model.
+      const mock = typeof window !== 'undefined' && window.__mockMediaPipe;
+      if (import.meta.env.DEV && mock && typeof mock.getCurrent === 'function') {
+        setIsLoading(false);
+        setIsActive(true);
+        const fps = mock.frameRate || 30;
+        const interval = Math.max(16, Math.round(1000 / fps));
+        let lastTime = Date.now();
+        const timer = setInterval(() => {
+          if (isCancelled() || !mountedRef.current) return clearInterval(timer);
+          const lm = mock.getCurrent();
+          const now = Date.now();
+          const dt = (now - lastTime) / 1000;
+          lastTime = now;
+          if (lm && lm.length > 0) {
+            if (!silent) setLandmarks(lm);
+            const kp = extractKeypoints(lm, videoRef.current);
+            if (!silent) setKeypoints(kp);
+            onPoseUpdateRef.current?.(kp, lm);
+          } else {
+            if (!silent) { setLandmarks(null); setKeypoints(null); }
+          }
+        }, interval);
+        return;
+      }
+
+    const setupTimeout = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Pose-tracking model setup timed out. This usually means MediaPipe could not fetch its model files from the CDN.')), 15000)
       );
       try {
-        await Promise.race([setupPose(), setupTimeout]);
+        await Promise.race([setupPose(isCancelled), setupTimeout]);
       } catch (err) {
+        if (isCancelled()) return;
         console.error('[useMediaPipePose] Setup timeout:', err);
         setError(err.message);
         setIsLoading(false);
@@ -323,20 +351,22 @@ export function useMediaPipePose({
     init();
 
     return () => {
+      cancelled = true;
       mountedRef.current = false;
-      isInitializedRef.current = false;
       if (cameraRef.current) {
         try { cameraRef.current.stop(); } catch (_) {}
+        cameraRef.current = null;
       }
       if (poseRef.current) {
         try { poseRef.current.close(); } catch (_) {}
+        poseRef.current = null;
       }
       if (videoRef.current?.srcObject) {
         videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
         videoRef.current.srcObject = null;
       }
     };
-  }, [enabled, initCamera, setupPose]);
+  }, [enabled, setupPose]);
 
   return {
     videoRef,

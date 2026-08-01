@@ -4,6 +4,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import StatCard from "../components/ui/StatCard";
 import LoadingSpinner from "../components/ui/LoadingSpinner";
 import { Users, Activity, TrendingUp, Target, Clock, Award } from "lucide-react";
+import { Link } from 'react-router-dom';
 import toast from "react-hot-toast";
 
 export default function DashboardPage() {
@@ -38,6 +39,11 @@ export default function DashboardPage() {
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-slate-900">Dashboard</h1>
         <p className="text-slate-500 mt-1">Welcome back! Here's your practice overview.</p>
+        {process.env.NODE_ENV === 'development' && (
+          <div className="mt-3">
+            <Link to="/qa-tests" className="inline-block px-4 py-2 bg-amber-500 text-white rounded-lg font-semibold">Open QA Tests (dev)</Link>
+          </div>
+        )}
       </div>
 
       {/* Stats Cards */}

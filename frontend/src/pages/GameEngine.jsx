@@ -2,7 +2,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../store/appStore';
-import { sessionApi } from '../utils/apiService';
 import PrecisionReach from '../games/PrecisionReach';
 import RehabSlicer from '../games/RehabSlicer';
 import CloudReach from '../games/CloudReach';
@@ -29,14 +28,22 @@ const GAME_NAMES = {
 const GameEngine = () => {
   const { gameId } = useParams();
   const navigate = useNavigate();
-  const { user, token } = useAppStore();
+  const { user, token, currentPatient, publicPatientId } = useAppStore();
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
 
   const GameComponent = GAME_COMPONENTS[gameId];
   const gameName = GAME_NAMES[gameId];
-  const patientId = user?._id;
+
+  // FIX: was `user?._id` — that's the logged-in ACCOUNT's Mongo id (for a
+  // therapist, that's the therapist's own id, never a patient's). The
+  // backend's public session routes expect a GH-XXXX patient id, which is
+  // NOT the same field. Mirrors the precedence Layout.jsx already uses for
+  // finding the real patient id: currentPatient (therapist has a patient
+  // selected) -> publicPatientId (guest/public flow) -> user.patientId
+  // (logged-in patient account).
+  const patientId = currentPatient?.patientId || publicPatientId || user?.patientId || null;
 
   useEffect(() => {
     if (!gameId || !GameComponent) {
@@ -59,39 +66,25 @@ const GameEngine = () => {
     setTimeout(() => setToast(null), 5000);
   }, []);
 
-  const handleSessionEnd = useCallback(async (data) => {
-    try {
-      const payload = {
-        patientId,
+  // FIX: this used to ALSO call sessionApi.start(payload) here whenever a
+  // token existed — completely independent of useSessionTelemetry, which
+  // every game component now calls directly (start on click, saveRep per
+  // rep, finishSession on completion). That meant two separate,
+  // uncoordinated session-creation requests fired on every game start: one
+  // from here (always hitting the therapist-only /sessions/start route
+  // regardless of actual role, since it only checked `if (token)`), and one
+  // from useSessionTelemetry (correctly role-branched). useSessionTelemetry
+  // now owns session persistence end-to-end — this handler's only
+  // remaining job is post-game navigation.
+  const handleSessionEnd = useCallback((data) => {
+    navigate('/session-report', {
+      state: {
+        gameName,
         gameId,
         ...data,
-        timestamp: new Date().toISOString(),
-      };
-
-      if (token) {
-        await sessionApi.start(payload);
-      }
-
-      navigate('/session-report', {
-        state: {
-          gameName,
-          gameId,
-          ...data,
-        },
-      });
-    } catch (err) {
-      console.error('Failed to save session:', err);
-      showToast('Failed to save session results. Please try again.', 'error');
-      navigate('/session-report', {
-        state: {
-          gameName,
-          gameId,
-          ...data,
-          _saveError: err.message,
-        },
-      });
-    }
-  }, [patientId, gameId, gameName, navigate, token, showToast]);
+      },
+    });
+  }, [gameId, gameName, navigate]);
 
   if (isLoading) {
     return (
@@ -135,7 +128,7 @@ const GameEngine = () => {
         <div className="flex-1">
           <h1 className="text-lg font-bold text-white">{gameName || 'Game'}</h1>
           <p className="text-xs text-slate-500">
-            Patient: {user?.name || 'Guest'}
+            Patient: {currentPatient?.name || user?.name || 'Guest'}
           </p>
         </div>
       </div>

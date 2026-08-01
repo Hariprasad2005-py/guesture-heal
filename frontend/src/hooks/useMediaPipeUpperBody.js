@@ -1,4 +1,29 @@
-// frontend/src/hooks/useMediaPipeHands.js
+// frontend/src/hooks/useMediaPipeUpperBody.js
+//
+// PATCHED: added an opt-in `silent` option (default false, so existing
+// callers are unaffected) that skips setLandmarks/setGesture/setHandedness
+// React state updates on every hand-tracking frame — mirroring the
+// `silent` option already present in usePoseDetection.js. Without this,
+// every hand-tracking game re-renders on every MediaPipe Hands result,
+// which is a live, currently-reproducing source of dropped frames.
+// Callers that want the ref-based, zero-re-render path should pass
+// `silent: true` and read data via onHandsUpdate into a ref, same pattern
+// as usePoseDetection.js.
+//
+// PATCHED (2): setupHands now takes an `isCancelled` check and calls it
+// after every await, plus immediately after creating the Hands/Camera
+// instances — same fix already applied to usePoseDetection.js's
+// setupPose. Root cause this replaces: React.StrictMode runs this effect's
+// cleanup SYNCHRONOUSLY while init() is still mid-await (loading scripts).
+// The old `isInitializedRef` guard didn't help, because cleanup reset it to
+// false before the in-flight init() had assigned handsRef/cameraRef — so
+// cleanup found nothing to stop, a second mount started a second full init
+// (second getUserMedia call, second Hands instance, second Camera loop),
+// and the FIRST mount's init eventually finished too, leaving two live
+// camera+hands pipelines both calling hands.send() on every frame forever.
+// Fix: a per-invocation `cancelled` flag, not a shared ref, checked at
+// every resumption point, with immediate teardown of anything created
+// after cancellation was signalled — identical shape to usePoseDetection.
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 export const HAND_LANDMARKS = {
@@ -34,13 +59,13 @@ export function useMediaPipeHands({
   minDetectionConfidence = 0.5,
   minTrackingConfidence = 0.5,
   videoRef: externalVideoRef,
+  silent = false, // if true, avoids setLandmarks/setGesture/setHandedness state updates
 } = {}) {
   const internalVideoRef = useRef(null);
   const videoRef = externalVideoRef || internalVideoRef;
   const handsRef = useRef(null);
   const cameraRef = useRef(null);
   const mountedRef = useRef(true);
-  const isInitializedRef = useRef(false);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isActive, setIsActive] = useState(false);
@@ -88,7 +113,6 @@ export function useMediaPipeHands({
   const detectGesture = useCallback((lm) => {
     if (!lm || lm.length === 0) return 'none';
 
-    // Check if fingers are extended
     const isExtended = (tip, pip) => tip.y < pip.y;
 
     const thumbTip = lm[HAND_LANDMARKS.THUMB_TIP];
@@ -108,32 +132,22 @@ export function useMediaPipeHands({
     const ringExtended = isExtended(ringTip, ringPIP);
     const pinkyExtended = isExtended(pinkyTip, pinkyPIP);
 
-    // Open hand: all fingers extended
     if (indexExtended && middleExtended && ringExtended && pinkyExtended && thumbExtended) {
       return 'open';
     }
-
-    // Fist: all fingers closed
     if (!indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
       return 'fist';
     }
-
-    // Point: only index extended
     if (indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
       return 'point';
     }
-
-    // Peace: index and middle extended
     if (indexExtended && middleExtended && !ringExtended && !pinkyExtended) {
       return 'peace';
     }
-
-    // Thumbs up
     if (thumbExtended && !indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
       return 'thumbs_up';
     }
 
-    // Pinch: thumb and index close together
     const thumbIndexDist = Math.sqrt(
       Math.pow(thumbTip.x - indexTip.x, 2) +
       Math.pow(thumbTip.y - indexTip.y, 2)
@@ -151,9 +165,8 @@ export function useMediaPipeHands({
     const dy = currPos.y - prevPos.y;
     const velocity = Math.sqrt(dx * dx + dy * dy) / dt;
 
-    if (velocity < 0.5) return null; // Too slow to be a swipe
+    if (velocity < 0.5) return null;
 
-    // Determine direction
     const absDx = Math.abs(dx);
     const absDy = Math.abs(dy);
 
@@ -165,49 +178,19 @@ export function useMediaPipeHands({
     return null;
   }, []);
 
-  const initCamera = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: 'user',
-        },
-      });
+  // NOTE: MediaPipe's own Camera utility (created below, via
+  // `new Camera(videoRef.current, ...)`) calls getUserMedia() itself.
+  // There is intentionally no separate initCamera()/getUserMedia() call
+  // in this hook — calling getUserMedia twice on the same <video> element
+  // causes the second call to silently hang forever with no error, which
+  // previously caused an infinite "Loading..." state.
 
-      if (!mountedRef.current) {
-        stream.getTracks().forEach((t) => t.stop());
-        return;
-      }
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-
-      return stream;
-    } catch (err) {
-      console.error('[useMediaPipeHands] Camera error:', err);
-      let message = err.message || 'Camera access denied';
-      if (err.name === 'NotReadableError') {
-        message = 'Camera is already in use by another tab or application. Close other apps/tabs using the camera and reload.';
-      } else if (err.name === 'NotAllowedError') {
-        message = 'Camera permission was denied. Please allow camera access in your browser settings and reload.';
-      } else if (err.name === 'NotFoundError') {
-        message = 'No camera was found on this device.';
-      }
-      setError(message);
-      onErrorRef.current?.(err);
-      return null;
-    }
-  }, [videoRef]);
-
-  const setupHands = useCallback(async () => {
+  const setupHands = useCallback(async (isCancelled) => {
     try {
       await loadScript('https://unpkg.com/@mediapipe/hands@0.4.1675469240/hands.js');
-await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
-
-      if (!mountedRef.current) return;
+      if (isCancelled()) return false;
+      await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
+      if (isCancelled()) return false;
 
       const Hands = window.Hands;
       const Camera = window.Camera;
@@ -217,9 +200,14 @@ await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camer
       }
 
       const hands = new Hands({
-  locateFile: (file) =>
-    `https://unpkg.com/@mediapipe/hands@0.4.1675469240/${file}`,
-});
+        locateFile: (file) =>
+          `https://unpkg.com/@mediapipe/hands@0.4.1675469240/${file}`,
+      });
+
+      if (isCancelled()) {
+        try { hands.close(); } catch (_) {}
+        return false;
+      }
 
       hands.setOptions({
         maxNumHands,
@@ -233,20 +221,18 @@ await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camer
       let lastTime = Date.now();
 
       hands.onResults((results) => {
-        if (!mountedRef.current) return;
+        if (isCancelled() || !mountedRef.current) return;
 
         const multiHandLandmarks = results.multiHandLandmarks;
         const multiHandedness = results.multiHandedness;
 
         if (multiHandLandmarks && multiHandLandmarks.length > 0) {
           const lm = multiHandLandmarks[0];
-          setLandmarks(lm);
+          if (!silent) setLandmarks(lm);
 
-          // Detect gesture
           const gestureResult = detectGesture(lm);
-          setGesture(gestureResult);
+          if (!silent) setGesture(gestureResult);
 
-          // Detect swipe
           const wrist = lm[HAND_LANDMARKS.WRIST];
           const now = Date.now();
           const dt = (now - lastTime) / 1000;
@@ -261,15 +247,16 @@ await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camer
           prevWristPos = { x: wrist.x, y: wrist.y };
           lastTime = now;
 
-          // Set handedness
-          if (multiHandedness && multiHandedness.length > 0) {
+          if (multiHandedness && multiHandedness.length > 0 && !silent) {
             setHandedness(multiHandedness[0].label);
           }
 
           onHandsUpdateRef.current?.({ gesture: gestureResult, landmarks: lm, handedness: multiHandedness?.[0]?.label });
         } else {
-          setLandmarks(null);
-          setGesture('none');
+          if (!silent) {
+            setLandmarks(null);
+            setGesture('none');
+          }
         }
       });
 
@@ -278,7 +265,7 @@ await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camer
       if (videoRef.current) {
         const camera = new Camera(videoRef.current, {
           onFrame: async () => {
-            if (!mountedRef.current || !handsRef.current || !videoRef.current) return;
+            if (isCancelled() || !mountedRef.current || !handsRef.current || !videoRef.current) return;
             try {
               await handsRef.current.send({ image: videoRef.current });
             } catch (_) {
@@ -290,6 +277,19 @@ await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camer
         });
 
         await camera.start();
+
+        if (isCancelled()) {
+          // This mount was cleaned up while the camera was starting —
+          // stop it immediately instead of leaving it running unassigned.
+          try { camera.stop(); } catch (_) {}
+          try { hands.close(); } catch (_) {}
+          if (videoRef.current?.srcObject) {
+            videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+            videoRef.current.srcObject = null;
+          }
+          return false;
+        }
+
         cameraRef.current = camera;
         setIsActive(true);
       }
@@ -297,34 +297,59 @@ await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camer
       setIsLoading(false);
       return true;
     } catch (err) {
+      if (isCancelled()) return false;
       console.error('[useMediaPipeHands] Setup error:', err);
       setError(err.message || 'Failed to initialize hand tracking');
       onErrorRef.current?.(err);
       setIsLoading(false);
       return false;
     }
-    // NOTE: onHandsUpdate/onError intentionally excluded — they're read via
-    // refs (onHandsUpdateRef/onErrorRef) above so that passing a new inline
-    // function each render does not tear down and reload the model.
-  }, [loadScript, maxNumHands, modelComplexity, minDetectionConfidence, minTrackingConfidence, videoRef, detectGesture, detectSwipe]);
+    // NOTE: onHandsUpdate/onError intentionally excluded — read via refs above.
+  }, [loadScript, maxNumHands, modelComplexity, minDetectionConfidence, minTrackingConfidence, videoRef, detectGesture, detectSwipe, silent]);
 
   useEffect(() => {
-    if (!enabled || isInitializedRef.current) return;
-    isInitializedRef.current = true;
+    if (!enabled) return;
+
+    let cancelled = false;
+    const isCancelled = () => cancelled;
     mountedRef.current = true;
 
     const init = async () => {
-      // NOTE: we intentionally do NOT call initCamera() here. MediaPipe's own
-      // Camera utility (created inside setupHands, via `new Camera(videoRef.current, ...)`)
-      // calls getUserMedia() itself. Calling getUserMedia twice on the same
-      // <video> element causes the second call to silently hang forever with
-      // no error — which is what was causing the infinite "Loading..." state.
+      // Development-time mock support: if a mock provider is present, use
+      // it instead of initializing the real MediaPipe model. This enables
+      // deterministic, hardware-free testing in headless environments.
+      const mock = typeof window !== 'undefined' && window.__mockMediaPipe;
+      if (import.meta.env.DEV && mock && typeof mock.getCurrent === 'function') {
+        setIsLoading(false);
+        setIsActive(true);
+        const fps = mock.frameRate || 30;
+        const interval = Math.max(16, Math.round(1000 / fps));
+        let lastTime = Date.now();
+        const timer = setInterval(() => {
+          if (isCancelled() || !mountedRef.current) return clearInterval(timer);
+          const lm = mock.getCurrent();
+          const now = Date.now();
+          const dt = (now - lastTime) / 1000;
+          lastTime = now;
+          if (lm && lm.length > 0) {
+            if (!silent) setLandmarks(lm);
+            const gestureResult = detectGesture(lm);
+            if (!silent) setGesture(gestureResult);
+            onHandsUpdateRef.current?.({ gesture: gestureResult, landmarks: lm });
+          } else {
+            if (!silent) { setLandmarks(null); setGesture('none'); }
+          }
+        }, interval);
+        return;
+      }
+
       const setupTimeout = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Hand-tracking model setup timed out. This usually means MediaPipe could not fetch its model files from the CDN — check network access to unpkg.com.')), 15000)
       );
       try {
-        await Promise.race([setupHands(), setupTimeout]);
+        await Promise.race([setupHands(isCancelled), setupTimeout]);
       } catch (err) {
+        if (isCancelled()) return;
         console.error('[useMediaPipeHands] Setup timeout:', err);
         setError(err.message);
         setIsLoading(false);
@@ -334,20 +359,22 @@ await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camer
     init();
 
     return () => {
+      cancelled = true;
       mountedRef.current = false;
-      isInitializedRef.current = false;
       if (cameraRef.current) {
         try { cameraRef.current.stop(); } catch (_) {}
+        cameraRef.current = null;
       }
       if (handsRef.current) {
         try { handsRef.current.close(); } catch (_) {}
+        handsRef.current = null;
       }
       if (videoRef.current?.srcObject) {
         videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
         videoRef.current.srcObject = null;
       }
     };
-  }, [enabled, initCamera, setupHands]);
+  }, [enabled, setupHands]);
 
   return {
     videoRef,

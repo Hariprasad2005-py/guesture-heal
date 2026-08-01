@@ -1,3 +1,4 @@
+import React, { Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useAppStore } from "./store/appStore";
 import Layout from "./components/Layout";
@@ -11,11 +12,17 @@ import PatientDetailPage from "./pages/PatientDetailPage";
 import IntakePage from "./pages/IntakePage";
 import RehabPage from "./pages/RehabPage";
 import ReportsPage from "./pages/ReportsPage";
+import SessionReportPage from "./pages/SessionReportPage";
 import PatientPortalPage from "./pages/PatientPortalPage";
 import PatientRegistrationPage from "./pages/PatientRegistrationPage";
 import PatientPublicDashboard from "./pages/PatientPublicDashboard";
 import GameEngine from './pages/GameEngine';
 import GameSelectPage from './pages/GameSelectPage';
+// Dev-only QA test page (lazy-loaded to avoid bundling in production)
+let PatientDashboardTest = null;
+if (import.meta.env.DEV) {
+  PatientDashboardTest = React.lazy(() => import('./pages/PatientDashboardTest'));
+}
 import AdminPage from "./pages/AdminPage";
 import TherapistRegister from "./pages/TherapistRegister";
 import TherapistLogin from "./pages/TherapistLogin";
@@ -66,7 +73,17 @@ export default function App() {
         {/* Public Routes with Layout */}
         <Route path="/games" element={<WithLayout><GameSelectPage /></WithLayout>} />
         <Route path="/game/:gameId" element={<GameEngine />} />
-        
+        {/* FIX: this route was missing entirely. Every game's onSessionEnd
+            navigates to /session-report — with no route defined, the
+            catch-all below sent every completed session straight to "/",
+            silently dropping the session summary. Deliberately NOT wrapped
+            in ProtectedRoute: public (GH-xxxx) patients with no token must
+            be able to land here too. */}
+        <Route path="/session-report" element={<WithLayout><SessionReportPage /></WithLayout>} />
+        {import.meta.env.DEV && PatientDashboardTest && (
+          <Route path="/qa-tests" element={<WithLayout><Suspense fallback={null}><PatientDashboardTest /></Suspense></WithLayout>} />
+        )}
+
         <Route path="/reports/patient/:patientId" element={<ProtectedRoute><WithLayout><ReportsPage /></WithLayout></ProtectedRoute>} />
         <Route path="/reports" element={<ProtectedRoute><WithLayout><ReportsPage /></WithLayout></ProtectedRoute>} />
 

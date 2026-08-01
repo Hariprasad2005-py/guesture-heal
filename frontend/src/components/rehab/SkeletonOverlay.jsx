@@ -22,8 +22,8 @@ export default function SkeletonOverlay({ containerRef, keypoints, overallStatus
         rafRef.current = requestAnimationFrame(draw);
         return;
       }
-      const w = container.clientWidth;
-      const h = container.clientHeight;
+      const w = container ? container.clientWidth : 640;
+      const h = container ? container.clientHeight : 480;
       if (canvas.width !== w || canvas.height !== h) {
         canvas.width = w;
         canvas.height = h;

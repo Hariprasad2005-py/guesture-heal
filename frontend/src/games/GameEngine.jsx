@@ -2,7 +2,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../store/appStore';
-import { sessionApi } from '../utils/apiService';
 import PrecisionReach from '../games/PrecisionReach';
 import RehabSlicer from '../games/RehabSlicer';
 import CloudReach from '../games/CloudReach';
@@ -14,7 +13,7 @@ const GAME_COMPONENTS = {
   'precision-reach': PrecisionReach,
   'rehab-slicer': RehabSlicer,
   'cloud-reach': CloudReach,
-  'catch-flex': CatchAndFlex,
+  'catch-flex': CatchFlex,
   'canvas-air': CanvasAir,
 };
 
@@ -29,14 +28,18 @@ const GAME_NAMES = {
 const GameEngine = () => {
   const { gameId } = useParams();
   const navigate = useNavigate();
-  const { user, token } = useAppStore();
+  const { user, token, currentPatient, publicPatientId } = useAppStore();
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
 
   const GameComponent = GAME_COMPONENTS[gameId];
   const gameName = GAME_NAMES[gameId];
-  const patientId = user?._id;
+
+  // patientId precedence: currentPatient (therapist has a patient selected)
+  // -> publicPatientId (guest/public flow) -> user.patientId (logged-in
+  // patient account). Matches the precedence Layout.jsx uses elsewhere.
+  const patientId = currentPatient?.patientId || publicPatientId || user?.patientId || null;
 
   useEffect(() => {
     if (!gameId || !GameComponent) {
@@ -59,39 +62,31 @@ const GameEngine = () => {
     setTimeout(() => setToast(null), 5000);
   }, []);
 
-  const handleSessionEnd = useCallback(async (data) => {
-    try {
-      const payload = {
-        patientId,
+  // useSessionTelemetry (called inside each game component) owns session
+  // persistence end-to-end: start on click, saveRep per rep, finishSession
+  // on completion. This handler's job is just post-game navigation — but it
+  // also needs to carry the sessionId forward, since the per-game summary
+  // objects (score/accuracy/reps/etc.) never include it themselves.
+  //
+  // FIX: pull sessionId from appStore's currentSession directly. It's set
+  // there at START_SESSION time by useSessionTelemetry and is still present
+  // here regardless of whether finishSession's PUT/POST has resolved yet
+  // (every game calls finishSession without awaiting it). Without this,
+  // SessionReportPage had nothing to fetch/refresh against.
+  const handleSessionEnd = useCallback((data) => {
+    const { currentSession } = useAppStore.getState();
+    const sessionId = currentSession?._id || currentSession?.sessionId || null;
+
+    navigate('/session-report', {
+      state: {
+        gameName,
         gameId,
+        patientId,
+        sessionId,
         ...data,
-        timestamp: new Date().toISOString(),
-      };
-
-      if (token) {
-        await sessionApi.start(payload);
-      }
-
-      navigate('/session-report', {
-        state: {
-          gameName,
-          gameId,
-          ...data,
-        },
-      });
-    } catch (err) {
-      console.error('Failed to save session:', err);
-      showToast('Failed to save session results. Please try again.', 'error');
-      navigate('/session-report', {
-        state: {
-          gameName,
-          gameId,
-          ...data,
-          _saveError: err.message,
-        },
-      });
-    }
-  }, [patientId, gameId, gameName, navigate, token, showToast]);
+      },
+    });
+  }, [gameId, gameName, navigate, patientId]);
 
   if (isLoading) {
     return (
@@ -135,7 +130,7 @@ const GameEngine = () => {
         <div className="flex-1">
           <h1 className="text-lg font-bold text-white">{gameName || 'Game'}</h1>
           <p className="text-xs text-slate-500">
-            Patient: {user?.name || 'Guest'}
+            Patient: {currentPatient?.name || user?.name || 'Guest'}
           </p>
         </div>
       </div>

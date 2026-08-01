@@ -1,673 +1,649 @@
 // frontend/src/games/CatchFlex.jsx
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useMediaPipeHands, HAND_LANDMARKS } from '../hooks/useMediaPipeUpperBody';
-import { useGameEngine, GAME_STATES } from '../hooks/useGameEngine.js';
+import React, { useReducer, useRef, useEffect, useCallback, useState } from 'react';
+import Phaser from 'phaser';
+import { useMediaPipePose } from '../hooks/usePoseDetection';
 import { useAudioFeedback } from '../hooks/useAudioFeedback.js';
+import { useSessionTelemetry } from '../hooks/useSessionTelemetry';
 
-const CONFIG = {
-  BASKET_WIDTH: 100,
-  BASKET_HEIGHT: 60,
-  ITEM_TIMEOUT: {
-    easy: 8000,
-    medium: 6000,
-    hard: 4000,
+/**
+ * 5. CONFIG-DRIVEN DIFFICULTY (Constraint 5)
+ * Per constraint 7, fall speed MUST come from here (not hardcoded) — this
+ * is the one game where object motion itself is time-pressured, so the
+ * pressure has to be difficulty-documented rather than an arbitrary miss
+ * timer.
+ *
+ * THERAPIST CONFIG: sessionLength, restInterval, catchRadius, and maxReps
+ * below are DEFAULTS. A `therapistConfig` prop (see component below) can
+ * override any of them per-patient without touching this table — the table
+ * still defines the beginner/intermediate/advanced baselines the spec asks
+ * for; therapistConfig is the per-patient adjustment layer on top.
+ */
+const GAME_CONFIG = {
+  BEGINNER: {
+    itemSize: 70,
+    fallSpeed: 1.2,
+    catchRadius: 90,
+    points: 10,
+    restInterval: 500,
+    instructionDuration: 1200,
+    sessionLength: 60,
+    maxReps: null, // null = no rep cap, time-limited only
   },
-  DIFFICULTY: {
-    easy: {
-      fallSpeed: 2,
-      itemSize: 40,
-    },
-    medium: {
-      fallSpeed: 3.5,
-      itemSize: 35,
-    },
-    hard: {
-      fallSpeed: 5,
-      itemSize: 28,
-    },
+  INTERMEDIATE: {
+    itemSize: 50,
+    fallSpeed: 2.2,
+    catchRadius: 70,
+    points: 20,
+    restInterval: 400,
+    instructionDuration: 1000,
+    sessionLength: 60,
+    maxReps: null,
+  },
+  ADVANCED: {
+    itemSize: 36,
+    fallSpeed: 3.5,
+    catchRadius: 55,
+    points: 35,
+    restInterval: 300,
+    instructionDuration: 800,
+    sessionLength: 60,
+    maxReps: null,
   },
 };
 
 const ITEM_TYPES = [
-  { id: 'apple', label: '🍎', color: '#EF4444', points: 10 },
-  { id: 'ball', label: '⚽', color: '#3B82F6', points: 12 },
-  { id: 'star', label: '⭐', color: '#F59E0B', points: 15 },
-  { id: 'heart', label: '❤️', color: '#EC4899', points: 20 },
-  { id: 'diamond', label: '💎', color: '#8B5CF6', points: 25 },
+  { id: 'apple', label: '🍎', points: 10 },
+  { id: 'ball', label: '⚽', points: 12 },
+  { id: 'star', label: '⭐', points: 15 },
+  { id: 'heart', label: '❤️', points: 20 },
+  { id: 'diamond', label: '💎', points: 25 },
 ];
 
-export default function CatchFlex({ onSessionEnd, patientId, gameId = 'catch-flex' }) {
-  // ===== State =====
-  const [currentItem, setCurrentItem] = useState(null);
-  const [itemIndex, setItemIndex] = useState(0);
-  const [basketX, setBasketX] = useState(0);
-  const [calibrationData, setCalibrationData] = useState(null);
-  const [difficulty, setDifficulty] = useState('easy');
-  const [feedbackMessage, setFeedbackMessage] = useState('');
-  const [feedbackType, setFeedbackType] = useState('info');
-  const [comboCount, setComboCount] = useState(0);
-  const [particles, setParticles] = useState([]);
-  const [catchHistory, setCatchHistory] = useState([]);
-  const [reactionTimes, setReactionTimes] = useState([]);
-  const [showInstructions, setShowInstructions] = useState(true);
+const GAME_STATES = {
+  IDLE: 'IDLE',
+  INSTRUCTIONS: 'INSTRUCTIONS', // NEW: session-level patient instructions, pre-play
+  INSTRUCTION: 'INSTRUCTION', // per-object "close your hand" card (unchanged)
+  AWAITING_MOVEMENT: 'AWAITING_MOVEMENT',
+  SUCCESS: 'SUCCESS',
+  TIMEOUT: 'TIMEOUT',
+  COMPLETED: 'COMPLETED',
+};
 
-  // ===== Refs =====
-  const canvasRef = useRef(null);
-  const containerRef = useRef(null);
-  const animationRef = useRef(null);
-  const itemTimeoutRef = useRef(null);
-  const itemStartTimeRef = useRef(null);
+const DIFFICULTY_LEVEL_NUMBER = { BEGINNER: 1, INTERMEDIATE: 2, ADVANCED: 3 };
 
-  // ===== Hooks =====
-  const {
-    videoRef,
-    landmarks,
-    gesture,
-    isLoading: handsLoading,
-    error: handsError,
-  } = useMediaPipeHands({
-    enabled: true,
-    onHandsUpdate: handleHandsUpdate,
-  });
+const initialState = {
+  status: GAME_STATES.IDLE,
+  score: 0,
+  reps: 0,
+  successes: 0,
+  misses: 0,
+  maxCombo: 0,
+  combo: 0,
+  timeRemaining: 60,
+  difficulty: 'BEGINNER',
+};
 
-  const {
-    state,
-    score,
-    addScore,
-    timeRemaining,
-    progress,
-    metrics,
-    isCalibrated,
-    countdown,
-    startCountdown,
-    pauseGame,
-    resumeGame,
-    resetGame,
-    recordAttempt,
-    completeCalibration,
-  } = useGameEngine({
-    gameId,
-    duration: 60,
-    onComplete: handleGameComplete,
-  });
+function gameReducer(state, action) {
+  switch (action.type) {
+    case 'START_SESSION':
+      return { ...state, status: GAME_STATES.INSTRUCTION, timeRemaining: action.sessionLength };
+    case 'SHOW_OBJECT':
+      return { ...state, status: GAME_STATES.AWAITING_MOVEMENT };
+    case 'RESOLVE_SUCCESS': {
+      const combo = state.combo + 1;
+      return {
+        ...state,
+        status: GAME_STATES.SUCCESS,
+        score: state.score + action.points,
+        reps: state.reps + 1,
+        successes: state.successes + 1,
+        combo,
+        maxCombo: Math.max(state.maxCombo, combo),
+      };
+    }
+    case 'RESOLVE_TIMEOUT':
+      return {
+        ...state,
+        status: GAME_STATES.TIMEOUT,
+        reps: state.reps + 1,
+        misses: state.misses + 1,
+        combo: 0,
+      };
+    case 'NEXT_OBJECT':
+      return { ...state, status: GAME_STATES.INSTRUCTION };
+    case 'TICK':
+      if (state.timeRemaining <= 0) return { ...state, status: GAME_STATES.COMPLETED };
+      return { ...state, timeRemaining: state.timeRemaining - 1 };
+    case 'REP_CAP_REACHED':
+      return { ...state, status: GAME_STATES.COMPLETED };
+    case 'SET_DIFFICULTY':
+      return { ...state, difficulty: action.difficulty };
+    case 'RESET':
+      return { ...initialState, difficulty: state.difficulty };
+    default:
+      return state;
+  }
+}
 
-  const audio = useAudioFeedback();
+const EMA_ALPHA = 0.45;
 
-  // ===== Helpers =====
-  const getWristPosition = useCallback(() => {
-    if (!landmarks || landmarks.length === 0) return null;
-    const wrist = landmarks[HAND_LANDMARKS.WRIST];
-    const container = containerRef.current;
-    if (!container) return null;
-    const rect = container.getBoundingClientRect();
-    return {
-      x: (1 - wrist.x) * rect.width,
-      y: wrist.y * rect.height,
-    };
-  }, [landmarks]);
+class CatchFlexScene extends Phaser.Scene {
+  constructor() {
+    super('CatchFlexScene');
+    this.fallingItem = null;
+    this.activeObjectCount = 0;
+    this.emaWrist = null;
+  }
 
-  const isHandClosed = useCallback(() => {
-    return gesture === 'fist' || gesture === 'closed';
-  }, [gesture]);
+  init(data) {
+    this.reactData = data;
+    this.config = data.effectiveConfig;
+  }
 
-  // ===== Item Management =====
-  const spawnItem = useCallback(() => {
-    if (state !== GAME_STATES.PLAYING) return;
+  create() {
+    this.graphics = this.add.graphics();
+    const { width, height } = this.cameras.main;
 
-    const container = containerRef.current;
-    if (!container) return;
-    const rect = container.getBoundingClientRect();
+    this.fpsText = this.add.text(width - 150, height - 60, 'FPS: 60', {
+      fontSize: '14px', fill: '#00ff00', backgroundColor: '#000000aa', padding: { x: 6, y: 4 },
+    }).setDepth(1000);
+    this.objectCounter = this.add.text(width - 150, height - 30, 'Active Objects: 0', {
+      fontSize: '14px', fill: '#ffffff', backgroundColor: '#000000aa', padding: { x: 6, y: 4 },
+    }).setDepth(1000);
 
-    const difficultyConfig = CONFIG.DIFFICULTY[difficulty] || CONFIG.DIFFICULTY.easy;
+    this.instructionOverlay = this.add.container(width / 2, height / 2).setDepth(2000).setVisible(false);
+    const bg = this.add.rectangle(0, 0, 450, 120, 0x1e293b, 0.95).setOrigin(0.5);
+    const text = this.add.text(0, 0, 'MOVE YOUR HAND TO CATCH!', {
+      fontSize: '22px', fill: '#2dd4bf', fontStyle: 'bold', fontFamily: 'Inter, sans-serif',
+    }).setOrigin(0.5);
+    this.instructionOverlay.add([bg, text]);
+
+    this.events.on('state-update', (state) => {
+      this.gameState = state;
+      this.handleStateTransition(state);
+    });
+  }
+
+  handleStateTransition(state) {
+    if (state.status === GAME_STATES.INSTRUCTION) {
+      this.showInstruction();
+    } else if (state.status === GAME_STATES.AWAITING_MOVEMENT) {
+      if (!this.fallingItem) this.spawnItem();
+    } else if (state.status === GAME_STATES.COMPLETED) {
+      this.cleanup();
+    }
+  }
+
+  showInstruction() {
+    if (this.instructionOverlay.visible) return;
+    this.instructionOverlay.setVisible(true);
+    this.time.delayedCall(this.config.instructionDuration, () => {
+      this.instructionOverlay.setVisible(false);
+      this.reactData.dispatch({ type: 'SHOW_OBJECT' });
+    });
+  }
+
+  // 1. SINGLE-OBJECT INVARIANT
+  spawnItem() {
+    if (this.fallingItem) {
+      console.assert(this.activeObjectCount === 0, '[CatchFlex] Invariant Violation');
+      this.fallingItem.destroy();
+      this.fallingItem = null;
+      this.activeObjectCount = 0;
+    }
+
+    const { width } = this.cameras.main;
+    const { itemSize } = this.config;
     const type = ITEM_TYPES[Math.floor(Math.random() * ITEM_TYPES.length)];
 
-    const size = difficultyConfig.itemSize;
-    const x = size + Math.random() * (rect.width - size * 2);
-    const y = -size;
+    const x = Phaser.Math.Between(itemSize, width - itemSize);
+    const y = -itemSize;
 
-    const newItem = {
-      id: `item-${Date.now()}-${itemIndex}`,
-      x,
-      y,
-      size,
-      type,
-      speed: difficultyConfig.fallSpeed * (0.8 + Math.random() * 0.4),
-      rotation: 0,
-      rotationSpeed: (Math.random() - 0.5) * 0.03,
-      isCaught: false,
-    };
+    this.fallingItem = this.add.container(x, y).setDepth(500);
+    const g = this.add.graphics();
+    g.lineStyle(3, 0x3b82f6, 0.9);
+    g.strokeCircle(0, 0, itemSize / 2);
+    g.fillStyle(0x3b82f6, 0.15);
+    g.fillCircle(0, 0, itemSize / 2);
+    const label = this.add.text(0, 0, type.label, { fontSize: `${itemSize * 0.65}px` }).setOrigin(0.5);
+    this.fallingItem.add([g, label]);
+    this.fallingItem.setData('size', itemSize);
+    this.fallingItem.setData('points', type.points);
+    this.fallingItem.setData('startTime', this.time.now);
 
-    setCurrentItem(newItem);
-    setItemIndex((prev) => prev + 1);
-    itemStartTimeRef.current = Date.now();
+    this.activeObjectCount = 1;
+    this.updateObjectCounter();
+  }
 
-    // Set timeout for this item
-    clearTimeout(itemTimeoutRef.current);
-    const timeoutDuration = CONFIG.ITEM_TIMEOUT[difficulty] || CONFIG.ITEM_TIMEOUT.easy;
-    itemTimeoutRef.current = setTimeout(() => {
-      if (state === GAME_STATES.PLAYING && currentItem && !currentItem.isCaught) {
-        missItem(newItem);
+  updateObjectCounter() {
+    this.objectCounter.setText(`Active Objects: ${this.activeObjectCount}`);
+    this.objectCounter.setColor(this.activeObjectCount > 1 ? '#ef4444' : '#ffffff');
+  }
+
+  resolveItem(success) {
+    if (!this.fallingItem) return;
+
+    const startTime = this.fallingItem.getData('startTime');
+    const timeTaken = this.time.now - startTime;
+    const points = success ? this.fallingItem.getData('points') : 0;
+
+    this.reactData.onObjectResolution({
+      success,
+      timeTaken,
+      accuracy: success ? 100 : 0,
+      points,
+    });
+
+    if (success) this.reactData.audio.playSuccess();
+    else this.reactData.audio.playMiss();
+
+    this.fallingItem.destroy();
+    this.fallingItem = null;
+    this.activeObjectCount = 0;
+    this.updateObjectCounter();
+
+    this.reactData.dispatch({ type: success ? 'RESOLVE_SUCCESS' : 'RESOLVE_TIMEOUT', points });
+
+    this.time.delayedCall(this.config.restInterval, () => {
+      if (this.gameState?.status !== GAME_STATES.COMPLETED) {
+        this.reactData.dispatch({ type: 'NEXT_OBJECT' });
       }
-    }, timeoutDuration);
-  }, [state, difficulty, itemIndex]);
+    });
+  }
 
-  const catchItem = useCallback((item) => {
-    if (item.isCaught) return;
+  update(time, delta) {
+    this.fpsText.setText(`FPS: ${Math.round(this.game.loop.actualFps)}`);
 
-    item.isCaught = true;
-
-    // Spawn particles
-    spawnParticles(item.x, item.y, item.type.color, 30);
-
-    // Calculate reaction time
-    const reactionTime = itemStartTimeRef.current ? (Date.now() - itemStartTimeRef.current) / 1000 : null;
-    if (reactionTime) {
-      setReactionTimes((prev) => [...prev, reactionTime]);
+    // NOTE: switched from MediaPipe Hands (fingertip/gesture landmarks) to
+    // MediaPipe Pose (body keypoints, wrist only). Pose tracking has no
+    // per-finger data, so the "close your hand into a fist" catch gate is
+    // gone — catching is now purely proximity-based (wrist within
+    // catchRadius of the falling item), same mechanic CloudReach already
+    // uses for popping clouds.
+    const keypoints = this.reactData.landmarksRef.current;
+    if (keypoints) {
+      const wrist = keypoints.rightWrist?.visible ? keypoints.rightWrist
+        : (keypoints.leftWrist?.visible ? keypoints.leftWrist : null);
+      if (wrist) {
+        const { width, height } = this.cameras.main;
+        const wristPos = { x: wrist.x, y: wrist.y };
+        if (!this.emaWrist) {
+          this.emaWrist = wristPos;
+        } else {
+          this.emaWrist.x = this.emaWrist.x + EMA_ALPHA * (wristPos.x - this.emaWrist.x);
+          this.emaWrist.y = this.emaWrist.y + EMA_ALPHA * (wristPos.y - this.emaWrist.y);
+        }
+      }
     }
 
-    // Update score
-    const points = item.type.points || 10;
-    const comboBonus = Math.floor(comboCount / 3) * 5;
-    const totalPoints = points + comboBonus;
-    addScore(totalPoints);
-    setComboCount((prev) => prev + 1);
-    audio.playSuccess();
+    if (this.fallingItem) {
+      // CONSTRAINT 7 / BUG-FIX: fall speed comes purely from GAME_CONFIG
+      // (merged with therapistConfig), scaled by delta so it's frame-rate
+      // independent rather than a fixed per-frame pixel step.
+      this.fallingItem.y += this.config.fallSpeed * (delta / 16.6667);
 
-    // Record attempt
-    recordAttempt(true);
-
-    setFeedbackMessage(`+${totalPoints} 🎯`);
-    setFeedbackType('success');
-
-    // Track catch history
-    setCatchHistory((prev) => [...prev, { time: Date.now(), type: item.type.id }]);
-
-    // Spawn next item after delay
-    clearTimeout(itemTimeoutRef.current);
-    itemTimeoutRef.current = setTimeout(() => {
-      if (state === GAME_STATES.PLAYING) {
-        spawnItem();
+      // Natural miss condition: item exits the bottom of the play area.
+      if (this.fallingItem.y > this.cameras.main.height + this.config.itemSize) {
+        this.resolveItem(false);
       }
-    }, 800);
-  }, [comboCount, audio, recordAttempt, state, spawnItem, addScore]);
+    }
 
-  const missItem = useCallback((item) => {
-    if (item.isCaught) return;
+    this.draw();
 
-    item.isCaught = true;
-    recordAttempt(false);
-    setComboCount(0);
-    audio.playMiss();
-    setFeedbackMessage('Missed!');
-    setFeedbackType('miss');
-
-    // Spawn next item after delay
-    clearTimeout(itemTimeoutRef.current);
-    itemTimeoutRef.current = setTimeout(() => {
-      if (state === GAME_STATES.PLAYING) {
-        spawnItem();
+    // SUCCESS CONDITION: wrist intercepts the item's position before it
+    // exits the bottom.
+    if (this.fallingItem && this.emaWrist) {
+      const dist = Phaser.Math.Distance.Between(this.emaWrist.x, this.emaWrist.y, this.fallingItem.x, this.fallingItem.y);
+      if (dist < this.config.catchRadius) {
+        this.resolveItem(true);
       }
-    }, 1500);
-  }, [audio, recordAttempt, state, spawnItem]);
+    }
+  }
 
-  const spawnParticles = useCallback((x, y, color, count = 20) => {
-    const newParticles = Array.from({ length: count }, () => ({
-      x,
-      y,
-      vx: (Math.random() - 0.5) * 8,
-      vy: (Math.random() - 0.5) * 8 - 2,
-      life: 1,
-      decay: 0.01 + Math.random() * 0.02,
-      radius: 2 + Math.random() * 4,
-      color,
-    }));
-    setParticles((prev) => [...prev, ...newParticles]);
+  draw() {
+    this.graphics.clear();
+
+    if (this.emaWrist) {
+      this.graphics.lineStyle(4, 0xfbbf24, 0.9);
+      this.graphics.strokeCircle(this.emaWrist.x, this.emaWrist.y, this.config.catchRadius);
+      this.graphics.fillStyle(0xfbbf24, 0.9);
+      this.graphics.fillCircle(this.emaWrist.x, this.emaWrist.y, 10);
+    }
+  }
+
+  cleanup() {
+    if (this.fallingItem) {
+      this.fallingItem.destroy();
+      this.fallingItem = null;
+      this.activeObjectCount = 0;
+    }
+  }
+}
+
+/**
+ * therapistConfig (optional): lets a therapist override the per-patient
+ * session shape without touching GAME_CONFIG's beginner/intermediate/
+ * advanced baselines. All fields optional — anything omitted falls back to
+ * the difficulty tier's default.
+ *   sessionLength: number (seconds) — overall session time cap
+ *   restInterval: number (ms) — pause between items
+ *   catchRadius: number (px) — hand-catch tolerance ("movement angle"
+ *     equivalent for this game — a tighter radius demands more precise
+ *     positioning, a looser one is more forgiving for limited mobility)
+ *   maxReps: number | null — if set, session also ends after this many
+ *     resolved items (success or miss), independent of the time cap
+ */
+export default function CatchFlex({ onSessionEnd, patientId, gameId = 'catch-flex', therapistConfig = {}, qaAdapterRef } = {}) {
+  const [state, dispatch] = useReducer(gameReducer, initialState);
+  const containerRef = useRef(null);
+  const gameRef = useRef(null);
+  const landmarksRef = useRef(null); // { gesture, landmarks }
+  const audio = useAudioFeedback();
+  const { startSession, saveRep, finishSession } = useSessionTelemetry({ gameId, gameName: 'Catch & Flex' });
+
+  // FIX (stale closure): the previous version read `state.reps` inside
+  // handleObjectResolution and used `state.reps + 1` as repNumber. But
+  // handleObjectResolution is handed to Phaser exactly once, inside the
+  // mount effect below (`[]` deps) — so Phaser always held the FIRST
+  // render's closure, where state.reps was permanently 0. Every rep this
+  // game ever saved was recorded as repNumber 1. A ref-based counter,
+  // incremented at the moment of resolution, isn't subject to that.
+  const repCounterRef = useRef(0);
+  const sessionStartRef = useRef(null);
+
+  const effectiveConfig = { ...GAME_CONFIG[state.difficulty], ...therapistConfig };
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [therapistSettings, setTherapistSettings] = useState({
+    sessionLength: null,
+    restInterval: null,
+    catchRadius: null,
+    maxReps: null,
+  });
+
+  // Merge therapistSettings into effectiveConfig when provided
+  Object.assign(effectiveConfig, {
+    ...(therapistSettings.sessionLength != null ? { sessionLength: therapistSettings.sessionLength } : {}),
+    ...(therapistSettings.restInterval != null ? { restInterval: therapistSettings.restInterval } : {}),
+    ...(therapistSettings.catchRadius != null ? { catchRadius: therapistSettings.catchRadius } : {}),
+    ...(therapistSettings.maxReps != null ? { maxReps: therapistSettings.maxReps } : {}),
+  });
+
+  // FIX: was `state.status !== IDLE && !== COMPLETED && !== PAUSED` — i.e.
+  // disabled during IDLE, which is exactly the screen the "view
+  // instructions" / "begin session" flow lives on. useMediaPipePose's
+  // isLoading starts `true` and only updates once its setup effect
+  // actually runs, which requires `enabled` to already be true. That's a
+  // deadlock: the button in InstructionsGate stays disabled until
+  // poseLoading resolves, but poseLoading can never resolve while still on
+  // the IDLE screen the button lives on. Enabling from mount all the way
+  // through until COMPLETED lets the model/camera load in the background
+  // while the patient is on the IDLE screen, so it's normally ready by the
+  // time they tap through to Begin Session.
+  const mpEnabled = state.status !== GAME_STATES.COMPLETED;
+
+  const { videoRef, isLoading: poseLoading } = useMediaPipePose({
+    enabled: mpEnabled,
+    silent: true, // no React re-renders on pose-tracking updates
+    onPoseUpdate: (keypoints) => {
+      landmarksRef.current = keypoints;
+    },
+  });
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || !qaAdapterRef) return;
+    qaAdapterRef.current = {
+      startSession: () => handleStart(),
+      spawnItem: () => { if (gameRef.current?.scene?.keys['CatchFlexScene']) gameRef.current.scene.keys['CatchFlexScene'].spawnItem(); },
+      injectLandmarks: (payload) => { landmarksRef.current = payload; },
+      simulateSuccess: () => { if (gameRef.current?.scene?.keys['CatchFlexScene']) gameRef.current.scene.keys['CatchFlexScene'].resolveItem(true); },
+      simulateFailure: () => { if (gameRef.current?.scene?.keys['CatchFlexScene']) gameRef.current.scene.keys['CatchFlexScene'].resolveItem(false); },
+      getState: () => ({ state, scene: gameRef.current ? gameRef.current.scene.keys['CatchFlexScene'] : null }),
+      restartSession: () => dispatch({ type: 'RESET' }),
+      cleanup: () => { if (gameRef.current) { try { gameRef.current.destroy(true); } catch (_) {} } },
+    };
+    return () => { if (qaAdapterRef) qaAdapterRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qaAdapterRef, state]);
+
+  const handleObjectResolution = useCallback(async (telemetry) => {
+    repCounterRef.current += 1;
+    await saveRep({
+      exerciseId: gameId,
+      exerciseName: 'Catch & Flex',
+      repNumber: repCounterRef.current,
+      rom: 0, // this game tracks catch precision, not joint ROM
+      confidence: telemetry.accuracy / 100,
+      isCorrect: telemetry.success,
+    });
+  }, [saveRep, gameId]);
+
+  useEffect(() => {
+    if (!containerRef.current || gameRef.current) return;
+    const initPhaser = () => {
+      const width = containerRef.current ? containerRef.current.clientWidth : 640;
+      const height = containerRef.current ? containerRef.current.clientHeight : 480;
+      if (width === 0) { setTimeout(initPhaser, 100); return; }
+      const config = {
+        type: Phaser.AUTO, parent: containerRef.current, width, height, transparent: true,
+        scene: CatchFlexScene, physics: { default: 'arcade' }, fps: { target: 60, forceSetTimeOut: true },
+      };
+      const game = new Phaser.Game(config);
+      gameRef.current = game;
+      game.scene.start('CatchFlexScene', {
+        dispatch, landmarksRef, audio, onObjectResolution: handleObjectResolution,
+        effectiveConfig,
+      });
+    };
+    initPhaser();
+    return () => { if (gameRef.current) { gameRef.current.destroy(true); gameRef.current = null; } };
+    // Intentionally mount-only: effectiveConfig/difficulty are locked in at
+    // START_SESSION time (see handleStart), same as the other games —
+    // changing difficulty mid-session isn't a supported flow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ===== Hand Update Handler =====
-  function handleHandsUpdate({ gesture, landmarks }) {
-    if (state !== GAME_STATES.PLAYING) return;
-
-    const wrist = getWristPosition();
-    if (!wrist) return;
-
-    // Update basket position
-    const container = containerRef.current;
-    if (container) {
-      const rect = container.getBoundingClientRect();
-      const newX = Math.max(0, Math.min(rect.width - CONFIG.BASKET_WIDTH, wrist.x - CONFIG.BASKET_WIDTH / 2));
-      setBasketX(newX);
-    }
-
-    // Check if current item is in the basket
-    if (currentItem && !currentItem.isCaught) {
-      const basketCenterX = wrist.x;
-      const basketTop = wrist.y - 20;
-      const basketBottom = wrist.y + 20;
-
-      if (currentItem.y + currentItem.size > basketTop && currentItem.y < basketBottom) {
-        if (Math.abs(currentItem.x - basketCenterX) < CONFIG.BASKET_WIDTH / 2) {
-          // Check if hand is closed to catch
-          if (isHandClosed()) {
-            catchItem(currentItem);
-          }
-        }
-      }
-    }
-  }
-
-  // ===== Game Handlers =====
-  function handleGameComplete(metrics) {
-    audio.playGameEnd();
-    const avgReactionTime = reactionTimes.length > 0
-      ? reactionTimes.reduce((a, b) => a + b, 0) / reactionTimes.length
-      : 0;
-
-    onSessionEnd?.({
-      gameId,
-      score: metrics.score,
-      accuracy: metrics.accuracy,
-      attempts: metrics.attempts,
-      successes: metrics.successes,
-      misses: metrics.misses,
-      duration: metrics.duration,
-      maxCombo: comboCount,
-      avgReactionTime,
-      catches: metrics.successes,
-    });
-  }
-
-  const handleStartGame = useCallback(() => {
-    if (!isCalibrated) {
-      setFeedbackMessage('Calibrating...');
-      setFeedbackType('info');
-      const calData = { timestamp: Date.now() };
-      setCalibrationData(calData);
-      completeCalibration();
-      audio.playCalibrationComplete();
-      setFeedbackMessage('Calibration complete!');
-      setTimeout(() => setFeedbackMessage(''), 1000);
-      setShowInstructions(false);
-      startCountdown();
-    } else {
-      setShowInstructions(false);
-      startCountdown();
-    }
-  }, [isCalibrated, completeCalibration, startCountdown, audio]);
-
-  // ===== Canvas Rendering =====
-  const renderCanvas = useCallback(() => {
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-
-    const ctx = canvas.getContext('2d');
-    const rect = container.getBoundingClientRect();
-    const w = rect.width;
-    const h = rect.height;
-
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
-    }
-
-    ctx.clearRect(0, 0, w, h);
-
-    // Draw current item
-    if (currentItem && !currentItem.isCaught) {
-      const item = currentItem;
-
-      ctx.save();
-      ctx.translate(item.x, item.y);
-      ctx.rotate(item.rotation);
-
-      // Glow
-      const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, item.size * 1.2);
-      gradient.addColorStop(0, item.type.color + '40');
-      gradient.addColorStop(1, item.type.color + '00');
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(0, 0, item.size * 1.2, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Item body
-      ctx.shadowColor = 'rgba(0,0,0,0.3)';
-      ctx.shadowBlur = 15;
-      ctx.beginPath();
-      ctx.arc(0, 0, item.size / 2, 0, Math.PI * 2);
-      ctx.fillStyle = item.type.color + '33';
-      ctx.fill();
-      ctx.strokeStyle = item.type.color;
-      ctx.lineWidth = 3;
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-
-      // Item label
-      ctx.font = `${item.size * 0.6}px serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(item.type.label, 0, 0);
-
-      ctx.restore();
-
-      // Update item position
-      item.y += item.speed;
-      item.rotation += item.rotationSpeed || 0;
-
-      // Check if off screen
-      if (item.y > h + item.size) {
-        if (!item.isCaught) {
-          missItem(item);
-        }
-      }
-    }
-
-    // Draw basket
-    const basketY = h - 80;
-    const basketXPos = basketX;
-
-    // Basket shadow
-    ctx.shadowColor = 'rgba(0,0,0,0.3)';
-    ctx.shadowBlur = 20;
-
-    // Basket body
-    ctx.beginPath();
-    ctx.moveTo(basketXPos, basketY);
-    ctx.quadraticCurveTo(basketXPos - 20, basketY + CONFIG.BASKET_HEIGHT, basketXPos, basketY + CONFIG.BASKET_HEIGHT);
-    ctx.quadraticCurveTo(basketXPos + CONFIG.BASKET_WIDTH / 2, basketY + CONFIG.BASKET_HEIGHT + 10, basketXPos + CONFIG.BASKET_WIDTH, basketY + CONFIG.BASKET_HEIGHT);
-    ctx.quadraticCurveTo(basketXPos + CONFIG.BASKET_WIDTH + 20, basketY + CONFIG.BASKET_HEIGHT, basketXPos + CONFIG.BASKET_WIDTH, basketY);
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(45, 212, 191, 0.2)';
-    ctx.fill();
-    ctx.strokeStyle = '#2DD4BF';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-
-    // Basket inner glow
-    const innerGradient = ctx.createLinearGradient(basketXPos, basketY, basketXPos, basketY + CONFIG.BASKET_HEIGHT);
-    innerGradient.addColorStop(0, 'rgba(45, 212, 191, 0.1)');
-    innerGradient.addColorStop(1, 'rgba(45, 212, 191, 0.3)');
-    ctx.fillStyle = innerGradient;
-    ctx.beginPath();
-    ctx.moveTo(basketXPos + 10, basketY + 5);
-    ctx.quadraticCurveTo(basketXPos + CONFIG.BASKET_WIDTH / 2, basketY + CONFIG.BASKET_HEIGHT, basketXPos + CONFIG.BASKET_WIDTH - 10, basketY + 5);
-    ctx.fill();
-
-    // Basket label
-    ctx.fillStyle = 'rgba(255,255,255,0.3)';
-    ctx.font = '12px Inter, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText('🖐', basketXPos + CONFIG.BASKET_WIDTH / 2, basketY - 10);
-
-    // Draw wrist position
-    const wrist = getWristPosition();
-    if (wrist) {
-      // Wrist glow
-      const gradient = ctx.createRadialGradient(
-        wrist.x, wrist.y, 0,
-        wrist.x, wrist.y, 25
-      );
-      gradient.addColorStop(0, 'rgba(251, 191, 36, 0.4)');
-      gradient.addColorStop(1, 'rgba(251, 191, 36, 0)');
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(wrist.x, wrist.y, 25, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Wrist dot
-      ctx.beginPath();
-      ctx.arc(wrist.x, wrist.y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = '#FBBF24';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-
-    // Draw particles
-    setParticles((prev) => {
-      const updated = prev
-        .map((p) => ({
-          ...p,
-          x: p.x + p.vx,
-          y: p.y + p.vy,
-          life: p.life - p.decay,
-          vy: p.vy + 0.1,
-        }))
-        .filter((p) => p.life > 0);
-
-      updated.forEach((p) => {
-        ctx.globalAlpha = p.life;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.radius * p.life, 0, Math.PI * 2);
-        ctx.fillStyle = p.color;
-        ctx.fill();
-      });
-      ctx.globalAlpha = 1;
-
-      return updated;
-    });
-
-    // Draw combo counter
-    if (comboCount > 2) {
-      ctx.fillStyle = 'rgba(251, 191, 36, 0.9)';
-      ctx.font = 'bold 24px Inter, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillText(`🔥 x${comboCount}`, w / 2, 80);
-    }
-
-    // Draw feedback message
-    if (feedbackMessage) {
-      ctx.fillStyle = feedbackType === 'success' ? '#10B981' :
-                      feedbackType === 'miss' ? '#EF4444' : 'rgba(255,255,255,0.8)';
-      ctx.font = 'bold 24px Inter, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(feedbackMessage, w / 2, h - 30);
-    }
-
-    animationRef.current = requestAnimationFrame(renderCanvas);
-  }, [currentItem, basketX, feedbackMessage, feedbackType, comboCount, getWristPosition]);
-
-  // ===== Effects =====
   useEffect(() => {
-    if (state === GAME_STATES.PLAYING) {
-      spawnItem();
-      audio.playGameStart();
-    }
-  }, [state, spawnItem, audio]);
+    if (gameRef.current) gameRef.current.events.emit('state-update', state);
+  }, [state]);
 
   useEffect(() => {
-    renderCanvas();
-    return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-      if (itemTimeoutRef.current) {
-        clearTimeout(itemTimeoutRef.current);
-      }
-    };
-  }, [renderCanvas]);
+    if (state.status === GAME_STATES.AWAITING_MOVEMENT || state.status === GAME_STATES.INSTRUCTION) {
+      const timer = setInterval(() => dispatch({ type: 'TICK' }), 1000);
+      return () => clearInterval(timer);
+    }
+  }, [state.status]);
 
-  // ===== UI Render =====
-  const isPlaying = state === GAME_STATES.PLAYING || state === GAME_STATES.COUNTDOWN;
-  const isPaused = state === GAME_STATES.PAUSED;
-  const isCompleted = state === GAME_STATES.COMPLETED;
+  // Rep-cap enforcement: therapistConfig.maxReps ends the session early,
+  // independent of the time cap, once that many items have been resolved.
+  useEffect(() => {
+    const cap = effectiveConfig.maxReps;
+    if (cap && state.reps >= cap && state.status !== GAME_STATES.COMPLETED) {
+      dispatch({ type: 'REP_CAP_REACHED' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.reps]);
+
+  useEffect(() => {
+    if (state.status === GAME_STATES.COMPLETED) {
+      const accuracy = state.reps > 0 ? Math.round((state.successes / state.reps) * 100) : 0;
+      const durationSeconds = sessionStartRef.current
+        ? Math.round((Date.now() - sessionStartRef.current) / 1000)
+        : effectiveConfig.sessionLength - state.timeRemaining;
+      const stars = accuracy >= 85 ? 3 : accuracy >= 60 ? 2 : accuracy > 0 ? 1 : 0;
+
+      // Rebuilt to match the backend Session schema (sessionController.js
+      // completeSession/finishPublicSession) — the original sent
+      // {score, accuracy, reps, successes, misses, maxCombo}, none of which
+      // besides score/accuracy/maxCombo are real schema fields, so
+      // durationSeconds/missedActions/exerciseResults were silently dropped.
+      const summary = {
+        score: state.score,
+        level: DIFFICULTY_LEVEL_NUMBER[state.difficulty] || 1,
+        accuracy,
+        combo: state.combo,
+        maxCombo: state.maxCombo,
+        stars,
+        exerciseResults: [{
+          exerciseId: gameId,
+          name: 'Catch & Flex',
+          setsCompleted: 1,
+          repsCompleted: state.reps,
+          averageRom: 0,
+          maxRom: 0,
+          accuracy,
+          score: state.score,
+        }],
+        durationSeconds,
+        notes: '',
+        gameType: gameId,
+        missedActions: state.misses,
+      };
+      finishSession(summary);
+      onSessionEnd?.(summary);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.status]);
+
+  const handleStart = () => {
+    repCounterRef.current = 0;
+    sessionStartRef.current = Date.now();
+    dispatch({ type: 'START_SESSION', sessionLength: effectiveConfig.sessionLength });
+    audio.playGameStart();
+    startSession(patientId);
+  };
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-slate-950 overflow-hidden">
-      <video
-        ref={videoRef}
-        className="absolute inset-0 w-full h-full object-cover"
-        playsInline
-        muted
-        autoPlay
-        style={{ transform: 'scaleX(-1)' }}
-      />
+    <div className="relative w-full h-full bg-slate-950 overflow-hidden font-sans">
+      <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }} autoPlay muted playsInline />
+      <div ref={containerRef} className="absolute inset-0 w-full h-full z-10" />
 
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 w-full h-full pointer-events-none"
-      />
-
-      {/* HUD */}
-      <div className="absolute top-4 left-4 right-4 flex justify-between items-start pointer-events-none z-10">
-        <div className="bg-black/70 backdrop-blur-sm rounded-xl px-4 py-3 border border-white/10 min-w-[80px]">
-          <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">Score</div>
-          <div className="text-3xl font-bold text-amber-400">{score}</div>
+      <div className="absolute top-6 left-6 right-6 flex justify-between items-start pointer-events-none z-20">
+        <div className="flex gap-4">
+          <StatCard label="Score" value={state.score} color="text-amber-400" />
+          <StatCard label="Catches" value={`${state.successes}`} color="text-teal-400" />
+          {state.combo > 2 && <StatCard label="Combo" value={`x${state.combo}`} color="text-orange-400" />}
         </div>
-        <div className="bg-black/70 backdrop-blur-sm rounded-xl px-4 py-3 text-center border border-white/10 min-w-[80px]">
-          <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">Time</div>
-          <div className={`text-3xl font-bold ${timeRemaining <= 10 ? 'text-red-400' : 'text-white'}`}>
-            {timeRemaining}s
+        <div className="bg-black/80 backdrop-blur-md rounded-2xl px-6 py-4 border border-white/10 text-center min-w-[120px]">
+          <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Time Remaining</div>
+          <div className={`text-3xl font-black ${state.timeRemaining <= 10 ? 'text-red-500 animate-pulse' : 'text-white'}`}>
+            {state.timeRemaining}s
           </div>
-        </div>
-        <div className="bg-black/70 backdrop-blur-sm rounded-xl px-4 py-3 text-center border border-white/10 min-w-[80px]">
-          <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">Accuracy</div>
-          <div className="text-3xl font-bold text-teal-400">{metrics.accuracy}%</div>
         </div>
       </div>
 
-      {/* Countdown overlay */}
-      {state === GAME_STATES.COUNTDOWN && (
-        <div className="absolute inset-0 flex items-center justify-center z-20 bg-slate-950/80 backdrop-blur-sm">
-          <div className="text-8xl font-bold text-white animate-pulse">
-            {countdown > 0 ? countdown : 'GO!'}
-          </div>
-        </div>
-      )}
-
-      {/* Instructions overlay */}
-      {state === GAME_STATES.IDLE && showInstructions && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-20 bg-slate-950/90 backdrop-blur-sm p-8">
+      {state.status === GAME_STATES.IDLE && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center z-30 bg-slate-950/90 backdrop-blur-xl p-8 text-center">
           <div className="text-6xl mb-6">🧺</div>
-          <h2 className="text-3xl font-bold text-white mb-4">Catch & Flex</h2>
-          
-          <div className="max-w-md mb-6">
-            <p className="text-slate-400 text-center mb-6">
-              Catch falling objects to improve reaction time and hand coordination.
-            </p>
-            
-            <div className="bg-slate-800/50 rounded-lg p-4 mb-6 border border-slate-700">
-              <h3 className="text-sm font-semibold text-teal-400 mb-3">📋 Patient Instructions</h3>
-              <div className="space-y-2 text-sm text-slate-300">
-                <p><strong>Starting Posture:</strong> Sit or stand comfortably with good posture</p>
-                <p><strong>Arm Position:</strong> Hold your hand at the center of the screen</p>
-                <p><strong>Movement:</strong> Move your hand to position the basket under falling objects</p>
-                <p><strong>Catch:</strong> Close your hand (make a fist) to catch each object</p>
-                <p><strong>Timing:</strong> One object at a time – focus on each catch</p>
-              </div>
-            </div>
-
-            <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
-              <h3 className="text-sm font-semibold text-blue-400 mb-3">💪 Therapy Benefits</h3>
-              <div className="space-y-1 text-sm text-slate-300">
-                <p>• Elbow Flexion & Shoulder Abduction</p>
-                <p>• Coordination & Motor Planning</p>
-                <p>• Reaction Time Improvement</p>
-              </div>
-            </div>
+          <h1 className="text-4xl font-black text-white mb-2 tracking-tight">Catch & Flex</h1>
+          <p className="text-slate-400 mb-10 max-w-sm">
+            Catch falling objects by moving your hand to meet them as they reach you — improves reaction time and coordination.
+          </p>
+          <div className="grid grid-cols-3 gap-3 mb-10 w-full max-w-sm">
+            {['BEGINNER', 'INTERMEDIATE', 'ADVANCED'].map((d) => (
+              <button key={d} onClick={() => dispatch({ type: 'SET_DIFFICULTY', difficulty: d })}
+                className={`py-3 rounded-xl text-xs font-black tracking-widest transition-all border ${
+                  state.difficulty === d ? 'bg-teal-600 border-teal-500 text-white' : 'bg-slate-900 border-slate-800 text-slate-500'
+                }`}
+              > {d} </button>
+            ))}
           </div>
+            <div className="max-w-md mb-6 w-full">
+              <button onClick={() => setSettingsOpen((s) => !s)} className="w-full py-3 bg-slate-900 border border-slate-800 rounded-xl text-sm font-bold text-slate-300 mb-4">
+                Therapist Settings {settingsOpen ? '▲ Hide' : '▼ Show'}
+              </button>
+              {settingsOpen && (
+                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 space-y-4 text-left">
+                  <SettingSlider label="Repetitions (max)" value={therapistSettings.maxReps ?? ''} min={0} max={50} step={1} onChange={(v) => setTherapistSettings(s => ({ ...s, maxReps: v }))} display={`${therapistSettings.maxReps ?? 'auto'}`} />
+                  <SettingSlider label="Catch radius" value={therapistSettings.catchRadius ?? effectiveConfig.catchRadius} min={30} max={200} step={5} onChange={(v) => setTherapistSettings(s => ({ ...s, catchRadius: v }))} display={`${therapistSettings.catchRadius ?? effectiveConfig.catchRadius}px`} />
+                  <SettingSlider label="Session length" value={therapistSettings.sessionLength ?? effectiveConfig.sessionLength} min={30} max={600} step={30} onChange={(v) => setTherapistSettings(s => ({ ...s, sessionLength: v }))} display={`${Math.round((therapistSettings.sessionLength ?? effectiveConfig.sessionLength) / 60)} min`} />
+                  <SettingSlider label="Rest interval" value={therapistSettings.restInterval ?? effectiveConfig.restInterval} min={100} max={2000} step={50} onChange={(v) => setTherapistSettings(s => ({ ...s, restInterval: v }))} display={`${therapistSettings.restInterval ?? effectiveConfig.restInterval} ms`} />
+                </div>
+              )}
+            </div>
 
-          <button
-            onClick={handleStartGame}
-            disabled={handsLoading}
-            className="mt-8 px-8 py-4 bg-teal-600 hover:bg-teal-500 rounded-xl font-bold text-white text-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {handsLoading ? 'Loading...' : 'Start Session'}
-          </button>
-          {handsError && (
-            <p className="mt-4 text-red-400 text-sm">{handsError}</p>
-          )}
+            <InstructionsGate
+              poseLoading={poseLoading}
+              onBegin={handleStart}
+            />
         </div>
       )}
 
-      {/* Pause overlay */}
-      {isPaused && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-20 bg-slate-950/80 backdrop-blur-sm">
-          <div className="text-6xl mb-4">⏸</div>
-          <h2 className="text-2xl font-bold text-white mb-2">Paused</h2>
-          <button
-            onClick={resumeGame}
-            className="px-6 py-3 bg-teal-600 hover:bg-teal-500 rounded-xl font-bold text-white text-lg transition"
-          >
-            Resume
-          </button>
-        </div>
-      )}
-
-      {/* Complete overlay */}
-      {isCompleted && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-20 bg-slate-950/90 backdrop-blur-sm p-8">
-          <div className="text-6xl mb-4">🎉</div>
-          <h2 className="text-3xl font-bold text-white mb-2">Session Complete!</h2>
-          <div className="grid grid-cols-3 gap-4 mt-4">
-            <div className="bg-slate-800/80 rounded-xl p-4 text-center">
-              <div className="text-xs text-slate-400">Score</div>
-              <div className="text-2xl font-bold text-amber-400">{score}</div>
-            </div>
-            <div className="bg-slate-800/80 rounded-xl p-4 text-center">
-              <div className="text-xs text-slate-400">Catches</div>
-              <div className="text-2xl font-bold text-teal-400">{metrics.successes}</div>
-            </div>
-            <div className="bg-slate-800/80 rounded-xl p-4 text-center">
-              <div className="text-xs text-slate-400">Accuracy</div>
-              <div className="text-2xl font-bold text-blue-400">{metrics.accuracy}%</div>
-            </div>
+      {state.status === GAME_STATES.COMPLETED && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center z-30 bg-slate-950/95 backdrop-blur-2xl p-8 text-center text-white">
+          <div className="text-6xl mb-6">🏆</div>
+          <h2 className="text-4xl font-black mb-2">Session Complete!</h2>
+          <div className="grid grid-cols-2 gap-4 w-full max-w-sm my-10">
+            <ResultCard label="Score" value={state.score} />
+            <ResultCard label="Catches" value={state.successes} />
+            <ResultCard label="Accuracy" value={`${state.reps > 0 ? Math.round((state.successes / state.reps) * 100) : 0}%`} />
+            <ResultCard label="Max Combo" value={state.maxCombo} />
           </div>
-          <button
-            onClick={resetGame}
-            className="mt-6 px-6 py-3 bg-teal-600 hover:bg-teal-500 rounded-xl font-bold text-white text-lg transition"
-          >
-            Play Again
-          </button>
+          <button onClick={() => dispatch({ type: 'RESET' })} className="px-12 py-4 bg-teal-600 text-white rounded-2xl font-black text-lg"> TRY AGAIN </button>
         </div>
       )}
+    </div>
+  );
+}
 
-      {/* Controls */}
-      <div className="absolute top-4 right-4 z-10 flex gap-2">
-        {isPlaying && (
-          <button
-            onClick={pauseGame}
-            className="p-2 bg-black/70 hover:bg-black/90 rounded-lg text-white transition"
-          >
-            ⏸
-          </button>
-        )}
-        {isPaused && (
-          <button
-            onClick={resumeGame}
-            className="p-2 bg-black/70 hover:bg-black/90 rounded-lg text-white transition"
-          >
-            ▶
-          </button>
-        )}
-        {(isPlaying || isPaused) && (
-          <button
-            onClick={resetGame}
-            className="p-2 bg-black/70 hover:bg-black/90 rounded-lg text-white transition"
-          >
-            ⟳
-          </button>
-        )}
+// Session-level patient instructions — the 5 required fields (starting
+// posture, arm position, movement, success condition, therapy benefit) —
+// shown once before Phaser initializes, matching the treatment given to
+// RehabSlicer and CloudReach. Separated into its own component only to
+// keep the IDLE-state JSX above readable.
+function InstructionsGate({ poseLoading, onBegin }) {
+  const [open, setOpen] = React.useState(false); // eslint-disable-line react-hooks/rules-of-hooks
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        disabled={poseLoading}
+        className="w-full max-w-xs py-5 bg-white rounded-[2rem] font-black text-slate-950 text-xl shadow-2xl active:scale-95 disabled:opacity-50"
+      >
+        {poseLoading ? "LOADING AI..." : "VIEW INSTRUCTIONS"}
+      </button>
+    );
+  }
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/95 backdrop-blur-xl p-6">
+      <div className="max-w-md w-full bg-slate-900 border border-slate-700 rounded-2xl p-6 text-left">
+        <h3 className="text-xl font-black text-white mb-4 text-center">Patient Instructions</h3>
+        <div className="space-y-3 text-sm text-slate-300">
+          <p><strong className="text-teal-400">Starting Posture:</strong> Sit or stand comfortably, back straight, hold the virtual basket centered in front of you.</p>
+          <p><strong className="text-teal-400">Arm Position:</strong> Elbow bent, forearm roughly level — relaxed, not locked out.</p>
+          <p><strong className="text-teal-400">Movement Required:</strong> Move your arm in a controlled way to bring the basket under each falling object.</p>
+          <p><strong className="text-teal-400">Success Condition:</strong> Move your hand to meet the object as it reaches the basket to catch it.</p>
+          <p><strong className="text-teal-400">Therapy Benefit:</strong> Elbow flexion, shoulder abduction, coordination, and motor planning.</p>
+        </div>
+        <button
+          onClick={onBegin}
+          className="mt-6 w-full py-4 bg-teal-600 hover:bg-teal-500 rounded-xl font-black text-white text-lg transition"
+        >
+          BEGIN SESSION
+        </button>
       </div>
+    </div>
+  );
+}
 
-      {/* Hand status */}
-      {isPlaying && (
-        <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-10">
-          <div className={`px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider border ${
-            getWristPosition()
-              ? 'bg-teal-500/20 border-teal-500/30 text-teal-400'
-              : 'bg-red-500/20 border-red-500/30 text-red-400 animate-pulse'
-          }`}>
-            {getWristPosition() ? '🖐 Hand Detected' : '⚠️ No Hand Detected'}
-          </div>
-        </div>
-      )}
+const StatCard = ({ label, value, color }) => (
+  <div className="bg-black/80 backdrop-blur-md rounded-2xl px-5 py-4 border border-white/10 min-w-[120px]">
+    <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">{label}</div>
+    <div className={`text-3xl font-black ${color}`}>{value}</div>
+  </div>
+);
+
+const ResultCard = ({ label, value }) => (
+  <div className="bg-slate-900/50 border border-slate-800 p-5 rounded-2xl">
+    <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">{label}</div>
+    <div className="text-2xl font-black text-white">{value}</div>
+  </div>
+);
+
+function SettingSlider({ label, value, min, max, step, onChange, display }) {
+  return (
+    <div>
+      <div className="flex justify-between text-xs font-bold text-slate-400 mb-2"><span>{label}</span><span className="text-slate-200">{display}</span></div>
+      <input type="range" min={min} max={max} step={step} value={value || ''} onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-current" />
     </div>
   );
 }
