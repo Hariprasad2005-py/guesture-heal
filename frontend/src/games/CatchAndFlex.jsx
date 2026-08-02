@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Sword, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle, Pill, Stethoscope, Thermometer, Activity } from 'lucide-react';
+import { ShoppingBasket, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle, Apple, Grape, Cherry, Banana } from 'lucide-react';
 import { useMediaPipeUpperBody } from '../hooks/useMediaPipeUpperBody';
 import { usePoseDetection } from '../hooks/usePoseDetection';
 import { useGameEngine, GAME_STATES } from '../hooks/useGameEngine';
@@ -8,14 +8,14 @@ import { useSessionTelemetry } from '../hooks/useSessionTelemetry';
 import { useAudioFeedback } from '../hooks/useAudioFeedback';
 import { usePostureGuidance } from '../hooks/usePostureGuidance';
 
-const MEDICAL_ITEMS = [
-  { icon: Pill, color: 'text-pink-500', bg: 'bg-pink-50', name: 'Medicine' },
-  { icon: Stethoscope, color: 'text-blue-500', bg: 'bg-blue-50', name: 'Stethoscope' },
-  { icon: Thermometer, color: 'text-amber-500', bg: 'bg-amber-50', name: 'Thermometer' },
-  { icon: Activity, color: 'text-emerald-500', bg: 'bg-emerald-50', name: 'Monitor' },
+const FALLING_ITEMS = [
+  { icon: Apple, color: 'text-red-500', bg: 'bg-red-50' },
+  { icon: Grape, color: 'text-purple-500', bg: 'bg-purple-50' },
+  { icon: Cherry, color: 'text-rose-500', bg: 'bg-rose-50' },
+  { icon: Banana, color: 'text-yellow-500', bg: 'bg-yellow-50' },
 ];
 
-export default function RehabSlicer({ onBack, onSessionEnd }) {
+export default function CatchAndFlex({ onBack, onSessionEnd }) {
   const videoRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
   
@@ -54,69 +54,53 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
   });
 
   const [item, setItem] = useState(null);
-  const [sliceProgress, setSliceProgress] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [feedback, setFeedback] = useState(null);
-  const [isReturnToWaist, setIsReturnToWaist] = useState(true);
 
   useEffect(() => {
     if (gameState === GAME_STATES.ACTIVE) {
-      const randomItem = MEDICAL_ITEMS[Math.floor(Math.random() * MEDICAL_ITEMS.length)];
+      const randomItem = FALLING_ITEMS[Math.floor(Math.random() * FALLING_ITEMS.length)];
       const newItem = {
         ...randomItem,
-        x: 30 + Math.random() * 40,
-        y: 20 + Math.random() * 30,
-        size: difficulty === 'Beginner' ? 160 : difficulty === 'Intermediate' ? 130 : 100,
+        x: difficulty === 'Advanced' ? 20 + Math.random() * 60 : 50,
+        y: -10,
+        size: 80,
+        speed: difficulty === 'Beginner' ? 0.4 : difficulty === 'Intermediate' ? 0.7 : 1.0
       };
       setItem(newItem);
-      setSliceProgress(0);
       setFeedback(null);
-      setIsReturnToWaist(true);
     }
   }, [gameState, currentRep, difficulty]);
 
-  const lastPos = useRef(null);
   useEffect(() => {
     if (gameState !== GAME_STATES.ACTIVE || isPaused || !item) return;
 
-    if (isReturnToWaist) {
-      const waistZoneY = 80;
-      if (position.y > waistZoneY) {
-        setIsReturnToWaist(false);
+    setItem(prev => {
+      if (!prev) return null;
+      const nextY = prev.y + prev.speed;
+      const basketY = 80;
+      const basketWidth = 20; 
+      const basketX = position.x;
+      
+      if (nextY >= basketY - 5 && nextY <= basketY + 5) {
+        if (Math.abs(prev.x - basketX) < basketWidth / 2) {
+          setFeedback('success');
+          setTimeout(() => completeRep(true), 500);
+          return null;
+        }
       }
-      return;
-    }
-
-    const dx = position.x - item.x;
-    const dy = position.y - item.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    
-    const hitRadius = (item.size / window.innerWidth) * 100 * 0.7; 
-    
-    if (distance < hitRadius) {
-      if (lastPos.current) {
-        const moveDist = Math.sqrt(
-          Math.pow(position.x - lastPos.current.x, 2) + 
-          Math.pow(position.y - lastPos.current.y, 2)
-        );
-        
-        const speedMultiplier = difficulty === 'Beginner' ? 2.5 : difficulty === 'Intermediate' ? 1.8 : 1.2;
-        
-        setSliceProgress(prev => {
-          const next = prev + moveDist * speedMultiplier;
-          if (next >= 100) {
-            setFeedback('success');
-            setTimeout(() => completeRep(true), 600);
-            return 100;
-          }
-          return next;
-        });
+      
+      if (nextY > 100) {
+        setFeedback('miss');
+        setTimeout(() => completeRep(false), 500);
+        return null;
       }
-    }
+      
+      return { ...prev, y: nextY };
+    });
 
-    lastPos.current = { ...position };
     telemetry.trackMovement(position);
-  }, [position, item, gameState, isPaused, difficulty, completeRep, telemetry, isReturnToWaist]);
+  }, [position, gameState, isPaused, completeRep, telemetry, item]);
 
   const handleStart = () => {
     telemetry.startTracking();
@@ -141,12 +125,12 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
           </button>
           
           <div className="flex items-center gap-6 mb-10">
-            <div className="w-20 h-20 bg-pink-50 text-pink-600 rounded-3xl flex items-center justify-center shadow-sm">
-              <Sword size={40} />
+            <div className="w-20 h-20 bg-purple-50 text-purple-600 rounded-3xl flex items-center justify-center shadow-sm">
+              <ShoppingBasket size={40} />
             </div>
             <div>
-              <h2 className="text-3xl font-bold text-slate-900">Rehab Slicer</h2>
-              <p className="text-slate-500">Swipe medical objects to improve mobility.</p>
+              <h2 className="text-3xl font-bold text-slate-900">Catch & Flex</h2>
+              <p className="text-slate-500">Improve coordination and motor planning.</p>
             </div>
           </div>
 
@@ -155,16 +139,16 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
               <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Instructions</h3>
               <ul className="space-y-3 text-slate-600">
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">1</span>
-                  <span>Start with your hand at your waist.</span>
+                  <span className="w-5 h-5 rounded-full bg-purple-50 text-purple-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">1</span>
+                  <span>Control the basket by moving your hand left and right.</span>
                 </li>
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">2</span>
-                  <span>Swipe through the items as they appear.</span>
+                  <span className="w-5 h-5 rounded-full bg-purple-50 text-purple-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">2</span>
+                  <span>Catch the falling items in the basket.</span>
                 </li>
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">3</span>
-                  <span>Return to start position after each slice.</span>
+                  <span className="w-5 h-5 rounded-full bg-purple-50 text-purple-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">3</span>
+                  <span>Keep your movements steady and controlled.</span>
                 </li>
               </ul>
             </div>
@@ -177,7 +161,7 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
                     onClick={() => changeDifficulty(level)}
                     className={`w-full py-3 px-4 rounded-xl text-left font-medium transition-all border-2 ${
                       difficulty === level 
-                        ? 'bg-pink-50 border-pink-200 text-pink-700' 
+                        ? 'bg-purple-50 border-purple-200 text-purple-700' 
                         : 'bg-white border-slate-100 text-slate-500 hover:border-slate-200'
                     }`}
                   >
@@ -234,7 +218,7 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
             <CheckCircle2 size={40} />
           </div>
           <h2 className="text-3xl font-bold text-slate-900 mb-2">Session Complete</h2>
-          <p className="text-slate-500 mb-10">Excellent work! You've completed your slicing exercises.</p>
+          <p className="text-slate-500 mb-10">Excellent work! You've completed your coordination exercises.</p>
           
           <div className="grid grid-cols-2 gap-4 mb-10">
             <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
@@ -306,59 +290,41 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
           <div className="text-[160px] font-black text-slate-900 animate-pulse">{countdown}</div>
         )}
 
-        {gameState === GAME_STATES.ACTIVE && item && (
+        {gameState === GAME_STATES.ACTIVE && (
           <>
-            {isReturnToWaist && (
-              <div className="absolute bottom-0 left-0 right-0 h-40 bg-pink-50/50 border-t-4 border-pink-100 flex flex-col items-center justify-center animate-pulse z-10">
-                <div className="w-16 h-16 rounded-full bg-pink-100 flex items-center justify-center text-pink-500 mb-2">
-                  <RotateCcw size={32} />
+            {item && (
+              <div 
+                className={`absolute transition-all duration-75 flex items-center justify-center ${feedback === 'success' ? 'scale-0 opacity-0' : 'scale-100 opacity-100'}`}
+                style={{ 
+                  left: `${item.x}%`, 
+                  top: `${item.y}%`,
+                  width: `${item.size}px`,
+                  height: `${item.size}px`,
+                  transform: 'translate(-50%, -50%)'
+                }}
+              >
+                <div className={`w-full h-full rounded-2xl flex items-center justify-center shadow-lg border-2 border-white ${item.bg}`}>
+                  <item.icon size={item.size * 0.6} className={item.color} />
                 </div>
-                <span className="text-pink-600 font-black uppercase tracking-[0.2em] text-sm">Return hand to waist</span>
               </div>
             )}
 
             <div 
-              className={`absolute transition-all duration-300 flex items-center justify-center ${feedback === 'success' ? 'scale-150 opacity-0' : 'scale-100 opacity-100'}`}
+              className="absolute bottom-[20%] transition-all duration-75 flex flex-col items-center"
               style={{ 
-                left: `${item.x}%`, 
-                top: `${item.y}%`,
-                width: `${item.size}px`,
-                height: `${item.size}px`,
-                transform: 'translate(-50%, -50%)'
+                left: `${position.x}%`,
+                width: '160px',
+                transform: 'translateX(-50%)'
               }}
             >
-              <div className={`w-full h-full rounded-2xl flex items-center justify-center shadow-lg border-2 border-white ${item.bg}`}>
-                <item.icon size={item.size * 0.6} className={item.color} />
+              <div className="w-full h-24 bg-purple-600 rounded-b-[40px] rounded-t-xl shadow-2xl flex items-center justify-center border-t-8 border-purple-500 relative overflow-hidden">
+                <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-white via-transparent to-transparent" />
+                <ShoppingBasket size={48} className="text-purple-200" />
               </div>
-              <svg className="absolute inset-0 w-full h-full -rotate-90">
-                <circle
-                  cx="50%" cy="50%" r="48%"
-                  fill="none" stroke="white" strokeWidth="6" strokeOpacity="0.3"
-                />
-                <circle
-                  cx="50%" cy="50%" r="48%"
-                  fill="none" stroke="white" strokeWidth="6"
-                  strokeDasharray="301.6"
-                  strokeDashoffset={301.6 - (301.6 * sliceProgress) / 100}
-                  strokeLinecap="round"
-                />
-              </svg>
+              <div className="w-4 h-4 bg-slate-900 rounded-full mt-4 opacity-20" />
             </div>
           </>
         )}
-
-        <div 
-          className="absolute w-12 h-12 pointer-events-none z-50 transition-all duration-75"
-          style={{ 
-            left: `${position.x}%`, 
-            top: `${position.y}%`,
-            transform: 'translate(-50%, -50%)'
-          }}
-        >
-          <div className="w-full h-full rounded-full border-4 border-slate-900 bg-white/30 backdrop-blur-sm shadow-xl flex items-center justify-center">
-            <Sword size={24} className="text-slate-900 -rotate-45" />
-          </div>
-        </div>
 
         {!guidance.isReady && !isPaused && gameState === GAME_STATES.ACTIVE && (
           <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-md border border-amber-200 px-8 py-4 rounded-[24px] shadow-2xl flex items-center gap-4 animate-bounce z-30">
@@ -381,12 +347,12 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
               <div className="space-y-4">
                 <div className="flex justify-between">
                   <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Repetitions</label>
-                  <span className="text-pink-600 font-bold">{settings.reps}</span>
+                  <span className="text-purple-600 font-bold">{settings.reps}</span>
                 </div>
                 <input 
                   type="range" min="1" max="20" value={settings.reps} 
                   onChange={(e) => updateSettings({ reps: parseInt(e.target.value) })}
-                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-pink-600"
+                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-purple-600"
                 />
               </div>
             </div>

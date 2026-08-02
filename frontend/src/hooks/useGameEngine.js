@@ -1,168 +1,83 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 
+/**
+ * useGameEngine.js
+ * Shared game-loop/state-machine for rehab games.
+ * States: idle, instructions, countdown, active, feedback, rest, complete
+ */
 export const GAME_STATES = {
   IDLE: 'idle',
+  INSTRUCTIONS: 'instructions',
   COUNTDOWN: 'countdown',
-  PLAYING: 'playing',
-  PAUSED: 'paused',
-  COMPLETED: 'completed',
+  ACTIVE: 'active',
+  FEEDBACK: 'feedback',
+  REST: 'rest',
+  COMPLETE: 'complete'
 };
 
-export const useGameEngine = ({
-  gameId = 'game',
-  duration = 60,
-  onComplete = null,
-} = {}) => {
-  const [state, setState] = useState(GAME_STATES.IDLE);
-  const [score, setScore] = useState(0);
-  const [timeRemaining, setTimeRemaining] = useState(duration);
+export function useGameEngine({
+  totalReps = 10,
+  restInterval = 2000,
+  onRepComplete,
+  onSessionComplete
+} = {}) {
+  const [gameState, setGameState] = useState(GAME_STATES.INSTRUCTIONS);
+  const [currentRep, setCurrentRep] = useState(0);
   const [countdown, setCountdown] = useState(3);
-  const [isCalibrated, setIsCalibrated] = useState(false);
-  const [attempts, setAttempts] = useState(0);
-  const [successes, setSuccesses] = useState(0);
-  const [misses, setMisses] = useState(0);
-  const [reactionTimes, setReactionTimes] = useState([]);
-  const [romValues, setRomValues] = useState([]);
-  const timerRef = useRef(null);
-  const countdownRef = useRef(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [sessionStartTime, setSessionStartTime] = useState(null);
 
-  // Add score
-  const addScore = useCallback((points) => {
-    setScore((prev) => prev + points);
+  const startSession = useCallback(() => {
+    setGameState(GAME_STATES.COUNTDOWN);
+    setCountdown(3);
+    setSessionStartTime(Date.now());
   }, []);
 
-  // Record attempt
-  const recordAttempt = useCallback((success, rom = null, reactionTime = null) => {
-    setAttempts((prev) => prev + 1);
-    if (success) {
-      setSuccesses((prev) => prev + 1);
+  const pauseSession = useCallback(() => setIsPaused(true), []);
+  const resumeSession = useCallback(() => setIsPaused(false), []);
+
+  const completeRep = useCallback((success) => {
+    if (gameState !== GAME_STATES.ACTIVE) return;
+    
+    onRepComplete?.(success);
+    
+    if (currentRep >= totalReps) {
+      setGameState(GAME_STATES.COMPLETE);
+      onSessionComplete?.();
     } else {
-      setMisses((prev) => prev + 1);
+      setGameState(GAME_STATES.FEEDBACK);
+      setTimeout(() => {
+        setGameState(GAME_STATES.REST);
+        setTimeout(() => {
+          setCurrentRep(prev => prev + 1);
+          setGameState(GAME_STATES.ACTIVE);
+        }, restInterval);
+      }, 1000);
     }
-    if (rom !== null) {
-      setRomValues((prev) => [...prev, rom]);
-    }
-    if (reactionTime !== null) {
-      setReactionTimes((prev) => [...prev, reactionTime]);
-    }
-  }, []);
+  }, [gameState, currentRep, totalReps, restInterval, onRepComplete, onSessionComplete]);
 
-  // Complete calibration
-  const completeCalibration = useCallback(() => {
-    setIsCalibrated(true);
-  }, []);
-
-  // Start countdown
-  const startCountdown = useCallback(() => {
-    setState(GAME_STATES.COUNTDOWN);
-    setCountdown(3);
-
-    countdownRef.current = setInterval(() => {
-      setCountdown((prev) => {
-        if (prev <= 1) {
-          clearInterval(countdownRef.current);
-          setState(GAME_STATES.PLAYING);
-          setTimeRemaining(duration);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-  }, [duration]);
-
-  // Pause game
-  const pauseGame = useCallback(() => {
-    setState(GAME_STATES.PAUSED);
-    if (timerRef.current) clearInterval(timerRef.current);
-  }, []);
-
-  // Resume game
-  const resumeGame = useCallback(() => {
-    setState(GAME_STATES.PLAYING);
-  }, []);
-
-  // Reset game
-  const resetGame = useCallback(() => {
-    setState(GAME_STATES.IDLE);
-    setScore(0);
-    setTimeRemaining(duration);
-    setCountdown(3);
-    setAttempts(0);
-    setSuccesses(0);
-    setMisses(0);
-    setReactionTimes([]);
-    setRomValues([]);
-    setIsCalibrated(false);
-    if (timerRef.current) clearInterval(timerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-  }, [duration]);
-
-  // Game timer
   useEffect(() => {
-    if (state !== GAME_STATES.PLAYING) return;
-
-    timerRef.current = setInterval(() => {
-      setTimeRemaining((prev) => {
-        if (prev <= 1) {
-          clearInterval(timerRef.current);
-          setState(GAME_STATES.COMPLETED);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [state]);
-
-  // Handle game completion
-  useEffect(() => {
-    if (state === GAME_STATES.COMPLETED) {
-      const metrics = {
-        score,
-        accuracy: attempts > 0 ? Math.round((successes / attempts) * 100) : 0,
-        attempts,
-        successes,
-        misses,
-        reactionTimes,
-        romValues,
-        duration,
-      };
-      onComplete?.(metrics);
+    if (gameState === GAME_STATES.COUNTDOWN) {
+      if (countdown > 0) {
+        const timer = setTimeout(() => setCountdown(c => c - 1), 1000);
+        return () => clearTimeout(timer);
+      } else {
+        setCurrentRep(1);
+        setGameState(GAME_STATES.ACTIVE);
+      }
     }
-  }, [state, score, attempts, successes, misses, reactionTimes, romValues, duration, onComplete]);
-
-  // Calculate progress
-  const progress = Math.round(((duration - timeRemaining) / duration) * 100);
-
-  // Calculate metrics
-  const metrics = {
-    score,
-    accuracy: attempts > 0 ? Math.round((successes / attempts) * 100) : 0,
-    attempts,
-    successes,
-    misses,
-    reactionTimes,
-    romValues,
-    duration,
-  };
+  }, [gameState, countdown]);
 
   return {
-    state,
-    score,
-    addScore,
-    timeRemaining,
-    progress,
-    metrics,
-    isCalibrated,
+    gameState,
+    setGameState,
+    currentRep,
     countdown,
-    startCountdown,
-    pauseGame,
-    resumeGame,
-    resetGame,
-    recordAttempt,
-    completeCalibration,
+    isPaused,
+    startSession,
+    pauseSession,
+    resumeSession,
+    completeRep,
+    sessionStartTime
   };
-};
+}

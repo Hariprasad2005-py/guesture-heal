@@ -5,7 +5,7 @@ import { useAppStore } from '../store/appStore';
 import PrecisionReach from '../games/PrecisionReach';
 import RehabSlicer from '../games/RehabSlicer';
 import CloudReach from '../games/CloudReach';
-import CatchFlex from '../games/CatchFlex';
+import CatchAndFlex from '../games/CatchAndFlex';
 import CanvasAir from '../games/CanvasAir';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 
@@ -13,7 +13,7 @@ const GAME_COMPONENTS = {
   'precision-reach': PrecisionReach,
   'rehab-slicer': RehabSlicer,
   'cloud-reach': CloudReach,
-  'catch-flex': CatchFlex,
+  'catch-flex': CatchAndFlex,
   'canvas-air': CanvasAir,
 };
 
@@ -146,6 +146,7 @@ const GameEngine = () => {
       <div className="flex-1 relative overflow-hidden">
         <GameComponent
           onSessionEnd={handleSessionEnd}
+          onBack={() => navigate('/games')}
           patientId={patientId || 'guest'}
           gameId={gameId}
         />
