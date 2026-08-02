@@ -48,18 +48,18 @@ export default function SkeletonOverlay({ containerRef, keypoints, overallStatus
         ctx.strokeStyle = color;
         ctx.lineWidth = 4;
         bones.forEach(([a, b]) => {
-          if (!a || !b || a.visible === false || b.visible === false) return;
+          if (!a || !b || a.visibility < 0.5 || b.visibility < 0.5) return;
           ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
+          ctx.moveTo(a.x * w, a.y * h);
+          ctx.lineTo(b.x * w, b.y * h);
           ctx.stroke();
         });
         ctx.shadowBlur = 0;
 
         Object.values(keypoints).forEach((p) => {
-          if (!p || p.visible === false) return;
+          if (!p || p.visibility < 0.5 || typeof p.x !== 'number') return;
           ctx.beginPath();
-          ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+          ctx.arc(p.x * w, p.y * h, 7, 0, Math.PI * 2);
           ctx.fillStyle = color;
           ctx.fill();
           ctx.strokeStyle = 'rgba(0,0,0,0.4)';
