@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Target, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle } from 'lucide-react';
+import SkeletonOverlay from '../components/rehab/SkeletonOverlay';
 import { useMediaPipeUpperBody } from '../hooks/useMediaPipeUpperBody';
 import { usePoseDetection } from '../hooks/usePoseDetection';
 import { useGameEngine, GAME_STATES } from '../hooks/useGameEngine';
@@ -10,6 +11,7 @@ import { usePostureGuidance } from '../hooks/usePostureGuidance';
 
 export default function PrecisionReach({ onBack, onSessionEnd }) {
   const videoRef = useRef(null);
+  const containerRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
   
   const { isLoading, isActive } = useMediaPipeUpperBody({ 
@@ -252,7 +254,7 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] relative overflow-hidden font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
+    <div ref={containerRef} className="min-h-screen bg-[#F8FAFC] relative overflow-hidden font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
       {/* HUD */}
       <div className="absolute top-0 left-0 right-0 p-8 flex justify-between items-center z-20">
         <div className="flex items-center gap-4">
@@ -338,6 +340,15 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
             <div className="w-2 h-2 bg-slate-900 rounded-full" />
           </div>
         </div>
+
+        {/* Skeleton Overlay */}
+        {gameState === GAME_STATES.ACTIVE && !isMouseMode && (
+          <SkeletonOverlay 
+            containerRef={containerRef}
+            keypoints={poseData?.raw}
+            overallStatus={guidance.isReady ? 'ok' : 'minor'}
+          />
+        )}
 
         {/* Posture Guidance Toast */}
         {!guidance.isReady && !isPaused && gameState === GAME_STATES.ACTIVE && (
