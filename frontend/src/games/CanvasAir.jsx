@@ -126,25 +126,41 @@ export default function CanvasAir({ onBack, onSessionEnd }) {
             </div>
             <div>
               <h2 className="text-3xl font-bold text-slate-900">Canvas Air</h2>
-              <p className="text-slate-500">Trace shapes to improve fine motor control.</p>
+              <p className="text-slate-500 font-medium">Therapy Benefit: Improves wrist extension, elbow flexion, fine motor control, and hand stability.</p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
             <div>
-              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Instructions</h3>
-              <ul className="space-y-3 text-slate-600">
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Session Guidance</h3>
+              <ul className="space-y-4 text-slate-600">
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">1</span>
-                  <span>Follow the shape outline on the screen.</span>
+                  <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">1</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Starting Posture</p>
+                    <p>Sit upright with your shoulders level and arm ready to trace.</p>
+                  </div>
                 </li>
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">2</span>
-                  <span>Move slowly and accurately along the path.</span>
+                  <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">2</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Arm Position</p>
+                    <p>Hold your hand in front of you as if holding a virtual pen.</p>
+                  </div>
                 </li>
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">3</span>
-                  <span>Focus on stability rather than speed.</span>
+                  <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">3</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Movement Required</p>
+                    <p>Trace the shape outline slowly and accurately in the air.</p>
+                  </div>
+                </li>
+                <li className="flex gap-3 text-sm">
+                  <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">4</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Success Condition</p>
+                    <p>Complete the trace of the entire shape to finish the repetition.</p>
+                  </div>
                 </li>
               </ul>
             </div>
@@ -350,8 +366,8 @@ export default function CanvasAir({ onBack, onSessionEnd }) {
                 <X size={28} />
               </button>
             </div>
-            <div className="p-8 space-y-8">
-              <div className="space-y-4">
+            <div className="p-8 space-y-6 overflow-y-auto max-h-[60vh]">
+              <div className="space-y-3">
                 <div className="flex justify-between">
                   <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Repetitions</label>
                   <span className="text-pink-600 font-bold">{settings.reps}</span>
@@ -359,6 +375,28 @@ export default function CanvasAir({ onBack, onSessionEnd }) {
                 <input 
                   type="range" min="1" max="20" value={settings.reps} 
                   onChange={(e) => updateSettings({ reps: parseInt(e.target.value) })}
+                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-pink-600"
+                />
+              </div>
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Session Length (min)</label>
+                  <span className="text-pink-600 font-bold">{settings.sessionLength || 5}m</span>
+                </div>
+                <input 
+                  type="range" min="1" max="15" value={settings.sessionLength || 5} 
+                  onChange={(e) => updateSettings({ sessionLength: parseInt(e.target.value) })}
+                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-pink-600"
+                />
+              </div>
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Rest Interval (sec)</label>
+                  <span className="text-pink-600 font-bold">{settings.restInterval || 2}s</span>
+                </div>
+                <input 
+                  type="range" min="1" max="10" value={settings.restInterval || 2} 
+                  onChange={(e) => updateSettings({ restInterval: parseInt(e.target.value) })}
                   className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-pink-600"
                 />
               </div>

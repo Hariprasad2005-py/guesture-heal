@@ -123,25 +123,41 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
             </div>
             <div>
               <h2 className="text-3xl font-bold text-slate-900">Precision Reach</h2>
-              <p className="text-slate-500">Improve shoulder stability and arm reach.</p>
+              <p className="text-slate-500 font-medium">Therapy Benefit: Improves shoulder stability, arm reach, and motor control.</p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
             <div>
-              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Instructions</h3>
-              <ul className="space-y-3 text-slate-600">
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Session Guidance</h3>
+              <ul className="space-y-4 text-slate-600">
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-blue-50 text-blue-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">1</span>
-                  <span>Sit up straight with shoulders level.</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-50 text-blue-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">1</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Starting Posture</p>
+                    <p>Sit upright in a chair with your back supported and feet flat.</p>
+                  </div>
                 </li>
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-blue-50 text-blue-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">2</span>
-                  <span>Move your hand to the blue target.</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-50 text-blue-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">2</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Arm Position</p>
+                    <p>Keep your active arm relaxed at your side before reaching.</p>
+                  </div>
                 </li>
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-blue-50 text-blue-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">3</span>
-                  <span>Hold steady until the ring fills up.</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-50 text-blue-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">3</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Movement Required</p>
+                    <p>Reach slowly toward the blue target on the screen.</p>
+                  </div>
+                </li>
+                <li className="flex gap-3 text-sm">
+                  <span className="w-6 h-6 rounded-full bg-blue-50 text-blue-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">4</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Success Condition</p>
+                    <p>Keep your hand inside the target for 3-5 seconds until it fills.</p>
+                  </div>
                 </li>
               </ul>
             </div>
@@ -369,8 +385,8 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
                 <X size={28} />
               </button>
             </div>
-            <div className="p-8 space-y-8">
-              <div className="space-y-4">
+            <div className="p-8 space-y-6 overflow-y-auto max-h-[60vh]">
+              <div className="space-y-3">
                 <div className="flex justify-between">
                   <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Repetitions</label>
                   <span className="text-blue-600 font-bold">{settings.reps}</span>
@@ -381,14 +397,36 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
                   className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
                 />
               </div>
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div className="flex justify-between">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Hold Duration (s)</label>
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Hold Duration (sec)</label>
                   <span className="text-blue-600 font-bold">{settings.holdDuration}s</span>
                 </div>
                 <input 
-                  type="range" min="1" max="5" step="0.5" value={settings.holdDuration} 
-                  onChange={(e) => updateSettings({ holdDuration: parseFloat(e.target.value) })}
+                  type="range" min="1" max="10" value={settings.holdDuration} 
+                  onChange={(e) => updateSettings({ holdDuration: parseInt(e.target.value) })}
+                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                />
+              </div>
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Session Length (min)</label>
+                  <span className="text-blue-600 font-bold">{settings.sessionLength || 5}m</span>
+                </div>
+                <input 
+                  type="range" min="1" max="15" value={settings.sessionLength || 5} 
+                  onChange={(e) => updateSettings({ sessionLength: parseInt(e.target.value) })}
+                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                />
+              </div>
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Rest Interval (sec)</label>
+                  <span className="text-blue-600 font-bold">{settings.restInterval || 2}s</span>
+                </div>
+                <input 
+                  type="range" min="1" max="10" value={settings.restInterval || 2} 
+                  onChange={(e) => updateSettings({ restInterval: parseInt(e.target.value) })}
                   className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
                 />
               </div>
