@@ -77,6 +77,9 @@ export function useMediaPipeUpperBody({
           rightElbow: lm[14],
           leftWrist: lm[15],
           rightWrist: lm[16],
+          nose: lm[0],
+          leftHip: lm[23],
+          rightHip: lm[24],
           midChest: {
             x: (lm[11].x + lm[12].x) / 2,
             y: (lm[11].y + lm[12].y) / 2,

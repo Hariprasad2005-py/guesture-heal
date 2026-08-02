@@ -143,7 +143,7 @@ const GameEngine = () => {
       )}
 
       {/* Game component */}
-      <div className="flex-1 relative overflow-hidden">
+      <div className="flex-1 relative overflow-auto">
         <GameComponent
           onSessionEnd={handleSessionEnd}
           onBack={() => navigate('/games')}

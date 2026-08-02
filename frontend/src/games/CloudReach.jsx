@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Cloud, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle } from 'lucide-react';
+import SkeletonOverlay from '../components/rehab/SkeletonOverlay';
 import { useMediaPipeUpperBody } from '../hooks/useMediaPipeUpperBody';
 import { usePoseDetection } from '../hooks/usePoseDetection';
 import { useGameEngine, GAME_STATES } from '../hooks/useGameEngine';
@@ -10,6 +11,7 @@ import { usePostureGuidance } from '../hooks/usePostureGuidance';
 
 export default function CloudReach({ onBack, onSessionEnd }) {
   const videoRef = useRef(null);
+  const containerRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
   
   const { isLoading, isActive } = useMediaPipeUpperBody({ 
@@ -23,93 +25,122 @@ export default function CloudReach({ onBack, onSessionEnd }) {
   const telemetry = useSessionTelemetry();
   const guidance = usePostureGuidance(poseData);
 
+  const [balloon, setBalloon] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  
+  // Cloud Reach Specific Metrics
+  const [elevationStats, setElevationStats] = useState({
+    maxElevation: 100, // 0 is top
+    sessionBest: 100,
+    fatigueIndicator: 0 // Change in elevation over time
+  });
+
   const {
     gameState,
     setGameState,
     currentRep,
     countdown,
+    timeLeft,
     isPaused,
     startSession,
     pauseSession,
     resumeSession,
-    completeRep
+    completeRep,
+    endSession
   } = useGameEngine({
-    totalReps: settings.reps,
-    restInterval: settings.restInterval,
+    totalReps: 0,
+    sessionLength: settings.sessionLength * 60 || 60,
+    restInterval: (settings.restInterval || 1) * 1000,
     onRepComplete: (success) => {
       telemetry.recordRep(success);
       if (success) playSuccess();
       else playMiss();
     },
     onSessionComplete: () => {
-      telemetry.endSession(settings.reps);
+      telemetry.endSession(100);
     }
   });
 
-  const [cloud, setCloud] = useState(null);
-  const [showSettings, setShowSettings] = useState(false);
-  const [feedback, setFeedback] = useState(null);
-  const [isReturnToStart, setIsReturnToStart] = useState(true);
+  // Adaptive Elevation Logic
+  const [targetElevation, setTargetElevation] = useState(60); // Starting target Y
+
+  const spawnBalloon = useCallback(() => {
+    // Progressive elevation: spawn higher (lower Y) as session continues
+    const progressFactor = (60 - timeLeft) / 60;
+    const baseElevation = 60 - (progressFactor * 40); // Move from 60 down to 20
+    
+    setBalloon({
+      x: 20 + Math.random() * 60,
+      y: 110, // Start below screen
+      speed: difficulty === 'Beginner' ? 0.3 : difficulty === 'Intermediate' ? 0.5 : 0.8,
+      targetY: Math.max(10, baseElevation - Math.random() * 10),
+      size: 140,
+      isHighValue: Math.random() < 0.2
+    });
+    setFeedback(null);
+  }, [difficulty, timeLeft]);
 
   useEffect(() => {
-    if (gameState === GAME_STATES.ACTIVE) {
-      const newCloud = {
-        x: 20 + Math.random() * 60,
-        y: difficulty === 'Beginner' ? 40 + Math.random() * 20 : 15 + Math.random() * 35,
-        size: 160,
-        vx: difficulty === 'Advanced' ? (Math.random() - 0.5) * 0.3 : 0,
-        vy: difficulty === 'Advanced' ? (Math.random() - 0.5) * 0.15 : 0,
-      };
-      setCloud(newCloud);
-      setFeedback(null);
-      setIsReturnToStart(true);
+    if (gameState === GAME_STATES.ACTIVE && !balloon) {
+      spawnBalloon();
     }
-  }, [gameState, currentRep, difficulty]);
+  }, [gameState, balloon, spawnBalloon]);
 
   useEffect(() => {
-    if (gameState !== GAME_STATES.ACTIVE || isPaused || !cloud) return;
+    if (gameState !== GAME_STATES.ACTIVE || isPaused || !balloon) return;
 
-    if (isReturnToStart) {
-      const startZoneY = 65;
-      if (position.y > startZoneY) {
-        setIsReturnToStart(false);
+    // Balloon drifts upward
+    setBalloon(prev => {
+      if (!prev) return null;
+      const nextY = prev.y - prev.speed;
+      
+      // If balloon floats off screen
+      if (nextY < -20) {
+        completeRep(false);
+        return null;
       }
-      return;
-    }
+      return { ...prev, y: nextY };
+    });
 
-    if (difficulty === 'Advanced') {
-      setCloud(prev => {
-        if (!prev) return null;
-        let nextX = prev.x + prev.vx;
-        let nextY = prev.y + prev.vy;
-        if (nextX < 15 || nextX > 85) prev.vx *= -1;
-        if (nextY < 10 || nextY > 50) prev.vy *= -1;
-        return { ...prev, x: nextX, y: nextY };
-      });
-    }
-
-    const dx = position.x - cloud.x;
-    const dy = position.y - cloud.y;
+    // Pop logic
+    const dx = position.x - balloon.x;
+    const dy = position.y - balloon.y;
     const distance = Math.sqrt(dx * dx + dy * dy);
-    const hitRadius = (cloud.size / window.innerWidth) * 100 * 0.5; 
+    const hitRadius = (balloon.size / (containerRef.current?.clientWidth || 1000)) * 100 * 0.6; 
     
     if (distance < hitRadius) {
-      setFeedback('success');
-      setCloud(null);
-      setTimeout(() => completeRep(true), 600);
+      setFeedback('pop');
+      setElevationStats(prev => ({
+        ...prev,
+        maxElevation: Math.min(prev.maxElevation, position.y),
+        sessionBest: Math.min(prev.sessionBest, position.y)
+      }));
+      setTimeout(() => {
+        completeRep(true);
+        setBalloon(null);
+      }, 400);
     }
 
     telemetry.trackMovement(position);
-  }, [position, cloud, gameState, isPaused, difficulty, completeRep, telemetry, isReturnToStart]);
+  }, [position, balloon, gameState, isPaused, completeRep, telemetry]);
 
   const handleStart = () => {
     telemetry.startTracking();
+    setElevationStats({ maxElevation: 100, sessionBest: 100, fatigueIndicator: 0 });
     startSession();
   };
 
   const handleExit = () => {
     if (onSessionEnd && gameState === GAME_STATES.COMPLETE) {
-      onSessionEnd(telemetry.metrics);
+      onSessionEnd({
+        ...telemetry.metrics,
+        customMetrics: {
+          maxElevation: 100 - elevationStats.sessionBest,
+          balloonsPopped: telemetry.metrics.successfulReps,
+          consistency: telemetry.metrics.accuracy
+        }
+      });
     } else {
       onBack();
     }
@@ -130,25 +161,41 @@ export default function CloudReach({ onBack, onSessionEnd }) {
             </div>
             <div>
               <h2 className="text-3xl font-bold text-slate-900">Cloud Reach</h2>
-              <p className="text-slate-500">Reach high to pop clouds and improve arm elevation.</p>
+              <p className="text-slate-500 font-medium">Therapy Benefit: Improves arm elevation, overhead reach, and shoulder flexibility.</p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
             <div>
-              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Instructions</h3>
-              <ul className="space-y-3 text-slate-600">
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Session Guidance</h3>
+              <ul className="space-y-4 text-slate-600">
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-green-50 text-green-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">1</span>
-                  <span>Start with your hand at chest height.</span>
+                  <span className="w-6 h-6 rounded-full bg-green-50 text-green-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">1</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Starting Posture</p>
+                    <p>Sit upright and keep your hand at shoulder height to start.</p>
+                  </div>
                 </li>
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-green-50 text-green-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">2</span>
-                  <span>Reach up and pop the cloud when it appears.</span>
+                  <span className="w-6 h-6 rounded-full bg-green-50 text-green-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">2</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Movement Required</p>
+                    <p>Raise your arm to "pop" balloons as they drift upward.</p>
+                  </div>
                 </li>
                 <li className="flex gap-3 text-sm">
-                  <span className="w-5 h-5 rounded-full bg-green-50 text-green-600 flex-shrink-0 flex items-center justify-center font-bold text-[10px]">3</span>
-                  <span>Return to chest height after each pop.</span>
+                  <span className="w-6 h-6 rounded-full bg-green-50 text-green-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">3</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Progressive Challenge</p>
+                    <p>Balloons will spawn higher as you succeed. Reach for your best!</p>
+                  </div>
+                </li>
+                <li className="flex gap-3 text-sm">
+                  <span className="w-6 h-6 rounded-full bg-green-50 text-green-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">4</span>
+                  <div>
+                    <p className="font-bold text-slate-900">Success Condition</p>
+                    <p>Pop the balloon before it floats off the top of the screen.</p>
+                  </div>
                 </li>
               </ul>
             </div>
@@ -198,13 +245,6 @@ export default function CloudReach({ onBack, onSessionEnd }) {
             Start Session
             <ChevronLeft size={20} className="rotate-180" />
           </button>
-          
-          <button 
-            onClick={() => toggleMouseMode(!isMouseMode)}
-            className="w-full mt-6 text-slate-400 text-xs font-medium hover:text-slate-600 transition-colors"
-          >
-            {isMouseMode ? "Switch to Hand Tracking" : "Use Mouse Input (Alternative)"}
-          </button>
         </div>
       </div>
     );
@@ -222,20 +262,20 @@ export default function CloudReach({ onBack, onSessionEnd }) {
           
           <div className="grid grid-cols-2 gap-4 mb-10">
             <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Balloons Popped</p>
+              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.successfulReps}</p>
+            </div>
+            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Max Elevation</p>
+              <p className="text-3xl font-black text-slate-900">{Math.round(100 - elevationStats.sessionBest)}%</p>
+            </div>
+            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
               <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Accuracy</p>
               <p className="text-3xl font-black text-slate-900">{telemetry.metrics.accuracy}%</p>
             </div>
             <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Completion</p>
-              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.successfulReps} / {settings.reps}</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
               <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Duration</p>
               <p className="text-3xl font-black text-slate-900">{telemetry.metrics.totalTime}s</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Range</p>
-              <p className="text-3xl font-black text-slate-900">{Math.round(telemetry.metrics.totalDistance / 100)}</p>
             </div>
           </div>
 
@@ -260,15 +300,22 @@ export default function CloudReach({ onBack, onSessionEnd }) {
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] relative overflow-hidden font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
+    <div ref={containerRef} className="min-h-screen bg-[#F8FAFC] relative overflow-auto font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
       <div className="absolute top-0 left-0 right-0 p-8 flex justify-between items-center z-20">
         <div className="flex items-center gap-4">
           <button onClick={onBack} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
             <ChevronLeft size={24} />
           </button>
-          <div className="bg-white/80 backdrop-blur-md px-6 py-3 rounded-2xl shadow-sm border border-white">
-            <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Progress</span>
-            <span className="text-slate-900 font-black text-lg">{currentRep} <span className="text-slate-300 mx-1">/</span> {settings.reps}</span>
+          <div className="bg-white/80 backdrop-blur-md px-6 py-3 rounded-2xl shadow-sm border border-white flex items-center gap-4">
+            <div>
+              <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Time</span>
+              <span className="text-slate-900 font-black text-lg">{timeLeft}s</span>
+            </div>
+            <div className="w-px h-6 bg-slate-200" />
+            <div>
+              <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Popped</span>
+              <span className="text-green-600 font-black text-lg">{telemetry.metrics.successfulReps}</span>
+            </div>
           </div>
         </div>
         
@@ -279,48 +326,52 @@ export default function CloudReach({ onBack, onSessionEnd }) {
           <button onClick={() => setShowSettings(true)} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
             <Settings size={24} />
           </button>
-          <button onClick={() => setGameState(GAME_STATES.COMPLETE)} className="bg-red-50/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-red-500 hover:text-red-700 transition-all border border-red-100">
+          <button onClick={endSession} className="bg-red-50/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-red-500 hover:text-red-700 transition-all border border-red-100">
             <X size={24} />
           </button>
         </div>
       </div>
 
-      <div className="w-full h-screen relative flex items-center justify-center">
+      <div className="w-full h-screen relative flex items-center justify-center overflow-hidden">
         {gameState === GAME_STATES.COUNTDOWN && (
           <div className="text-[160px] font-black text-slate-900 animate-pulse">{countdown}</div>
         )}
 
         {gameState === GAME_STATES.ACTIVE && (
           <>
-            {isReturnToStart && (
-              <div className="absolute bottom-0 left-0 right-0 h-1/2 bg-green-50/20 border-t-4 border-green-100 flex flex-col items-center justify-center animate-pulse z-10">
-                <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center text-green-500 mb-2">
-                  <RotateCcw size={32} />
-                </div>
-                <span className="text-green-600 font-black uppercase tracking-[0.2em] text-sm">Return hand to start zone</span>
-              </div>
-            )}
-
-            {cloud && (
+            {/* Elevation Progress Bar */}
+            <div className="absolute left-8 top-1/2 -translate-y-1/2 w-4 h-64 bg-slate-100 rounded-full border border-slate-200 overflow-hidden">
               <div 
-                className={`absolute transition-all duration-500 flex items-center justify-center ${feedback === 'success' ? 'scale-150 opacity-0' : 'scale-100 opacity-100'}`}
+                className="absolute bottom-0 left-0 right-0 bg-green-500 transition-all duration-300"
+                style={{ height: `${100 - position.y}%` }}
+              />
+              <div 
+                className="absolute bottom-0 left-0 right-0 border-t-2 border-green-700 w-full"
+                style={{ height: `${100 - elevationStats.sessionBest}%` }}
+              />
+            </div>
+
+            {balloon && (
+              <div 
+                className={`absolute transition-all duration-75 flex items-center justify-center ${feedback === 'pop' ? 'scale-150 opacity-0' : 'scale-100 opacity-100'}`}
                 style={{ 
-                  left: `${cloud.x}%`, 
-                  top: `${cloud.y}%`,
-                  width: `${cloud.size}px`,
-                  height: `${cloud.size}px`,
+                  left: `${balloon.x}%`, 
+                  top: `${balloon.y}%`,
+                  width: `${balloon.size}px`,
+                  height: `${balloon.size * 1.2}px`,
                   transform: 'translate(-50%, -50%)'
                 }}
               >
-                <div className="w-full h-full text-blue-400/80 drop-shadow-xl">
-                  <Cloud size={cloud.size} fill="currentColor" />
+                <div className={`w-full h-full rounded-[50%] flex items-center justify-center shadow-xl border-4 border-white relative ${balloon.isHighValue ? 'bg-amber-400' : 'bg-blue-400'}`}>
+                   <Cloud size={balloon.size * 0.5} className="text-white/80" />
+                   <div className="absolute bottom-[-10px] left-1/2 -translate-x-1/2 w-1 h-8 bg-slate-400/50" />
                 </div>
-                <div className="absolute text-white font-black text-xl drop-shadow-lg tracking-widest uppercase">Pop</div>
               </div>
             )}
           </>
         )}
 
+        {/* Hand Tracker Cursor */}
         <div 
           className="absolute w-12 h-12 pointer-events-none z-50 transition-all duration-75"
           style={{ 
@@ -329,11 +380,21 @@ export default function CloudReach({ onBack, onSessionEnd }) {
             transform: 'translate(-50%, -50%)'
           }}
         >
-          <div className="w-full h-full rounded-full border-4 border-slate-900 bg-white/30 backdrop-blur-sm shadow-xl flex items-center justify-center">
-            <div className="w-2 h-2 bg-slate-900 rounded-full" />
+          <div className="w-full h-full rounded-full border-4 border-green-500 bg-white/30 backdrop-blur-sm shadow-xl flex items-center justify-center">
+            <div className="w-2 h-2 bg-green-600 rounded-full" />
           </div>
         </div>
 
+        {/* Skeleton Overlay */}
+        {gameState === GAME_STATES.ACTIVE && !isMouseMode && (
+          <SkeletonOverlay 
+            containerRef={containerRef}
+            keypoints={poseData?.raw}
+            overallStatus={guidance.isReady ? 'ok' : 'minor'}
+          />
+        )}
+
+        {/* Posture Guidance Toast */}
         {!guidance.isReady && !isPaused && gameState === GAME_STATES.ACTIVE && (
           <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-md border border-amber-200 px-8 py-4 rounded-[24px] shadow-2xl flex items-center gap-4 animate-bounce z-30">
             <div className="w-3 h-3 bg-amber-500 rounded-full animate-pulse" />
@@ -342,6 +403,7 @@ export default function CloudReach({ onBack, onSessionEnd }) {
         )}
       </div>
 
+      {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-md z-50 flex items-center justify-center p-6">
           <div className="bg-white w-full max-w-md rounded-[32px] shadow-2xl overflow-hidden">
@@ -351,15 +413,15 @@ export default function CloudReach({ onBack, onSessionEnd }) {
                 <X size={28} />
               </button>
             </div>
-            <div className="p-8 space-y-8">
-              <div className="space-y-4">
+            <div className="p-8 space-y-6 overflow-y-auto max-h-[60vh]">
+              <div className="space-y-3">
                 <div className="flex justify-between">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Repetitions</label>
-                  <span className="text-green-600 font-bold">{settings.reps}</span>
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Session Length (min)</label>
+                  <span className="text-green-600 font-bold">{settings.sessionLength || 1}m</span>
                 </div>
                 <input 
-                  type="range" min="1" max="20" value={settings.reps} 
-                  onChange={(e) => updateSettings({ reps: parseInt(e.target.value) })}
+                  type="range" min="1" max="5" value={settings.sessionLength || 1} 
+                  onChange={(e) => updateSettings({ sessionLength: parseInt(e.target.value) })}
                   className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-green-600"
                 />
               </div>
