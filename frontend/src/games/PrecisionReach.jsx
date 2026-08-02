@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Target, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Target, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle, TrendingUp } from 'lucide-react';
 import SkeletonOverlay from '../components/rehab/SkeletonOverlay';
 import { useMediaPipeUpperBody } from '../hooks/useMediaPipeUpperBody';
 import { usePoseDetection } from '../hooks/usePoseDetection';
@@ -25,47 +25,69 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
   const telemetry = useSessionTelemetry();
   const guidance = usePostureGuidance(poseData);
 
+  // Precision Reach specific state
+  const [target, setTarget] = useState(null);
+  const [holdProgress, setHoldProgress] = useState(0);
+  const [showSettings, setShowSettings] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  
+  // Advanced metrics for spec
+  const [reachStats, setReachStats] = useState({
+    maxHeight: 100, // Y is 0-100, 0 is top
+    maxDistance: 0,
+    reachEnvelope: [], // Array of points for heatmap
+    trend: 'stable'
+  });
+
   const {
     gameState,
     setGameState,
     currentRep,
     countdown,
+    timeLeft,
     isPaused,
     startSession,
     pauseSession,
     resumeSession,
-    completeRep
+    completeRep,
+    endSession
   } = useGameEngine({
-    totalReps: settings.reps,
-    restInterval: settings.restInterval,
+    totalReps: 0, // 0 means time-based (60s)
+    sessionLength: settings.sessionLength * 60 || 60,
+    restInterval: (settings.restInterval || 1) * 1000,
     onRepComplete: (success) => {
       telemetry.recordRep(success);
       if (success) playSuccess();
       else playMiss();
     },
     onSessionComplete: () => {
-      telemetry.endSession(settings.reps);
+      telemetry.endSession(100); // Pass dummy target for percentage
     }
   });
 
-  const [target, setTarget] = useState(null);
-  const [holdProgress, setHoldProgress] = useState(0);
-  const [showSettings, setShowSettings] = useState(false);
-  const [feedback, setFeedback] = useState(null);
+  // Adaptive Difficulty State
+  const [reachEnvelope, setReachEnvelope] = useState({ xMin: 30, xMax: 70, yMin: 30, yMax: 70 });
 
-  // Generate new target when rep changes
+  // Generate new target with Progressive Scaling
+  const generateTarget = useCallback(() => {
+    // Progressive scaling: spawn targets near the edges of the current envelope
+    const x = reachEnvelope.xMin + Math.random() * (reachEnvelope.xMax - reachEnvelope.xMin);
+    const y = reachEnvelope.yMin + Math.random() * (reachEnvelope.yMax - reachEnvelope.yMin);
+    
+    setTarget({
+      x,
+      y,
+      size: difficulty === 'Beginner' ? 120 : difficulty === 'Intermediate' ? 100 : 80
+    });
+    setHoldProgress(0);
+    setFeedback(null);
+  }, [reachEnvelope, difficulty]);
+
   useEffect(() => {
-    if (gameState === GAME_STATES.ACTIVE) {
-      const newTarget = {
-        x: 20 + Math.random() * 60,
-        y: difficulty === 'Beginner' ? 60 + Math.random() * 20 : 20 + Math.random() * 60,
-        size: difficulty === 'Beginner' ? 120 : difficulty === 'Intermediate' ? 100 : 80
-      };
-      setTarget(newTarget);
-      setHoldProgress(0);
-      setFeedback(null);
+    if (gameState === GAME_STATES.ACTIVE && !target) {
+      generateTarget();
     }
-  }, [gameState, currentRep, difficulty]);
+  }, [gameState, target, generateTarget]);
 
   // Main game loop
   useEffect(() => {
@@ -75,14 +97,29 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
     const dy = position.y - target.y;
     const distance = Math.sqrt(dx * dx + dy * dy);
     
-    const hitRadius = (target.size / window.innerWidth) * 100 * 0.8; 
+    const hitRadius = (target.size / (containerRef.current?.clientWidth || 1000)) * 100 * 0.8; 
     
     if (distance < hitRadius) {
-      const increment = 100 / (settings.holdDuration * 60); 
+      // Dwell time: 1-1.5s (approx 60-90 frames)
+      const dwellFrames = settings.holdDuration * 60;
+      const increment = 100 / dwellFrames; 
+      
       setHoldProgress(prev => {
         if (prev + increment >= 100) {
           setFeedback('success');
-          setTimeout(() => completeRep(true), 500);
+          
+          // Expand envelope on success
+          setReachEnvelope(prevEnv => ({
+            xMin: Math.max(5, prevEnv.xMin - 2),
+            xMax: Math.min(95, prevEnv.xMax + 2),
+            yMin: Math.max(5, prevEnv.yMin - 3), // Expand more upwards
+            yMax: Math.min(95, prevEnv.yMax + 1)
+          }));
+
+          setTimeout(() => {
+            completeRep(true);
+            setTarget(null);
+          }, 500);
           return 100;
         }
         return prev + increment;
@@ -91,23 +128,43 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
       setHoldProgress(prev => Math.max(0, prev - 0.5));
     }
 
+    // Track metrics
+    setReachStats(prev => {
+      const newMaxHeight = Math.min(prev.maxHeight, position.y);
+      const newMaxDist = Math.max(prev.maxDistance, Math.abs(position.x - 50));
+      return {
+        ...prev,
+        maxHeight: newMaxHeight,
+        maxDistance: newMaxDist,
+        reachEnvelope: [...prev.reachEnvelope.slice(-100), { x: position.x, y: position.y }]
+      };
+    });
+
     telemetry.trackMovement(position);
   }, [position, target, gameState, isPaused, settings.holdDuration, completeRep, telemetry]);
 
   const handleStart = () => {
     telemetry.startTracking();
+    setReachStats({ maxHeight: 100, maxDistance: 0, reachEnvelope: [], trend: 'improving' });
     startSession();
   };
 
   const handleExit = () => {
     if (onSessionEnd && gameState === GAME_STATES.COMPLETE) {
-      onSessionEnd(telemetry.metrics);
+      onSessionEnd({
+        ...telemetry.metrics,
+        customMetrics: {
+          maxHeight: 100 - reachStats.maxHeight,
+          maxDistance: reachStats.maxDistance,
+          targetsHit: telemetry.metrics.successfulReps,
+          reachTrend: reachStats.trend
+        }
+      });
     } else {
       onBack();
     }
   };
 
-  // Instruction Screen
   if (gameState === GAME_STATES.INSTRUCTIONS) {
     return (
       <div className="min-h-screen bg-[#F8FAFC] p-8 flex flex-col items-center justify-center font-sans">
@@ -156,7 +213,7 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
                   <span className="w-6 h-6 rounded-full bg-blue-50 text-blue-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">4</span>
                   <div>
                     <p className="font-bold text-slate-900">Success Condition</p>
-                    <p>Keep your hand inside the target for 3-5 seconds until it fills.</p>
+                    <p>Keep your hand inside the target for 1-1.5s until it fills.</p>
                   </div>
                 </li>
               </ul>
@@ -219,7 +276,6 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
     );
   }
 
-  // Summary Screen
   if (gameState === GAME_STATES.COMPLETE) {
     return (
       <div className="min-h-screen bg-[#F8FAFC] p-8 flex flex-col items-center justify-center font-sans">
@@ -232,20 +288,22 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
           
           <div className="grid grid-cols-2 gap-4 mb-10">
             <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Targets Hit</p>
+              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.successfulReps}</p>
+            </div>
+            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Max Height</p>
+              <p className="text-3xl font-black text-slate-900">{Math.round(100 - reachStats.maxHeight)}%</p>
+            </div>
+            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
               <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Accuracy</p>
               <p className="text-3xl font-black text-slate-900">{telemetry.metrics.accuracy}%</p>
             </div>
             <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Completion</p>
-              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.successfulReps} / {settings.reps}</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Duration</p>
-              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.totalTime}s</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Range</p>
-              <p className="text-3xl font-black text-slate-900">{Math.round(telemetry.metrics.totalDistance / 100)}</p>
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Trend</p>
+              <p className="text-3xl font-black text-slate-900 flex items-center justify-center gap-2">
+                {reachStats.trend} <TrendingUp size={24} className="text-green-500" />
+              </p>
             </div>
           </div>
 
@@ -270,16 +328,23 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
   }
 
   return (
-    <div ref={containerRef} className="min-h-screen bg-[#F8FAFC] relative overflow-hidden font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
+    <div ref={containerRef} className="min-h-screen bg-[#F8FAFC] relative overflow-auto font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
       {/* HUD */}
       <div className="absolute top-0 left-0 right-0 p-8 flex justify-between items-center z-20">
         <div className="flex items-center gap-4">
           <button onClick={onBack} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
             <ChevronLeft size={24} />
           </button>
-          <div className="bg-white/80 backdrop-blur-md px-6 py-3 rounded-2xl shadow-sm border border-white">
-            <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Progress</span>
-            <span className="text-slate-900 font-black text-lg">{currentRep} <span className="text-slate-300 mx-1">/</span> {settings.reps}</span>
+          <div className="bg-white/80 backdrop-blur-md px-6 py-3 rounded-2xl shadow-sm border border-white flex items-center gap-4">
+            <div>
+              <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Time</span>
+              <span className="text-slate-900 font-black text-lg">{timeLeft}s</span>
+            </div>
+            <div className="w-px h-6 bg-slate-200" />
+            <div>
+              <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Hits</span>
+              <span className="text-slate-900 font-black text-lg">{telemetry.metrics.successfulReps}</span>
+            </div>
           </div>
         </div>
         
@@ -297,7 +362,7 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
             <Settings size={24} />
           </button>
           <button 
-            onClick={() => setGameState(GAME_STATES.COMPLETE)}
+            onClick={endSession}
             className="bg-red-50/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-red-500 hover:text-red-700 transition-all border border-red-100"
           >
             <X size={24} />
@@ -306,41 +371,68 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
       </div>
 
       {/* Game Canvas */}
-      <div className="w-full h-screen relative flex items-center justify-center">
+      <div className="w-full h-screen relative flex items-center justify-center overflow-hidden">
         {gameState === GAME_STATES.COUNTDOWN && (
           <div className="text-[160px] font-black text-slate-900 animate-pulse">{countdown}</div>
         )}
 
-        {gameState === GAME_STATES.ACTIVE && target && (
-          <div 
-            className={`absolute transition-all duration-500 flex items-center justify-center ${feedback === 'success' ? 'scale-110' : 'scale-100'}`}
-            style={{ 
-              left: `${target.x}%`, 
-              top: `${target.y}%`,
-              width: `${target.size}px`,
-              height: `${target.size}px`,
-              transform: 'translate(-50%, -50%)'
-            }}
-          >
-            <div className={`absolute inset-0 bg-blue-400 rounded-full animate-ping opacity-10 ${feedback === 'success' ? 'hidden' : ''}`} />
-            <div className={`w-full h-full rounded-full border-4 flex items-center justify-center bg-white shadow-2xl transition-colors duration-300 ${feedback === 'success' ? 'border-green-500' : 'border-blue-600'}`}>
-              <div className={`w-1/3 h-1/3 rounded-full transition-colors duration-300 ${feedback === 'success' ? 'bg-green-500' : 'bg-blue-600'}`} />
+        {gameState === GAME_STATES.ACTIVE && (
+          <>
+            {/* Reach Envelope Heatmap (Simple version) */}
+            {reachStats.reachEnvelope.map((p, i) => (
+              <div 
+                key={i}
+                className="absolute w-2 h-2 rounded-full bg-blue-400/10 pointer-events-none"
+                style={{ left: `${p.x}%`, top: `${p.y}%`, transform: 'translate(-50%, -50%)' }}
+              />
+            ))}
+
+            {/* Target */}
+            {target && (
+              <div 
+                className={`absolute transition-all duration-500 flex items-center justify-center ${feedback === 'success' ? 'scale-110' : 'scale-100'}`}
+                style={{ 
+                  left: `${target.x}%`, 
+                  top: `${target.y}%`,
+                  width: `${target.size}px`,
+                  height: `${target.size}px`,
+                  transform: 'translate(-50%, -50%)'
+                }}
+              >
+                <div className={`absolute inset-0 bg-blue-400 rounded-full animate-ping opacity-10 ${feedback === 'success' ? 'hidden' : ''}`} />
+                <div className={`w-full h-full rounded-full border-4 flex items-center justify-center bg-white shadow-2xl transition-colors duration-300 ${feedback === 'success' ? 'border-green-500' : 'border-blue-600'}`}>
+                  <div className={`w-1/3 h-1/3 rounded-full transition-colors duration-300 ${feedback === 'success' ? 'bg-green-500' : 'bg-blue-600'}`} />
+                </div>
+                <svg className="absolute inset-[-8px] w-[calc(100%+16px)] h-[calc(100%+16px)] -rotate-90">
+                  <circle
+                    cx="50%" cy="50%" r="48%"
+                    fill="none" stroke="#E2E8F0" strokeWidth="4"
+                  />
+                  <circle
+                    cx="50%" cy="50%" r="48%"
+                    fill="none" stroke={feedback === 'success' ? '#22C55E' : '#3B82F6'}
+                    strokeWidth="4"
+                    strokeDasharray="301.59"
+                    strokeDashoffset={301.59 - (301.59 * holdProgress) / 100}
+                    strokeLinecap="round"
+                    className="transition-all duration-75"
+                  />
+                </svg>
+              </div>
+            )}
+
+            {/* Live Metrics Overlay */}
+            <div className="absolute bottom-8 right-8 flex flex-col gap-2">
+              <div className="bg-white/80 backdrop-blur-md px-4 py-2 rounded-xl shadow-sm border border-white">
+                <span className="text-slate-400 text-[10px] font-bold uppercase tracking-wider block">Current Height</span>
+                <span className="text-slate-900 font-black text-sm">{Math.round(100 - position.y)}%</span>
+              </div>
+              <div className="bg-white/80 backdrop-blur-md px-4 py-2 rounded-xl shadow-sm border border-white">
+                <span className="text-slate-400 text-[10px] font-bold uppercase tracking-wider block">Max Reached</span>
+                <span className="text-slate-900 font-black text-sm text-blue-600">{Math.round(100 - reachStats.maxHeight)}%</span>
+              </div>
             </div>
-            <svg className="absolute inset-[-8px] w-[calc(100%+16px)] h-[calc(100%+16px)] -rotate-90">
-              <circle
-                cx="50%" cy="50%" r="48%"
-                fill="none" stroke="#E2E8F0" strokeWidth="4"
-              />
-              <circle
-                cx="50%" cy="50%" r="48%"
-                fill="none" stroke={feedback === 'success' ? '#22C55E' : '#3B82F6'}
-                strokeWidth="4" strokeDasharray="301.6"
-                strokeDashoffset={301.6 - (301.6 * holdProgress) / 100}
-                strokeLinecap="round"
-                className="transition-all duration-75"
-              />
-            </svg>
-          </div>
+          </>
         )}
 
         {/* Hand Tracker Cursor */}
@@ -388,56 +480,29 @@ export default function PrecisionReach({ onBack, onSessionEnd }) {
             <div className="p-8 space-y-6 overflow-y-auto max-h-[60vh]">
               <div className="space-y-3">
                 <div className="flex justify-between">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Repetitions</label>
-                  <span className="text-blue-600 font-bold">{settings.reps}</span>
-                </div>
-                <input 
-                  type="range" min="1" max="20" value={settings.reps} 
-                  onChange={(e) => updateSettings({ reps: parseInt(e.target.value) })}
-                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                />
-              </div>
-              <div className="space-y-3">
-                <div className="flex justify-between">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Hold Duration (sec)</label>
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Dwell Duration (sec)</label>
                   <span className="text-blue-600 font-bold">{settings.holdDuration}s</span>
                 </div>
                 <input 
-                  type="range" min="1" max="10" value={settings.holdDuration} 
-                  onChange={(e) => updateSettings({ holdDuration: parseInt(e.target.value) })}
+                  type="range" min="0.5" max="3" step="0.1" value={settings.holdDuration} 
+                  onChange={(e) => updateSettings({ holdDuration: parseFloat(e.target.value) })}
                   className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
                 />
               </div>
               <div className="space-y-3">
                 <div className="flex justify-between">
                   <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Session Length (min)</label>
-                  <span className="text-blue-600 font-bold">{settings.sessionLength || 5}m</span>
+                  <span className="text-blue-600 font-bold">{settings.sessionLength || 1}m</span>
                 </div>
                 <input 
-                  type="range" min="1" max="15" value={settings.sessionLength || 5} 
+                  type="range" min="1" max="5" value={settings.sessionLength || 1} 
                   onChange={(e) => updateSettings({ sessionLength: parseInt(e.target.value) })}
-                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                />
-              </div>
-              <div className="space-y-3">
-                <div className="flex justify-between">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Rest Interval (sec)</label>
-                  <span className="text-blue-600 font-bold">{settings.restInterval || 2}s</span>
-                </div>
-                <input 
-                  type="range" min="1" max="10" value={settings.restInterval || 2} 
-                  onChange={(e) => updateSettings({ restInterval: parseInt(e.target.value) })}
                   className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
                 />
               </div>
             </div>
             <div className="p-8 bg-slate-50">
-              <button 
-                onClick={() => setShowSettings(false)}
-                className="w-full bg-[#0F172A] text-white py-5 rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-lg"
-              >
-                Save Configuration
-              </button>
+              <button onClick={() => setShowSettings(false)} className="w-full bg-[#0F172A] text-white py-5 rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-lg">Save Configuration</button>
             </div>
           </div>
         </div>

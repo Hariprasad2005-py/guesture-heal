@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Sword, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle, Pill, Stethoscope, Thermometer, Activity } from 'lucide-react';
+import { Sword, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle, Pill, Stethoscope, Thermometer, Activity, AlertTriangle } from 'lucide-react';
 import SkeletonOverlay from '../components/rehab/SkeletonOverlay';
 import { useMediaPipeUpperBody } from '../hooks/useMediaPipeUpperBody';
 import { usePoseDetection } from '../hooks/usePoseDetection';
@@ -10,10 +10,11 @@ import { useAudioFeedback } from '../hooks/useAudioFeedback';
 import { usePostureGuidance } from '../hooks/usePostureGuidance';
 
 const MEDICAL_ITEMS = [
-  { icon: Pill, color: 'text-pink-500', bg: 'bg-pink-50', name: 'Medicine' },
-  { icon: Stethoscope, color: 'text-blue-500', bg: 'bg-blue-50', name: 'Stethoscope' },
-  { icon: Thermometer, color: 'text-amber-500', bg: 'bg-amber-50', name: 'Thermometer' },
-  { icon: Activity, color: 'text-emerald-500', bg: 'bg-emerald-50', name: 'Monitor' },
+  { icon: Pill, color: 'text-pink-500', bg: 'bg-pink-50', type: 'target' },
+  { icon: Stethoscope, color: 'text-blue-500', bg: 'bg-blue-50', type: 'target' },
+  { icon: Thermometer, color: 'text-amber-500', bg: 'bg-amber-50', type: 'target' },
+  { icon: Activity, color: 'text-emerald-500', bg: 'bg-emerald-50', type: 'target' },
+  { icon: AlertTriangle, color: 'text-red-500', bg: 'bg-red-50', type: 'avoid' },
 ];
 
 export default function RehabSlicer({ onBack, onSessionEnd }) {
@@ -32,102 +33,134 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
   const telemetry = useSessionTelemetry();
   const guidance = usePostureGuidance(poseData);
 
+  const [item, setItem] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  const [isReturnToWaist, setIsReturnToWaist] = useState(true);
+  const [combo, setCombo] = useState(0);
+
   const {
     gameState,
     setGameState,
     currentRep,
     countdown,
+    timeLeft,
     isPaused,
     startSession,
     pauseSession,
     resumeSession,
-    completeRep
+    completeRep,
+    endSession
   } = useGameEngine({
-    totalReps: settings.reps,
-    restInterval: settings.restInterval,
+    totalReps: 0,
+    sessionLength: settings.sessionLength * 60 || 60,
+    restInterval: (settings.restInterval || 0.5) * 1000,
     onRepComplete: (success) => {
       telemetry.recordRep(success);
-      if (success) playSuccess();
-      else playMiss();
+      if (success) {
+        playSuccess();
+        setCombo(c => c + 1);
+      } else {
+        playMiss();
+        setCombo(0);
+      }
     },
     onSessionComplete: () => {
-      telemetry.endSession(settings.reps);
+      telemetry.endSession(100);
     }
   });
 
-  const [item, setItem] = useState(null);
-  const [sliceProgress, setSliceProgress] = useState(0);
-  const [showSettings, setShowSettings] = useState(false);
-  const [feedback, setFeedback] = useState(null);
-  const [isReturnToWaist, setIsReturnToWaist] = useState(true);
+  const spawnItem = useCallback(() => {
+    const isAvoid = Math.random() < 0.2; // 20% chance for avoid objects
+    const itemType = isAvoid ? MEDICAL_ITEMS[4] : MEDICAL_ITEMS[Math.floor(Math.random() * 4)];
+    
+    // Random direction: 0 = L->R, 1 = R->L, 2 = T->B, 3 = B->T
+    const direction = Math.floor(Math.random() * 4);
+    let x, y, vx, vy;
+    const speed = (difficulty === 'Beginner' ? 0.4 : difficulty === 'Intermediate' ? 0.7 : 1.1);
+
+    if (direction === 0) { x = -10; y = 20 + Math.random() * 60; vx = speed; vy = (Math.random() - 0.5) * 0.2; }
+    else if (direction === 1) { x = 110; y = 20 + Math.random() * 60; vx = -speed; vy = (Math.random() - 0.5) * 0.2; }
+    else if (direction === 2) { x = 20 + Math.random() * 60; y = -10; vx = (Math.random() - 0.5) * 0.2; vy = speed; }
+    else { x = 20 + Math.random() * 60; y = 110; vx = (Math.random() - 0.5) * 0.2; vy = -speed; }
+
+    setItem({
+      ...itemType,
+      x, y, vx, vy,
+      size: difficulty === 'Beginner' ? 160 : difficulty === 'Intermediate' ? 130 : 100,
+      angle: Math.atan2(vy, vx) * (180 / Math.PI)
+    });
+    setFeedback(null);
+    setIsReturnToWaist(true);
+  }, [difficulty]);
 
   useEffect(() => {
-    if (gameState === GAME_STATES.ACTIVE) {
-      const randomItem = MEDICAL_ITEMS[Math.floor(Math.random() * MEDICAL_ITEMS.length)];
-      const newItem = {
-        ...randomItem,
-        x: 30 + Math.random() * 40,
-        y: 20 + Math.random() * 30,
-        size: difficulty === 'Beginner' ? 160 : difficulty === 'Intermediate' ? 130 : 100,
-      };
-      setItem(newItem);
-      setSliceProgress(0);
-      setFeedback(null);
-      setIsReturnToWaist(true);
+    if (gameState === GAME_STATES.ACTIVE && !item) {
+      spawnItem();
     }
-  }, [gameState, currentRep, difficulty]);
+  }, [gameState, item, spawnItem]);
 
   const lastPos = useRef(null);
   useEffect(() => {
     if (gameState !== GAME_STATES.ACTIVE || isPaused || !item) return;
 
-    if (isReturnToWaist) {
-      const waistZoneY = 80;
-      if (position.y > waistZoneY) {
-        setIsReturnToWaist(false);
+    // Movement logic
+    setItem(prev => {
+      if (!prev) return null;
+      const nextX = prev.x + prev.vx;
+      const nextY = prev.y + prev.vy;
+      
+      // Miss condition
+      if (nextX < -20 || nextX > 120 || nextY < -20 || nextY > 120) {
+        if (prev.type === 'target') completeRep(false);
+        else completeRep(true); // Successfully avoided
+        return null;
       }
-      return;
-    }
+      return { ...prev, x: nextX, y: nextY };
+    });
 
+    // Collision detection
     const dx = position.x - item.x;
     const dy = position.y - item.y;
     const distance = Math.sqrt(dx * dx + dy * dy);
-    
-    const hitRadius = (item.size / window.innerWidth) * 100 * 0.7; 
+    const hitRadius = (item.size / (containerRef.current?.clientWidth || 1000)) * 100 * 0.7; 
     
     if (distance < hitRadius) {
-      if (lastPos.current) {
-        const moveDist = Math.sqrt(
-          Math.pow(position.x - lastPos.current.x, 2) + 
-          Math.pow(position.y - lastPos.current.y, 2)
-        );
-        
-        const speedMultiplier = difficulty === 'Beginner' ? 2.5 : difficulty === 'Intermediate' ? 1.8 : 1.2;
-        
-        setSliceProgress(prev => {
-          const next = prev + moveDist * speedMultiplier;
-          if (next >= 100) {
-            setFeedback('success');
-            setTimeout(() => completeRep(true), 600);
-            return 100;
-          }
-          return next;
-        });
+      if (item.type === 'avoid') {
+        setFeedback('error');
+        setTimeout(() => {
+          completeRep(false);
+          setItem(null);
+        }, 300);
+      } else {
+        // Successful slice
+        setFeedback('success');
+        setTimeout(() => {
+          completeRep(true);
+          setItem(null);
+        }, 300);
       }
     }
 
-    lastPos.current = { ...position };
     telemetry.trackMovement(position);
-  }, [position, item, gameState, isPaused, difficulty, completeRep, telemetry, isReturnToWaist]);
+  }, [position, item, gameState, isPaused, completeRep, telemetry]);
 
   const handleStart = () => {
     telemetry.startTracking();
+    setCombo(0);
     startSession();
   };
 
   const handleExit = () => {
     if (onSessionEnd && gameState === GAME_STATES.COMPLETE) {
-      onSessionEnd(telemetry.metrics);
+      onSessionEnd({
+        ...telemetry.metrics,
+        customMetrics: {
+          slices: telemetry.metrics.successfulReps,
+          combo: combo,
+          accuracy: telemetry.metrics.accuracy
+        }
+      });
     } else {
       onBack();
     }
@@ -148,7 +181,7 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
             </div>
             <div>
               <h2 className="text-3xl font-bold text-slate-900">Rehab Slicer</h2>
-              <p className="text-slate-500 font-medium">Therapy Benefit: Improves shoulder flexion, wrist extension, coordination, and ROM.</p>
+              <p className="text-slate-500 font-medium">Therapy Benefit: Improves wrist rotation, multi-planar shoulder mobility, and reaction time.</p>
             </div>
           </div>
 
@@ -160,28 +193,28 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
                   <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">1</span>
                   <div>
                     <p className="font-bold text-slate-900">Starting Posture</p>
-                    <p>Sit upright with your back supported and hand near your waist.</p>
+                    <p>Sit upright with your arm relaxed and ready to swipe.</p>
                   </div>
                 </li>
                 <li className="flex gap-3 text-sm">
                   <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">2</span>
                   <div>
-                    <p className="font-bold text-slate-900">Arm Position</p>
-                    <p>Begin each repetition with your hand in the lower "start zone."</p>
+                    <p className="font-bold text-slate-900">Movement Required</p>
+                    <p>Swipe through medical items as they fly across the screen.</p>
                   </div>
                 </li>
                 <li className="flex gap-3 text-sm">
                   <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">3</span>
                   <div>
-                    <p className="font-bold text-slate-900">Movement Required</p>
-                    <p>Perform a slow, deliberate swipe across the medical item.</p>
+                    <p className="font-bold text-slate-900">Precision Control</p>
+                    <p>Avoid red hazard icons! Swiping them will reduce your score.</p>
                   </div>
                 </li>
                 <li className="flex gap-3 text-sm">
                   <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">4</span>
                   <div>
                     <p className="font-bold text-slate-900">Success Condition</p>
-                    <p>Complete a full swipe through the object to score.</p>
+                    <p>Successfully slice targets while maintaining a high combo.</p>
                   </div>
                 </li>
               </ul>
@@ -256,20 +289,20 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
           
           <div className="grid grid-cols-2 gap-4 mb-10">
             <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Slices</p>
+              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.successfulReps}</p>
+            </div>
+            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Max Combo</p>
+              <p className="text-3xl font-black text-slate-900">{combo}</p>
+            </div>
+            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
               <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Accuracy</p>
               <p className="text-3xl font-black text-slate-900">{telemetry.metrics.accuracy}%</p>
             </div>
             <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Completion</p>
-              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.successfulReps} / {settings.reps}</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Duration</p>
+              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Time</p>
               <p className="text-3xl font-black text-slate-900">{telemetry.metrics.totalTime}s</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Range</p>
-              <p className="text-3xl font-black text-slate-900">{Math.round(telemetry.metrics.totalDistance / 100)}</p>
             </div>
           </div>
 
@@ -294,15 +327,22 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
   }
 
   return (
-    <div ref={containerRef} className="min-h-screen bg-[#F8FAFC] relative overflow-hidden font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
+    <div ref={containerRef} className="min-h-screen bg-[#F8FAFC] relative overflow-auto font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
       <div className="absolute top-0 left-0 right-0 p-8 flex justify-between items-center z-20">
         <div className="flex items-center gap-4">
           <button onClick={onBack} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
             <ChevronLeft size={24} />
           </button>
-          <div className="bg-white/80 backdrop-blur-md px-6 py-3 rounded-2xl shadow-sm border border-white">
-            <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Progress</span>
-            <span className="text-slate-900 font-black text-lg">{currentRep} <span className="text-slate-300 mx-1">/</span> {settings.reps}</span>
+          <div className="bg-white/80 backdrop-blur-md px-6 py-3 rounded-2xl shadow-sm border border-white flex items-center gap-4">
+            <div>
+              <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Time</span>
+              <span className="text-slate-900 font-black text-lg">{timeLeft}s</span>
+            </div>
+            <div className="w-px h-6 bg-slate-200" />
+            <div>
+              <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Combo</span>
+              <span className="text-pink-600 font-black text-lg">{combo}</span>
+            </div>
           </div>
         </div>
         
@@ -313,58 +353,35 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
           <button onClick={() => setShowSettings(true)} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
             <Settings size={24} />
           </button>
-          <button onClick={() => setGameState(GAME_STATES.COMPLETE)} className="bg-red-50/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-red-500 hover:text-red-700 transition-all border border-red-100">
+          <button onClick={endSession} className="bg-red-50/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-red-500 hover:text-red-700 transition-all border border-red-100">
             <X size={24} />
           </button>
         </div>
       </div>
 
-      <div className="w-full h-screen relative flex items-center justify-center">
+      <div className="w-full h-screen relative flex items-center justify-center overflow-hidden">
         {gameState === GAME_STATES.COUNTDOWN && (
           <div className="text-[160px] font-black text-slate-900 animate-pulse">{countdown}</div>
         )}
 
         {gameState === GAME_STATES.ACTIVE && item && (
-          <>
-            {isReturnToWaist && (
-              <div className="absolute bottom-0 left-0 right-0 h-40 bg-pink-50/50 border-t-4 border-pink-100 flex flex-col items-center justify-center animate-pulse z-10">
-                <div className="w-16 h-16 rounded-full bg-pink-100 flex items-center justify-center text-pink-500 mb-2">
-                  <RotateCcw size={32} />
-                </div>
-                <span className="text-pink-600 font-black uppercase tracking-[0.2em] text-sm">Return hand to waist</span>
-              </div>
-            )}
-
-            <div 
-              className={`absolute transition-all duration-300 flex items-center justify-center ${feedback === 'success' ? 'scale-150 opacity-0' : 'scale-100 opacity-100'}`}
-              style={{ 
-                left: `${item.x}%`, 
-                top: `${item.y}%`,
-                width: `${item.size}px`,
-                height: `${item.size}px`,
-                transform: 'translate(-50%, -50%)'
-              }}
-            >
-              <div className={`w-full h-full rounded-2xl flex items-center justify-center shadow-lg border-2 border-white ${item.bg}`}>
-                <item.icon size={item.size * 0.6} className={item.color} />
-              </div>
-              <svg className="absolute inset-0 w-full h-full -rotate-90">
-                <circle
-                  cx="50%" cy="50%" r="48%"
-                  fill="none" stroke="white" strokeWidth="6" strokeOpacity="0.3"
-                />
-                <circle
-                  cx="50%" cy="50%" r="48%"
-                  fill="none" stroke="white" strokeWidth="6"
-                  strokeDasharray="301.6"
-                  strokeDashoffset={301.6 - (301.6 * sliceProgress) / 100}
-                  strokeLinecap="round"
-                />
-              </svg>
+          <div 
+            className={`absolute transition-all duration-75 flex items-center justify-center ${feedback === 'success' ? 'scale-150 opacity-0' : feedback === 'error' ? 'animate-shake' : 'scale-100 opacity-100'}`}
+            style={{ 
+              left: `${item.x}%`, 
+              top: `${item.y}%`,
+              width: `${item.size}px`,
+              height: `${item.size}px`,
+              transform: `translate(-50%, -50%) rotate(${item.angle}deg)`
+            }}
+          >
+            <div className={`w-full h-full rounded-3xl flex items-center justify-center shadow-xl border-4 border-white ${item.bg}`}>
+              <item.icon size={item.size * 0.6} className={item.color} />
             </div>
-          </>
+          </div>
         )}
 
+        {/* Hand Tracker Cursor */}
         <div 
           className="absolute w-12 h-12 pointer-events-none z-50 transition-all duration-75"
           style={{ 
@@ -373,8 +390,8 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
             transform: 'translate(-50%, -50%)'
           }}
         >
-          <div className="w-full h-full rounded-full border-4 border-slate-900 bg-white/30 backdrop-blur-sm shadow-xl flex items-center justify-center">
-            <Sword size={24} className="text-slate-900 -rotate-45" />
+          <div className="w-full h-full rounded-full border-4 border-pink-500 bg-white/30 backdrop-blur-sm shadow-xl flex items-center justify-center">
+            <Sword size={24} className="text-pink-600 -rotate-45" />
           </div>
         </div>
 
@@ -387,6 +404,7 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
           />
         )}
 
+        {/* Posture Guidance Toast */}
         {!guidance.isReady && !isPaused && gameState === GAME_STATES.ACTIVE && (
           <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-md border border-amber-200 px-8 py-4 rounded-[24px] shadow-2xl flex items-center gap-4 animate-bounce z-30">
             <div className="w-3 h-3 bg-amber-500 rounded-full animate-pulse" />
@@ -395,6 +413,7 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
         )}
       </div>
 
+      {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-md z-50 flex items-center justify-center p-6">
           <div className="bg-white w-full max-w-md rounded-[32px] shadow-2xl overflow-hidden">
@@ -407,34 +426,12 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
             <div className="p-8 space-y-6 overflow-y-auto max-h-[60vh]">
               <div className="space-y-3">
                 <div className="flex justify-between">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Repetitions</label>
-                  <span className="text-pink-600 font-bold">{settings.reps}</span>
-                </div>
-                <input 
-                  type="range" min="1" max="20" value={settings.reps} 
-                  onChange={(e) => updateSettings({ reps: parseInt(e.target.value) })}
-                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-pink-600"
-                />
-              </div>
-              <div className="space-y-3">
-                <div className="flex justify-between">
                   <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Session Length (min)</label>
-                  <span className="text-pink-600 font-bold">{settings.sessionLength || 5}m</span>
+                  <span className="text-pink-600 font-bold">{settings.sessionLength || 1}m</span>
                 </div>
                 <input 
-                  type="range" min="1" max="15" value={settings.sessionLength || 5} 
+                  type="range" min="1" max="5" value={settings.sessionLength || 1} 
                   onChange={(e) => updateSettings({ sessionLength: parseInt(e.target.value) })}
-                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-pink-600"
-                />
-              </div>
-              <div className="space-y-3">
-                <div className="flex justify-between">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Rest Interval (sec)</label>
-                  <span className="text-pink-600 font-bold">{settings.restInterval || 2}s</span>
-                </div>
-                <input 
-                  type="range" min="1" max="10" value={settings.restInterval || 2} 
-                  onChange={(e) => updateSettings({ restInterval: parseInt(e.target.value) })}
                   className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-pink-600"
                 />
               </div>
