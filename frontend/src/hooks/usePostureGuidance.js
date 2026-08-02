@@ -28,10 +28,10 @@ export function usePostureGuidance(upperBodyData) {
     
     // Check if shoulders are level (y-coordinates should be close)
     const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
-    const isLevel = shoulderDiff < 0.05;
+    const isLevel = shoulderDiff < 0.15; // Relaxed from 0.05
     
     // Check if seated straight (chest not too low in frame)
-    const seatedStraight = midChest.y < 0.8;
+    const seatedStraight = midChest.y < 0.95; // Relaxed from 0.8
     
     let message = 'Ready to start!';
     let isReady = true;
@@ -41,10 +41,10 @@ export function usePostureGuidance(upperBodyData) {
       isReady = false;
     } else if (!isLevel) {
       message = 'Please level your shoulders.';
-      isReady = false;
+      isReady = true; // Allow starting even if slightly unlevel
     } else if (!seatedStraight) {
       message = 'Sit up straight.';
-      isReady = false;
+      isReady = true; // Allow starting even if slightly low
     }
 
     setGuidance({

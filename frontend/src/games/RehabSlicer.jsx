@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Sword, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle, Pill, Stethoscope, Thermometer, Activity } from 'lucide-react';
+import SkeletonOverlay from '../components/rehab/SkeletonOverlay';
 import { useMediaPipeUpperBody } from '../hooks/useMediaPipeUpperBody';
 import { usePoseDetection } from '../hooks/usePoseDetection';
 import { useGameEngine, GAME_STATES } from '../hooks/useGameEngine';
@@ -17,6 +18,7 @@ const MEDICAL_ITEMS = [
 
 export default function RehabSlicer({ onBack, onSessionEnd }) {
   const videoRef = useRef(null);
+  const containerRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
   
   const { isLoading, isActive } = useMediaPipeUpperBody({ 
@@ -276,7 +278,7 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] relative overflow-hidden font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
+    <div ref={containerRef} className="min-h-screen bg-[#F8FAFC] relative overflow-hidden font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
       <div className="absolute top-0 left-0 right-0 p-8 flex justify-between items-center z-20">
         <div className="flex items-center gap-4">
           <button onClick={onBack} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
@@ -359,6 +361,15 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
             <Sword size={24} className="text-slate-900 -rotate-45" />
           </div>
         </div>
+
+        {/* Skeleton Overlay */}
+        {gameState === GAME_STATES.ACTIVE && !isMouseMode && (
+          <SkeletonOverlay 
+            containerRef={containerRef}
+            keypoints={poseData?.raw}
+            overallStatus={guidance.isReady ? 'ok' : 'minor'}
+          />
+        )}
 
         {!guidance.isReady && !isPaused && gameState === GAME_STATES.ACTIVE && (
           <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-md border border-amber-200 px-8 py-4 rounded-[24px] shadow-2xl flex items-center gap-4 animate-bounce z-30">
