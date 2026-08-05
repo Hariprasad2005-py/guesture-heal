@@ -239,6 +239,19 @@ export function useSessionTelemetry(patientId, gameId) {
             if (res?.session) {
               setCurrentSession(res.session);
               savedToBackend = true;
+
+              // NEW: session saved server-side, but the /reports endpoints
+              // read from a separate Reports collection that's never
+              // populated automatically -- explicitly ask the backend to
+              // generate the report now, or ReportsPage's server-backed
+              // queries (reportApi.getByPublicPatient etc.) will keep
+              // returning an empty array forever, even though the session
+              // itself is safely stored.
+              try {
+                await reportApi.generate(sessionIdRef.current);
+              } catch (genErr) {
+                console.warn('[useSessionTelemetry] Failed to generate backend report:', genErr);
+              }
             }
           }
         } catch (err) {

@@ -2,6 +2,7 @@
 const mongoose = require("mongoose");
 const Session = require("../models/Session");
 const Patient = require("../models/Patient");
+const reportController = require("./reportController");
 
 exports.getSessionsByPatient = async (req, res, next) => {
   try {
@@ -160,6 +161,15 @@ exports.completeSession = async (req, res, next) => {
       }
 
       await patient.save();
+
+      // NEW: same auto-generation as finishPublicSession below -- keeps
+      // therapist-run sessions and public/patient sessions consistent so
+      // neither path silently ends up with zero reports.
+      try {
+        await reportController.buildReportForSession(session, patient, req.user._id);
+      } catch (reportErr) {
+        console.warn("[completeSession] Failed to auto-generate report:", reportErr);
+      }
     }
 
     res.json({ success: true, session });
@@ -353,6 +363,19 @@ exports.finishPublicSession = async (req, res, next) => {
       }
 
       await patient.save();
+
+      // NEW: automatically generate the report right after a public
+      // session completes. Public sessions have no req.user/therapistId to
+      // authenticate the protected /reports/generate/:sessionId route, so
+      // this can't be triggered from the frontend after the fact -- it has
+      // to happen here, server-side, using the same build logic.
+      try {
+        await reportController.buildReportForSession(session, patient);
+      } catch (reportErr) {
+        console.warn("[finishPublicSession] Failed to auto-generate report:", reportErr);
+        // Don't fail the session-finish response over this -- the session
+        // itself is already safely saved either way.
+      }
     }
 
     res.json({ success: true, session });

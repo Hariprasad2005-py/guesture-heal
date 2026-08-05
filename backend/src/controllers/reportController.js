@@ -45,6 +45,70 @@ exports.getReport = async (req, res, next) => {
   }
 };
 
+// Shared report-building logic, deliberately kept free of req/res/req.user
+// so it can run both from the authenticated POST /reports/generate/:sessionId
+// route AND automatically from public (no-token) session completion in
+// sessionController.finishPublicSession. `therapistId` is optional --
+// public sessions have none, so it falls back to the patient's assigned
+// therapist (if any) or null.
+exports.buildReportForSession = async (session, patient, therapistId = null) => {
+  const existing = await Report.findOne({ sessionId: session._id });
+  if (existing) return { report: existing, alreadyExisted: true };
+
+  const romAnalysis = (session.exerciseResults || []).map((ex) => {
+    const dayPlan = patient.rehabPlan?.find((d) => d.day === session.day);
+    const planEx = dayPlan?.exercises?.find((e) => e.exerciseId === ex.exerciseId);
+    const targetRom = planEx?.targetRom || 90;
+    return {
+      exerciseName: ex.name,
+      averageRom: ex.averageRom,
+      maxRom: ex.maxRom,
+      targetRom,
+      percentageAchieved: targetRom > 0 ? Math.round((ex.maxRom / targetRom) * 100) : 0,
+    };
+  });
+
+  const avgAccuracy = session.accuracy || 0;
+  const observations = buildObservations(avgAccuracy, session.score, romAnalysis);
+  const recommendations = buildRecommendations(avgAccuracy, patient.painLevel, session.day);
+
+  const report = await Report.create({
+    patientId: patient._id,
+    patientIdRef: patient.patientId,
+    sessionId: session._id,
+    therapistId: therapistId || patient.therapistId || null,
+    patientSnapshot: {
+      name: patient.name,
+      age: patient.age,
+      gender: patient.gender,
+      condition: patient.condition,
+      surgeryType: patient.surgeryType,
+      surgeryDate: patient.surgeryDate,
+      goals: patient.goals,
+      painLevel: patient.painLevel,
+    },
+    performance: {
+      day: session.day,
+      score: session.score,
+      level: session.level,
+      accuracy: session.accuracy,
+      combo: session.combo,
+      stars: session.stars,
+      durationSeconds: session.durationSeconds,
+      exercisesCompleted: session.exerciseResults?.length || 0,
+      totalReps: session.exerciseResults?.reduce((sum, e) => sum + e.repsCompleted, 0) || 0,
+    },
+    romAnalysis,
+    observations,
+    recommendations,
+  });
+
+  session.reportId = report._id;
+  await session.save();
+
+  return { report, alreadyExisted: false };
+};
+
 exports.generateReport = async (req, res, next) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.sessionId)) {
@@ -60,63 +124,12 @@ exports.generateReport = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Cannot generate report for incomplete session." });
     }
 
-    const existing = await Report.findOne({ sessionId: session._id });
-    if (existing) {
-      return res.json({ success: true, report: existing, message: "Report already exists." });
-    }
-
     const patient = session.patientId;
+    const { report, alreadyExisted } = await exports.buildReportForSession(session, patient, req.user._id);
 
-    const romAnalysis = (session.exerciseResults || []).map((ex) => {
-      const dayPlan = patient.rehabPlan?.find((d) => d.day === session.day);
-      const planEx = dayPlan?.exercises?.find((e) => e.exerciseId === ex.exerciseId);
-      const targetRom = planEx?.targetRom || 90;
-      return {
-        exerciseName: ex.name,
-        averageRom: ex.averageRom,
-        maxRom: ex.maxRom,
-        targetRom,
-        percentageAchieved: targetRom > 0 ? Math.round((ex.maxRom / targetRom) * 100) : 0,
-      };
-    });
-
-    const avgAccuracy = session.accuracy || 0;
-    const observations = buildObservations(avgAccuracy, session.score, romAnalysis);
-    const recommendations = buildRecommendations(avgAccuracy, patient.painLevel, session.day);
-
-    const report = await Report.create({
-      patientId: patient._id,
-      patientIdRef: patient.patientId,
-      sessionId: session._id,
-      therapistId: req.user._id,
-      patientSnapshot: {
-        name: patient.name,
-        age: patient.age,
-        gender: patient.gender,
-        condition: patient.condition,
-        surgeryType: patient.surgeryType,
-        surgeryDate: patient.surgeryDate,
-        goals: patient.goals,
-        painLevel: patient.painLevel,
-      },
-      performance: {
-        day: session.day,
-        score: session.score,
-        level: session.level,
-        accuracy: session.accuracy,
-        combo: session.combo,
-        stars: session.stars,
-        durationSeconds: session.durationSeconds,
-        exercisesCompleted: session.exerciseResults?.length || 0,
-        totalReps: session.exerciseResults?.reduce((sum, e) => sum + e.repsCompleted, 0) || 0,
-      },
-      romAnalysis,
-      observations,
-      recommendations,
-    });
-
-    session.reportId = report._id;
-    await session.save();
+    if (alreadyExisted) {
+      return res.json({ success: true, report, message: "Report already exists." });
+    }
 
     res.status(201).json({ success: true, report });
   } catch (err) {
