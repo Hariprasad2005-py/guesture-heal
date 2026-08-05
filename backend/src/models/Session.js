@@ -64,7 +64,7 @@ const sessionSchema = new mongoose.Schema(
     },
     gameType: {
       type: String,
-      enum: ["rehab_slicer", "cloud_reach", "catch_flex", "precision_reach", "canvas_air"],
+      enum: ["rehab_slicer", "catch_flex", "precision_reach", "canvas_air"],
       default: "rehab_slicer",
     },
     score: { type: Number, default: 0 },

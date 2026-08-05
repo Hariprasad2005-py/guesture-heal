@@ -1,78 +1,157 @@
-﻿import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from "react";
 
-const STATUS_COLOR = {
-  ok: '#10b981',
-  minor: '#f59e0b',
-  severe: '#ef4444',
+const STATUS_COLORS = {
+  ok: "#10b981",
+  minor: "#f59e0b",
+  severe: "#ef4444",
 };
 
-export default function SkeletonOverlay({ containerRef, keypoints, overallStatus, onMount }) {
+function pointToCanvas(point, width, height) {
+  return {
+    x: (1 - point.x) * width,
+    y: point.y * height,
+  };
+}
+
+export default function SkeletonOverlay({
+  poseData,
+  keypoints,
+  overallStatus = "ok",
+  shoulderAngle = 0,
+  containerRef,
+}) {
+  const localContainerRef = useRef(null);
   const canvasRef = useRef(null);
-  const rafRef = useRef(null);
+
+  const resolvedKeypoints = keypoints || poseData?.raw;
 
   useEffect(() => {
-    if (containerRef?.current && onMount) onMount(containerRef.current);
-  }, [containerRef, onMount]);
+    const container =
+      containerRef?.current || localContainerRef.current;
+    const canvas = canvasRef.current;
 
-  useEffect(() => {
-    function draw() {
-      const canvas = canvasRef.current;
-      const container = containerRef?.current;
-      if (!canvas || !container) {
-        rafRef.current = requestAnimationFrame(draw);
-        return;
-      }
-      const w = container ? container.clientWidth : 640;
-      const h = container ? container.clientHeight : 480;
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-      }
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, w, h);
+    if (!container || !canvas) return undefined;
 
-      if (keypoints) {
-        const color = STATUS_COLOR[overallStatus] || STATUS_COLOR.ok;
-        const bones = [
-          [keypoints.leftShoulder, keypoints.rightShoulder],
-          [keypoints.leftShoulder, keypoints.leftElbow],
-          [keypoints.leftElbow, keypoints.leftWrist],
-          [keypoints.rightShoulder, keypoints.rightElbow],
-          [keypoints.rightElbow, keypoints.rightWrist],
-          [keypoints.nose, keypoints.leftShoulder],
-          [keypoints.nose, keypoints.rightShoulder],
-        ];
+    const draw = () => {
+      const rect = container.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
 
-        ctx.shadowColor = color;
-        ctx.shadowBlur = 12;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 4;
-        bones.forEach(([a, b]) => {
-          if (!a || !b || a.visibility < 0.5 || b.visibility < 0.5) return;
-          ctx.beginPath();
-          ctx.moveTo(a.x * w, a.y * h);
-          ctx.lineTo(b.x * w, b.y * h);
-          ctx.stroke();
-        });
-        ctx.shadowBlur = 0;
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      canvas.style.width = `${rect.width}px`;
+      canvas.style.height = `${rect.height}px`;
 
-        Object.values(keypoints).forEach((p) => {
-          if (!p || p.visibility < 0.5 || typeof p.x !== 'number') return;
-          ctx.beginPath();
-          ctx.arc(p.x * w, p.y * h, 7, 0, Math.PI * 2);
-          ctx.fillStyle = color;
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        });
-      }
+      const context = canvas.getContext("2d");
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      context.clearRect(0, 0, rect.width, rect.height);
 
-      rafRef.current = requestAnimationFrame(draw);
-    }
+      if (!resolvedKeypoints) return;
+
+      const color =
+        STATUS_COLORS[overallStatus] || STATUS_COLORS.ok;
+
+      const bones = [
+        ["leftShoulder", "rightShoulder"],
+        ["leftShoulder", "leftElbow"],
+        ["leftElbow", "leftWrist"],
+        ["rightShoulder", "rightElbow"],
+        ["rightElbow", "rightWrist"],
+      ];
+
+      context.strokeStyle = color;
+      context.fillStyle = color;
+      context.lineWidth = 4;
+      context.shadowColor = color;
+      context.shadowBlur = 10;
+      context.lineCap = "round";
+
+      bones.forEach(([from, to]) => {
+        const a = resolvedKeypoints[from];
+        const b = resolvedKeypoints[to];
+
+        if (
+          !a ||
+          !b ||
+          a.visibility < 0.4 ||
+          b.visibility < 0.4
+        ) {
+          return;
+        }
+
+        const start = pointToCanvas(a, rect.width, rect.height);
+        const end = pointToCanvas(b, rect.width, rect.height);
+
+        context.beginPath();
+        context.moveTo(start.x, start.y);
+        context.lineTo(end.x, end.y);
+        context.stroke();
+      });
+
+      [
+        "leftShoulder",
+        "rightShoulder",
+        "leftElbow",
+        "rightElbow",
+        "leftWrist",
+        "rightWrist",
+      ].forEach((name) => {
+        const point = resolvedKeypoints[name];
+
+        if (!point || point.visibility < 0.4) return;
+
+        const canvasPoint = pointToCanvas(
+          point,
+          rect.width,
+          rect.height
+        );
+
+        context.beginPath();
+        context.arc(
+          canvasPoint.x,
+          canvasPoint.y,
+          6,
+          0,
+          Math.PI * 2
+        );
+        context.fill();
+      });
+
+      context.shadowBlur = 0;
+      context.font = "700 14px sans-serif";
+      context.lineWidth = 3;
+      context.strokeStyle = "rgba(0,0,0,.75)";
+      context.fillStyle = "#fff";
+
+      const label = `${Math.round(shoulderAngle || poseData?.maxShoulderAngle || 0)}°`;
+
+      context.strokeText(label, 12, 24);
+      context.fillText(label, 12, 24);
+    };
+
     draw();
-    return () => rafRef.current && cancelAnimationFrame(rafRef.current);
-  }, [containerRef, keypoints, overallStatus]);
 
-  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />;
+    const observer = new ResizeObserver(draw);
+    observer.observe(container);
+
+    return () => observer.disconnect();
+  }, [
+    containerRef,
+    resolvedKeypoints,
+    overallStatus,
+    shoulderAngle,
+    poseData,
+  ]);
+
+  return (
+    <div
+      ref={localContainerRef}
+      className="absolute inset-0 pointer-events-none z-10"
+    >
+      <canvas
+        ref={canvasRef}
+        className="block w-full h-full"
+        aria-hidden="true"
+      />
+    </div>
+  );
 }

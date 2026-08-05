@@ -1,48 +1,99 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Sword, ChevronLeft, Pause, Play, RotateCcw, Settings, X, CheckCircle2, AlertCircle, Pill, Stethoscope, Thermometer, Activity, AlertTriangle } from 'lucide-react';
-import SkeletonOverlay from '../components/rehab/SkeletonOverlay';
-import { useMediaPipeUpperBody } from '../hooks/useMediaPipeUpperBody';
-import { usePoseDetection } from '../hooks/usePoseDetection';
-import { useGameEngine, GAME_STATES } from '../hooks/useGameEngine';
-import { useRehabSession } from '../hooks/useRehabSession';
-import { useSessionTelemetry } from '../hooks/useSessionTelemetry';
-import { useAudioFeedback } from '../hooks/useAudioFeedback';
-import { usePostureGuidance } from '../hooks/usePostureGuidance';
+// frontend/src/games/RehabSlicer.jsx
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pause, Play, X } from "lucide-react";
 
-const MEDICAL_ITEMS = [
-  { icon: Pill, color: 'text-pink-500', bg: 'bg-pink-50', type: 'target' },
-  { icon: Stethoscope, color: 'text-blue-500', bg: 'bg-blue-50', type: 'target' },
-  { icon: Thermometer, color: 'text-amber-500', bg: 'bg-amber-50', type: 'target' },
-  { icon: Activity, color: 'text-emerald-500', bg: 'bg-emerald-50', type: 'target' },
-  { icon: AlertTriangle, color: 'text-red-500', bg: 'bg-red-50', type: 'avoid' },
-];
+import useMediaPipeUpperBody from "../hooks/useMediaPipeUpperBody";
+import usePoseDetection from "../hooks/usePoseDetection";
+import usePostureGuidance from "../hooks/usePostureGuidance";
+import useFacialPainDetection from "../hooks/useFacialPainDetection";
+import useAdaptiveDifficulty from "../hooks/useAdaptiveDifficulty";
+import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
+import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
+import { useAudioFeedback } from "../hooks/useAudioFeedback";
+import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
+import SessionSummary from "../components/rehab/SessionSummary";
+import MetricsEngine from "../utils/metricsEngine";
 
-export default function RehabSlicer({ onBack, onSessionEnd }) {
+const SESSION_SECONDS = 120;
+const HIT_RADIUS = 12;
+const SLICE_VELOCITY_THRESHOLD = 0.8;
+const NEXT_BALL_DELAY_MS = 600;
+const FRUIT_EMOJI = ["🍎", "🍊", "🍋", "🍇", "🍉", "🍓", "🥝", "🍑"];
+
+function spawnBall(speed, difficulty) {
+  const sizeMap = { Beginner: 50, Intermediate: 40, Advanced: 30 };
+  const size = sizeMap[difficulty] || 40;
+  return {
+    id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+    x: 15 + Math.random() * 70,
+    y: -10,
+    speed: speed || 0.4,
+    emoji: FRUIT_EMOJI[Math.floor(Math.random() * FRUIT_EMOJI.length)],
+    sliced: false,
+    size: size,
+  };
+}
+
+export default function RehabSlicer({
+  onSessionEnd,
+  patientId,
+  gameId = "rehab-slicer",
+}) {
   const videoRef = useRef(null);
-  const containerRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
-  
-  const { isLoading, isActive } = useMediaPipeUpperBody({ 
+  const [ball, setBall] = useState(null);
+  const [hits, setHits] = useState(0);
+  const [misses, setMisses] = useState(0);
+  const [combo, setCombo] = useState(0);
+  const [bestCombo, setBestCombo] = useState(0);
+  const [flash, setFlash] = useState(null);
+  const [trail, setTrail] = useState([]);
+  const [score, setScore] = useState(0);
+  const [repData, setRepData] = useState([]);
+
+  const minAngleRef = useRef(null);
+  const maxAngleRef = useRef(0);
+  const nextSpawnTimerRef = useRef(null);
+  const hasEndedRef = useRef(false);
+  const gameLoopRef = useRef(null);
+  const metricsEngine = useRef(new MetricsEngine());
+
+  const { isActive } = useMediaPipeUpperBody({
     videoRef,
-    onPoseUpdate: (data) => setPoseData(data)
+    onPoseUpdate: setPoseData,
   });
 
-  const { position, handleMouseMove, isMouseMode, toggleMouseMode } = usePoseDetection(poseData);
-  const { difficulty, settings, changeDifficulty, updateSettings } = useRehabSession();
-  const { playSuccess, playMiss } = useAudioFeedback(true);
-  const telemetry = useSessionTelemetry();
+  const { position, velocity, shoulderAngle, activeSide } = usePoseDetection(poseData);
   const guidance = usePostureGuidance(poseData);
+  const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
+  const { currentDifficulty, settings, adapt } = useAdaptiveDifficulty();
+  const telemetry = useSessionTelemetry(patientId, gameId);
+  const audio = useAudioFeedback(true);
 
-  const [item, setItem] = useState(null);
-  const [showSettings, setShowSettings] = useState(false);
-  const [feedback, setFeedback] = useState(null);
-  const [isReturnToWaist, setIsReturnToWaist] = useState(true);
-  const [combo, setCombo] = useState(0);
+  const accuracy = useMemo(() => {
+    const attempts = hits + misses;
+    return attempts ? Math.round((hits / attempts) * 100) : 100;
+  }, [hits, misses]);
+
+  const romDegrees = useMemo(() => {
+    if (minAngleRef.current === null) return 0;
+    return Math.max(0, Math.round(maxAngleRef.current - minAngleRef.current));
+  }, [shoulderAngle]);
+
+  const engine = useGameEngine({
+    sessionLength: SESSION_SECONDS,
+    onRepComplete: (success) => {
+      telemetry.recordRep(success);
+      if (success) audio.playSuccess();
+      else audio.playMiss();
+    },
+    onSessionComplete: () => {
+      finalizeTelemetry();
+    },
+  });
 
   const {
     gameState,
-    setGameState,
-    currentRep,
     countdown,
     timeLeft,
     isPaused,
@@ -50,227 +101,219 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
     pauseSession,
     resumeSession,
     completeRep,
-    endSession
-  } = useGameEngine({
-    totalReps: 0,
-    sessionLength: settings.sessionLength * 60 || 60,
-    restInterval: (settings.restInterval || 0.5) * 1000,
-    onRepComplete: (success) => {
-      telemetry.recordRep(success);
-      if (success) {
-        playSuccess();
-        setCombo(c => c + 1);
-      } else {
-        playMiss();
-        setCombo(0);
-      }
-    },
-    onSessionComplete: () => {
-      telemetry.endSession(100);
+    endSession,
+  } = engine;
+
+  const clearSpawnTimer = useCallback(() => {
+    if (nextSpawnTimerRef.current) {
+      clearTimeout(nextSpawnTimerRef.current);
+      nextSpawnTimerRef.current = null;
     }
-  });
+  }, []);
 
-  const spawnItem = useCallback(() => {
-    const isAvoid = Math.random() < 0.2; // 20% chance for avoid objects
-    const itemType = isAvoid ? MEDICAL_ITEMS[4] : MEDICAL_ITEMS[Math.floor(Math.random() * 4)];
-    
-    // Random direction: 0 = L->R, 1 = R->L, 2 = T->B, 3 = B->T
-    const direction = Math.floor(Math.random() * 4);
-    let x, y, vx, vy;
-    const speed = (difficulty === 'Beginner' ? 0.4 : difficulty === 'Intermediate' ? 0.7 : 1.1);
+  const spawnNextBall = useCallback(() => {
+    clearSpawnTimer();
+    setBall(spawnBall(settings.speed || 0.4, currentDifficulty));
+  }, [clearSpawnTimer, settings.speed, currentDifficulty]);
 
-    if (direction === 0) { x = -10; y = 20 + Math.random() * 60; vx = speed; vy = (Math.random() - 0.5) * 0.2; }
-    else if (direction === 1) { x = 110; y = 20 + Math.random() * 60; vx = -speed; vy = (Math.random() - 0.5) * 0.2; }
-    else if (direction === 2) { x = 20 + Math.random() * 60; y = -10; vx = (Math.random() - 0.5) * 0.2; vy = speed; }
-    else { x = 20 + Math.random() * 60; y = 110; vx = (Math.random() - 0.5) * 0.2; vy = -speed; }
-
-    setItem({
-      ...itemType,
-      x, y, vx, vy,
-      size: difficulty === 'Beginner' ? 160 : difficulty === 'Intermediate' ? 130 : 100,
-      angle: Math.atan2(vy, vx) * (180 / Math.PI)
-    });
-    setFeedback(null);
-    setIsReturnToWaist(true);
-  }, [difficulty]);
-
+  // Track ROM with metrics engine
   useEffect(() => {
-    if (gameState === GAME_STATES.ACTIVE && !item) {
-      spawnItem();
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    
+    const repResult = metricsEngine.current.trackAngle(shoulderAngle, performance.now());
+    if (repResult) {
+      setRepData(prev => [...prev, repResult]);
     }
-  }, [gameState, item, spawnItem]);
+  }, [gameState, isPaused, shoulderAngle]);
 
-  const lastPos = useRef(null);
+  // Main game loop
   useEffect(() => {
-    if (gameState !== GAME_STATES.ACTIVE || isPaused || !item) return;
-
-    // Movement logic
-    setItem(prev => {
-      if (!prev) return null;
-      const nextX = prev.x + prev.vx;
-      const nextY = prev.y + prev.vy;
-      
-      // Miss condition
-      if (nextX < -20 || nextX > 120 || nextY < -20 || nextY > 120) {
-        if (prev.type === 'target') completeRep(false);
-        else completeRep(true); // Successfully avoided
-        return null;
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) {
+      if (gameLoopRef.current) {
+        cancelAnimationFrame(gameLoopRef.current);
+        gameLoopRef.current = null;
       }
-      return { ...prev, x: nextX, y: nextY };
-    });
+      return;
+    }
 
-    // Collision detection
-    const dx = position.x - item.x;
-    const dy = position.y - item.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    const hitRadius = (item.size / (containerRef.current?.clientWidth || 1000)) * 100 * 0.7; 
-    
-    if (distance < hitRadius) {
-      if (item.type === 'avoid') {
-        setFeedback('error');
-        setTimeout(() => {
-          completeRep(false);
-          setItem(null);
-        }, 300);
-      } else {
-        // Successful slice
-        setFeedback('success');
-        setTimeout(() => {
+    let lastTime = performance.now();
+
+    const gameLoop = (timestamp) => {
+      const delta = Math.min((timestamp - lastTime) / 16, 3);
+      lastTime = timestamp;
+
+      setTrail((current) => [...current.slice(-9), { ...position }]);
+
+      setBall((current) => {
+        if (!current || current.sliced) return current;
+
+        const nextY = current.y + current.speed * delta;
+        const distance = Math.hypot(position.x - current.x, position.y - nextY);
+        const isSliced = distance < HIT_RADIUS && velocity > SLICE_VELOCITY_THRESHOLD;
+
+        if (isSliced) {
+          setHits((h) => h + 1);
+          setScore((s) => s + 10 + combo * 2);
+          setCombo((c) => {
+            const next = c + 1;
+            setBestCombo((best) => Math.max(best, next));
+            return next;
+          });
           completeRep(true);
-          setItem(null);
-        }, 300);
-      }
-    }
-
-    telemetry.trackMovement(position);
-  }, [position, item, gameState, isPaused, completeRep, telemetry]);
-
-  const handleStart = () => {
-    telemetry.startTracking();
-    setCombo(0);
-    startSession();
-  };
-
-  const handleExit = () => {
-    if (onSessionEnd && gameState === GAME_STATES.COMPLETE) {
-      onSessionEnd({
-        ...telemetry.metrics,
-        customMetrics: {
-          slices: telemetry.metrics.successfulReps,
-          combo: combo,
-          accuracy: telemetry.metrics.accuracy
+          setFlash({ type: "hit", key: current.id });
+          
+          setTimeout(() => {
+            if (gameState === GAME_STATES.ACTIVE && !isPaused) {
+              spawnNextBall();
+            }
+          }, NEXT_BALL_DELAY_MS);
+          
+          return { ...current, sliced: true, y: nextY };
         }
+
+        if (nextY > 105) {
+          setMisses((m) => m + 1);
+          setCombo(0);
+          completeRep(false);
+          setFlash({ type: "miss", key: current.id });
+          
+          setTimeout(() => {
+            if (gameState === GAME_STATES.ACTIVE && !isPaused) {
+              spawnNextBall();
+            }
+          }, NEXT_BALL_DELAY_MS);
+          
+          return null;
+        }
+
+        return { ...current, y: nextY };
       });
-    } else {
-      onBack();
+
+      telemetry.trackMovement(position);
+      telemetry.trackAngle(shoulderAngle);
+
+      if (minAngleRef.current === null || (shoulderAngle > 0 && shoulderAngle < minAngleRef.current)) {
+        minAngleRef.current = shoulderAngle > 0 ? shoulderAngle : 0;
+      }
+      if (shoulderAngle > maxAngleRef.current) {
+        maxAngleRef.current = shoulderAngle;
+      }
+
+      gameLoopRef.current = requestAnimationFrame(gameLoop);
+    };
+
+    gameLoopRef.current = requestAnimationFrame(gameLoop);
+
+    return () => {
+      if (gameLoopRef.current) {
+        cancelAnimationFrame(gameLoopRef.current);
+        gameLoopRef.current = null;
+      }
+    };
+  }, [gameState, isPaused, position, velocity, shoulderAngle, completeRep, telemetry, spawnNextBall, combo]);
+
+  // Spawn first ball when game becomes active
+  useEffect(() => {
+    if (gameState === GAME_STATES.ACTIVE && !ball && !nextSpawnTimerRef.current && !isPaused) {
+      spawnNextBall();
     }
-  };
+  }, [gameState, ball, isPaused, spawnNextBall]);
+
+  // Clear flash after animation
+  useEffect(() => {
+    if (!flash) return undefined;
+    const timer = setTimeout(() => setFlash(null), 450);
+    return () => clearTimeout(timer);
+  }, [flash]);
+
+  // Adaptive difficulty
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return undefined;
+    const timer = setInterval(() => {
+      adapt({ accuracy, papsScore, combo: bestCombo });
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [gameState, isPaused, adapt, accuracy, papsScore, bestCombo]);
+
+  // Pain detection
+  useEffect(() => {
+    if (!isPainDetected || gameState !== GAME_STATES.ACTIVE) return;
+    pauseSession();
+    telemetry.trackPain(papsScore);
+  }, [isPainDetected, gameState, pauseSession, telemetry, papsScore]);
+
+  useEffect(() => () => clearSpawnTimer(), [clearSpawnTimer]);
+
+  const finalizeTelemetry = useCallback(() => {
+    if (hasEndedRef.current) return;
+    hasEndedRef.current = true;
+    const sessionStats = metricsEngine.current.getSessionStats();
+    telemetry.endSession({
+      gameName: "Rehab Slicer",
+      score: score,
+      hits,
+      misses,
+      accuracy,
+      bestCombo,
+      romDegrees: sessionStats.averageRom || romDegrees,
+      papsScore,
+      difficulty: currentDifficulty,
+      gameSpecific: {
+        avgSwipeSpeed: score / ((hits + misses) || 1),
+        longestHitStreak: bestCombo,
+        totalSwipes: hits + misses,
+        repData: sessionStats.reps || repData,
+      },
+    });
+  }, [telemetry, score, hits, misses, accuracy, bestCombo, romDegrees, papsScore, currentDifficulty, repData]);
+
+  // ========== RENDER ==========
 
   if (gameState === GAME_STATES.INSTRUCTIONS) {
     return (
-      <div className="min-h-screen bg-[#F8FAFC] p-8 flex flex-col items-center justify-center font-sans">
-        <div className="max-w-2xl w-full bg-white rounded-[32px] p-10 shadow-sm border border-slate-100">
-          <button onClick={onBack} className="flex items-center text-slate-400 mb-8 hover:text-slate-600 transition-colors group">
-            <ChevronLeft size={20} className="group-hover:-translate-x-1 transition-transform" />
-            <span className="font-medium">Back to Games</span>
-          </button>
-          
-          <div className="flex items-center gap-6 mb-10">
-            <div className="w-20 h-20 bg-pink-50 text-pink-600 rounded-3xl flex items-center justify-center shadow-sm">
-              <Sword size={40} />
-            </div>
-            <div>
-              <h2 className="text-3xl font-bold text-slate-900">Rehab Slicer</h2>
-              <p className="text-slate-500 font-medium">Therapy Benefit: Improves wrist rotation, multi-planar shoulder mobility, and reaction time.</p>
+      <div className="min-h-screen bg-[#0B1120] p-8 text-white">
+        <div className="max-w-4xl mx-auto">
+          <h1 className="mb-2 text-3xl font-black">🍉 Rehab Slicer</h1>
+          <p className="mb-6 text-slate-400">
+            Slice the falling fruit with your hand movement! Each fruit must be sliced
+            before it falls off screen. One fruit at a time — accuracy matters!
+          </p>
+
+          <div className="relative overflow-hidden rounded-2xl border-4 border-slate-800 aspect-video">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full scale-x-[-1] object-cover"
+            />
+            <SkeletonOverlay
+              poseData={poseData}
+              overallStatus={guidance.overallStatus}
+              shoulderAngle={shoulderAngle}
+            />
+            <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+              {Math.round(shoulderAngle)}° | {activeSide} | PAPS {papsScore}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Session Guidance</h3>
-              <ul className="space-y-4 text-slate-600">
-                <li className="flex gap-3 text-sm">
-                  <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">1</span>
-                  <div>
-                    <p className="font-bold text-slate-900">Starting Posture</p>
-                    <p>Sit upright with your arm relaxed and ready to swipe.</p>
-                  </div>
-                </li>
-                <li className="flex gap-3 text-sm">
-                  <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">2</span>
-                  <div>
-                    <p className="font-bold text-slate-900">Movement Required</p>
-                    <p>Swipe through medical items as they fly across the screen.</p>
-                  </div>
-                </li>
-                <li className="flex gap-3 text-sm">
-                  <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">3</span>
-                  <div>
-                    <p className="font-bold text-slate-900">Precision Control</p>
-                    <p>Avoid red hazard icons! Swiping them will reduce your score.</p>
-                  </div>
-                </li>
-                <li className="flex gap-3 text-sm">
-                  <span className="w-6 h-6 rounded-full bg-pink-50 text-pink-600 flex-shrink-0 flex items-center justify-center font-bold text-xs">4</span>
-                  <div>
-                    <p className="font-bold text-slate-900">Success Condition</p>
-                    <p>Successfully slice targets while maintaining a high combo.</p>
-                  </div>
-                </li>
-              </ul>
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4">Difficulty</h3>
-              <div className="flex flex-col gap-2">
-                {['Beginner', 'Intermediate', 'Advanced'].map(level => (
-                  <button
-                    key={level}
-                    onClick={() => changeDifficulty(level)}
-                    className={`w-full py-3 px-4 rounded-xl text-left font-medium transition-all border-2 ${
-                      difficulty === level 
-                        ? 'bg-pink-50 border-pink-200 text-pink-700' 
-                        : 'bg-white border-slate-100 text-slate-500 hover:border-slate-200'
-                    }`}
-                  >
-                    {level}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-slate-50 rounded-3xl p-6 mb-10 border border-slate-100">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Setup Guidance</h3>
-              <span className={`text-xs font-bold px-2 py-1 rounded-md ${guidance.isReady ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                {guidance.isReady ? 'READY' : 'ADJUSTING'}
-              </span>
-            </div>
-            <div className="aspect-video bg-slate-200 rounded-2xl relative overflow-hidden mb-3 shadow-inner">
-              <video ref={videoRef} className="w-full h-full object-cover scale-x-[-1]" autoPlay playsInline muted />
-              {!isActive && <div className="absolute inset-0 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm text-white text-sm font-medium">Initializing tracking...</div>}
-            </div>
-            <p className="text-sm text-slate-600 flex items-center gap-2">
-              {guidance.isReady ? <CheckCircle2 size={16} className="text-green-500" /> : <AlertCircle size={16} className="text-amber-500" />}
-              {guidance.message}
-            </p>
+          <div className={`mt-4 rounded-xl border p-4 ${
+            guidance.overallStatus === 'ok' 
+              ? 'border-green-800 bg-green-950/30 text-green-300' 
+              : 'border-amber-800 bg-amber-950/30 text-amber-300'
+          }`}>
+            {guidance.message}
           </div>
 
           <button
-            onClick={handleStart}
-            disabled={!guidance.isReady && !isMouseMode}
-            className="w-full bg-[#0F172A] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-xl shadow-slate-200"
+            onClick={() => {
+              telemetry.startTracking();
+              startSession();
+            }}
+            disabled={!guidance.isReady || !isActive}
+            className="mt-6 rounded-xl bg-cyan-500 px-8 py-3 font-bold text-white hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500"
           >
-            <Play size={20} fill="currentColor" />
             Start Session
-            <ChevronLeft size={20} className="rotate-180" />
-          </button>
-          
-          <button 
-            onClick={() => toggleMouseMode(!isMouseMode)}
-            className="w-full mt-6 text-slate-400 text-xs font-medium hover:text-slate-600 transition-colors"
-          >
-            {isMouseMode ? "Switch to Hand Tracking" : "Use Mouse Input (Alternative)"}
           </button>
         </div>
       </div>
@@ -278,170 +321,187 @@ export default function RehabSlicer({ onBack, onSessionEnd }) {
   }
 
   if (gameState === GAME_STATES.COMPLETE) {
-    return (
-      <div className="min-h-screen bg-[#F8FAFC] p-8 flex flex-col items-center justify-center font-sans">
-        <div className="max-w-2xl w-full bg-white rounded-[32px] p-10 shadow-sm border border-slate-100 text-center">
-          <div className="w-20 h-20 bg-green-50 text-green-600 rounded-3xl flex items-center justify-center mx-auto mb-6">
-            <CheckCircle2 size={40} />
-          </div>
-          <h2 className="text-3xl font-bold text-slate-900 mb-2">Session Complete</h2>
-          <p className="text-slate-500 mb-10">Excellent work! You've completed your slicing exercises.</p>
-          
-          <div className="grid grid-cols-2 gap-4 mb-10">
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Slices</p>
-              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.successfulReps}</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Max Combo</p>
-              <p className="text-3xl font-black text-slate-900">{combo}</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Accuracy</p>
-              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.accuracy}%</p>
-            </div>
-            <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Time</p>
-              <p className="text-3xl font-black text-slate-900">{telemetry.metrics.totalTime}s</p>
-            </div>
-          </div>
+    const sessionData = {
+      sessionId: telemetry.sessionId,
+      gameId: gameId,
+      patientId: patientId,
+      date: new Date().toISOString(),
+      durationSeconds: SESSION_SECONDS - timeLeft,
+      score: score,
+      accuracyPercent: accuracy,
+      romData: {
+        averageRomDegrees: romDegrees || 0,
+        maxRomDegrees: maxAngleRef.current || 0,
+        perRep: repData.map((r, i) => ({ 
+          rep: i + 1, 
+          romDegrees: r.romDegrees || 0, 
+          success: r.success !== false 
+        })),
+      },
+      reps: hits + misses,
+      hitsOrCatchesOrCompletions: hits,
+      missesOrDrops: misses,
+      gameSpecificMetrics: {
+        avgSwipeSpeed: score / ((hits + misses) || 1),
+        longestHitStreak: bestCombo,
+        totalSwipes: hits + misses,
+      },
+    };
 
-          <div className="flex gap-4">
-            <button
-              onClick={handleExit}
-              className="flex-1 bg-slate-100 text-slate-900 py-5 rounded-2xl font-bold hover:bg-slate-200 transition-all"
-            >
-              Exit to Menu
-            </button>
-            <button
-              onClick={() => setGameState(GAME_STATES.INSTRUCTIONS)}
-              className="flex-1 bg-[#0F172A] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-800 transition-all shadow-xl shadow-slate-200"
-            >
-              <RotateCcw size={20} />
-              Restart Session
-            </button>
-          </div>
-        </div>
-      </div>
+    return (
+      <SessionSummary
+        sessionData={sessionData}
+        gameName="Rehab Slicer"
+        gameId={gameId}
+        onSaveReport={async () => {
+          const result = await telemetry.saveReport(sessionData);
+          return result;
+        }}
+        onFinish={() => {
+          onSessionEnd?.(sessionData);
+        }}
+      />
     );
   }
 
+  // Active game state
   return (
-    <div ref={containerRef} className="min-h-screen bg-[#F8FAFC] relative overflow-auto font-sans select-none" onMouseMove={isMouseMode ? handleMouseMove : undefined}>
-      <div className="absolute top-0 left-0 right-0 p-8 flex justify-between items-center z-20">
-        <div className="flex items-center gap-4">
-          <button onClick={onBack} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
-            <ChevronLeft size={24} />
-          </button>
-          <div className="bg-white/80 backdrop-blur-md px-6 py-3 rounded-2xl shadow-sm border border-white flex items-center gap-4">
-            <div>
-              <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Time</span>
-              <span className="text-slate-900 font-black text-lg">{timeLeft}s</span>
-            </div>
-            <div className="w-px h-6 bg-slate-200" />
-            <div>
-              <span className="text-slate-400 text-xs font-bold uppercase tracking-widest mr-3">Combo</span>
-              <span className="text-pink-600 font-black text-lg">{combo}</span>
-            </div>
-          </div>
+    <div className="min-h-screen bg-[#0B1120] p-8 pt-24 text-white">
+      {gameState === GAME_STATES.COUNTDOWN && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-cyan-400">
+          {countdown || "GO"}
         </div>
-        
-        <div className="flex items-center gap-3">
-          <button onClick={() => isPaused ? resumeSession() : pauseSession()} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
-            {isPaused ? <Play size={24} fill="currentColor" /> : <Pause size={24} fill="currentColor" />}
-          </button>
-          <button onClick={() => setShowSettings(true)} className="bg-white/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-slate-500 hover:text-slate-900 transition-all border border-white">
-            <Settings size={24} />
-          </button>
-          <button onClick={endSession} className="bg-red-50/80 backdrop-blur-md p-3 rounded-2xl shadow-sm text-red-500 hover:text-red-700 transition-all border border-red-100">
-            <X size={24} />
-          </button>
-        </div>
-      </div>
+      )}
 
-      <div className="w-full h-screen relative flex items-center justify-center overflow-hidden">
-        {gameState === GAME_STATES.COUNTDOWN && (
-          <div className="text-[160px] font-black text-slate-900 animate-pulse">{countdown}</div>
-        )}
-
-        {gameState === GAME_STATES.ACTIVE && item && (
-          <div 
-            className={`absolute transition-all duration-75 flex items-center justify-center ${feedback === 'success' ? 'scale-150 opacity-0' : feedback === 'error' ? 'animate-shake' : 'scale-100 opacity-100'}`}
-            style={{ 
-              left: `${item.x}%`, 
-              top: `${item.y}%`,
-              width: `${item.size}px`,
-              height: `${item.size}px`,
-              transform: `translate(-50%, -50%) rotate(${item.angle}deg)`
-            }}
-          >
-            <div className={`w-full h-full rounded-3xl flex items-center justify-center shadow-xl border-4 border-white ${item.bg}`}>
-              <item.icon size={item.size * 0.6} className={item.color} />
-            </div>
-          </div>
-        )}
-
-        {/* Hand Tracker Cursor */}
-        <div 
-          className="absolute w-12 h-12 pointer-events-none z-50 transition-all duration-75"
-          style={{ 
-            left: `${position.x}%`, 
-            top: `${position.y}%`,
-            transform: 'translate(-50%, -50%)'
-          }}
-        >
-          <div className="w-full h-full rounded-full border-4 border-pink-500 bg-white/30 backdrop-blur-sm shadow-xl flex items-center justify-center">
-            <Sword size={24} className="text-pink-600 -rotate-45" />
-          </div>
-        </div>
-
-        {/* Skeleton Overlay */}
-        {gameState === GAME_STATES.ACTIVE && !isMouseMode && (
-          <SkeletonOverlay 
-            containerRef={containerRef}
-            keypoints={poseData?.raw}
-            overallStatus={guidance.isReady ? 'ok' : 'minor'}
-          />
-        )}
-
-        {/* Posture Guidance Toast */}
-        {!guidance.isReady && !isPaused && gameState === GAME_STATES.ACTIVE && (
-          <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-md border border-amber-200 px-8 py-4 rounded-[24px] shadow-2xl flex items-center gap-4 animate-bounce z-30">
-            <div className="w-3 h-3 bg-amber-500 rounded-full animate-pulse" />
-            <span className="text-slate-900 font-bold">{guidance.message}</span>
-          </div>
-        )}
-      </div>
-
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-md z-50 flex items-center justify-center p-6">
-          <div className="bg-white w-full max-w-md rounded-[32px] shadow-2xl overflow-hidden">
-            <div className="p-8 border-b border-slate-100 flex justify-between items-center">
-              <h3 className="text-2xl font-bold text-slate-900">Therapist Settings</h3>
-              <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600 transition-colors">
-                <X size={28} />
-              </button>
-            </div>
-            <div className="p-8 space-y-6 overflow-y-auto max-h-[60vh]">
-              <div className="space-y-3">
-                <div className="flex justify-between">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Session Length (min)</label>
-                  <span className="text-pink-600 font-bold">{settings.sessionLength || 1}m</span>
-                </div>
-                <input 
-                  type="range" min="1" max="5" value={settings.sessionLength || 1} 
-                  onChange={(e) => updateSettings({ sessionLength: parseInt(e.target.value) })}
-                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-pink-600"
-                />
-              </div>
-            </div>
-            <div className="p-8 bg-slate-50">
-              <button onClick={() => setShowSettings(false)} className="w-full bg-[#0F172A] text-white py-5 rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-lg">Save Configuration</button>
-            </div>
+      {isPainDetected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div className="rounded-2xl bg-slate-900 p-8 text-center max-w-md">
+            <h2 className="mb-3 text-xl font-bold text-red-400">Discomfort Detected</h2>
+            <p className="mb-6 text-slate-300">Please rest before resuming.</p>
+            <button
+              onClick={() => {
+                resetPainState();
+                resumeSession();
+              }}
+              className="rounded-lg bg-cyan-500 px-6 py-2 font-bold hover:bg-cyan-400"
+            >
+              Resume
+            </button>
           </div>
         </div>
       )}
+
+      {/* Top bar */}
+      <div className="fixed left-0 right-0 top-0 z-40 flex justify-between border-b border-slate-800 bg-slate-950/90 px-8 py-4 backdrop-blur">
+        <div className="flex gap-5 font-mono text-sm overflow-x-auto">
+          <span>⏱ {timeLeft}s</span>
+          <span>🎯 Score: {score}</span>
+          <span>✅ Hits: {hits}</span>
+          <span>❌ Misses: {misses}</span>
+          <span>🔥 Combo: {combo}</span>
+          <span>📊 Acc: {accuracy}%</span>
+          <span className="text-cyan-400">{currentDifficulty}</span>
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => (isPaused ? resumeSession() : pauseSession())}
+            className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
+          >
+            {isPaused ? <Play size={18} /> : <Pause size={18} />}
+          </button>
+          <button onClick={endSession} className="rounded-lg bg-red-950 p-2 hover:bg-red-900">
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* Game area */}
+      <div className="flex h-[calc(100vh-140px)] gap-6">
+        {/* Camera view */}
+        <div className="relative w-[38%] overflow-hidden rounded-2xl border-4 border-slate-800 flex-shrink-0">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full scale-x-[-1] object-cover"
+          />
+          <SkeletonOverlay
+            poseData={poseData}
+            overallStatus={guidance.overallStatus}
+            shoulderAngle={shoulderAngle}
+          />
+          <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+            {Math.round(shoulderAngle)}° | {activeSide}
+          </div>
+        </div>
+
+        {/* Game canvas */}
+        <div className="relative w-[62%] overflow-hidden rounded-2xl border-4 border-slate-800 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900">
+          {flash && (
+            <div
+              key={flash.key}
+              className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-4xl font-black ${
+                flash.type === "hit" ? "text-emerald-400" : "text-red-400"
+              }`}
+              style={{ animation: "slicer-flash 450ms ease-out forwards" }}
+            >
+              {flash.type === "hit" ? "💥 SLICED!" : "❌ MISSED"}
+            </div>
+          )}
+
+          <svg
+            viewBox="0 0 100 100"
+            className="pointer-events-none absolute inset-0 w-full h-full"
+            preserveAspectRatio="none"
+          >
+            <polyline
+              points={trail.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke="#22d3ee"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              opacity="0.6"
+            />
+          </svg>
+
+          {ball && !ball.sliced && (
+            <div
+              className="absolute select-none transition-transform drop-shadow-[0_0_12px_rgba(255,255,255,.35)]"
+              style={{
+                left: `${ball.x}%`,
+                top: `${ball.y}%`,
+                transform: "translate(-50%, -50%)",
+                fontSize: `${ball.size}px`,
+              }}
+            >
+              {ball.emoji}
+            </div>
+          )}
+
+          <div
+            className="absolute w-6 h-6 rounded-full border-4 border-cyan-400 bg-cyan-200/40 shadow-[0_0_14px_4px_rgba(34,211,238,.4)] pointer-events-none"
+            style={{
+              left: `${position.x}%`,
+              top: `${position.y}%`,
+              transform: "translate(-50%, -50%)",
+              transition: "left 0.05s, top 0.05s",
+            }}
+          />
+
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-slate-500 text-xs">
+            Move your hand to slice the fruit
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes slicer-flash {
+          0% { opacity: 0; transform: scale(0.8); }
+          25% { opacity: 1; transform: scale(1.1); }
+          100% { opacity: 0; transform: scale(1); }
+        }
+      `}</style>
     </div>
   );
 }

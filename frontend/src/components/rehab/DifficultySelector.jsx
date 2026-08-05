@@ -1,4 +1,5 @@
-﻿import React from 'react';
+
+import React from 'react';
 
 const TIERS = [
   { id: 'beginner', label: 'Beginner', desc: 'Slow, large, close targets. Best for first sessions or higher pain sensitivity.' },
@@ -34,3 +35,5 @@ export default function DifficultySelector({ onSelect, defaultTier }) {
     </div>
   );
 }
+
+

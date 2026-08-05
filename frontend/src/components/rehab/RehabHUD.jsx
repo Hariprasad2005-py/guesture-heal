@@ -1,10 +1,11 @@
-﻿import React from 'react';
+
+import React from 'react';
 
 const PAPS_COLOR = (paps) => (paps > 6 ? 'text-red-400' : paps > 3 ? 'text-amber-400' : 'text-teal-400');
 const POSTURE_BADGE = {
-  ok: { color: 'bg-teal-500/20 border-teal-500/30 text-teal-400', label: '✓ Posture Good' },
-  minor: { color: 'bg-amber-500/20 border-amber-500/30 text-amber-400', label: '⚠ Adjust Posture' },
-  severe: { color: 'bg-red-500/20 border-red-500/30 text-red-400 animate-pulse', label: '✕ Fix Posture Now' },
+  ok: { color: 'bg-teal-500/20 border-teal-500/30 text-teal-400', label: '? Posture Good' },
+  minor: { color: 'bg-amber-500/20 border-amber-500/30 text-amber-400', label: '? Adjust Posture' },
+  severe: { color: 'bg-red-500/20 border-red-500/30 text-red-400 animate-pulse', label: '? Fix Posture Now' },
 };
 
 export function RehabTopStats({ stats }) {
@@ -36,7 +37,7 @@ export function ClinicalStatusBar({ paps, postureStatus, handDetected, handLabel
             ? 'bg-teal-500/20 border-teal-500/30 text-teal-400'
             : 'bg-red-500/20 border-red-500/30 text-red-400 animate-pulse'
         }`}>
-          {handDetected ? `👋 ${handLabel}` : '⚠️ Not Detected'}
+          {handDetected ? `?? ${handLabel}` : '?? Not Detected'}
         </div>
       </div>
     </div>
@@ -47,7 +48,9 @@ export function PostureCorrectionBanner({ cue }) {
   if (!cue) return null;
   return (
     <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-20 bg-red-500/90 text-white font-bold px-5 py-2.5 rounded-xl shadow-lg text-sm animate-pulse">
-      🔊 {cue}
+      ?? {cue}
     </div>
   );
 }
+
+

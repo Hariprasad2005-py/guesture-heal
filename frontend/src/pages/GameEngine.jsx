@@ -4,7 +4,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../store/appStore';
 import PrecisionReach from '../games/PrecisionReach';
 import RehabSlicer from '../games/RehabSlicer';
-import CloudReach from '../games/CloudReach';
 import CatchAndFlex from '../games/CatchAndFlex';
 import CanvasAir from '../games/CanvasAir';
 import { ArrowLeft, Loader2 } from 'lucide-react';
@@ -12,7 +11,6 @@ import { ArrowLeft, Loader2 } from 'lucide-react';
 const GAME_COMPONENTS = {
   'precision-reach': PrecisionReach,
   'rehab-slicer': RehabSlicer,
-  'cloud-reach': CloudReach,
   'catch-flex': CatchAndFlex,
   'canvas-air': CanvasAir,
 };
@@ -20,7 +18,6 @@ const GAME_COMPONENTS = {
 const GAME_NAMES = {
   'precision-reach': 'Precision Reach',
   'rehab-slicer': 'Rehab Slicer',
-  'cloud-reach': 'Cloud Reach',
   'catch-flex': 'Catch & Flex',
   'canvas-air': 'Canvas Air',
 };
@@ -36,13 +33,6 @@ const GameEngine = () => {
   const GameComponent = GAME_COMPONENTS[gameId];
   const gameName = GAME_NAMES[gameId];
 
-  // FIX: was `user?._id` — that's the logged-in ACCOUNT's Mongo id (for a
-  // therapist, that's the therapist's own id, never a patient's). The
-  // backend's public session routes expect a GH-XXXX patient id, which is
-  // NOT the same field. Mirrors the precedence Layout.jsx already uses for
-  // finding the real patient id: currentPatient (therapist has a patient
-  // selected) -> publicPatientId (guest/public flow) -> user.patientId
-  // (logged-in patient account).
   const patientId = currentPatient?.patientId || publicPatientId || user?.patientId || null;
 
   useEffect(() => {
@@ -66,25 +56,28 @@ const GameEngine = () => {
     setTimeout(() => setToast(null), 5000);
   }, []);
 
-  // FIX: this used to ALSO call sessionApi.start(payload) here whenever a
-  // token existed — completely independent of useSessionTelemetry, which
-  // every game component now calls directly (start on click, saveRep per
-  // rep, finishSession on completion). That meant two separate,
-  // uncoordinated session-creation requests fired on every game start: one
-  // from here (always hitting the therapist-only /sessions/start route
-  // regardless of actual role, since it only checked `if (token)`), and one
-  // from useSessionTelemetry (correctly role-branched). useSessionTelemetry
-  // now owns session persistence end-to-end — this handler's only
-  // remaining job is post-game navigation.
-  const handleSessionEnd = useCallback((data) => {
-    navigate('/session-report', {
-      state: {
-        gameName,
-        gameId,
-        ...data,
-      },
-    });
-  }, [gameId, gameName, navigate]);
+  // useSessionTelemetry (invoked inside each game component) owns session
+  // persistence end-to-end. This handler pulls sessionId from appStore's
+  // currentSession (set there by useSessionTelemetry at start time) and
+  // forwards it along with patientId so SessionReportPage can fetch the
+  // canonical session, and ReportsPage can find it later.
+  const handleSessionEnd = useCallback(
+    (data) => {
+      const { currentSession } = useAppStore.getState();
+      const sessionId = currentSession?._id || currentSession?.sessionId || null;
+
+      navigate('/session-report', {
+        state: {
+          gameName,
+          gameId,
+          patientId,
+          sessionId,
+          ...data,
+        },
+      });
+    },
+    [gameId, gameName, navigate, patientId]
+  );
 
   if (isLoading) {
     return (
@@ -117,7 +110,6 @@ const GameEngine = () => {
 
   return (
     <div className="fixed inset-0 bg-slate-950 flex flex-col">
-      {/* Top bar */}
       <div className="flex-shrink-0 bg-slate-900/95 border-b border-slate-800 px-4 py-3 flex items-center gap-4 z-50">
         <button
           onClick={() => navigate('/games')}
@@ -133,16 +125,16 @@ const GameEngine = () => {
         </div>
       </div>
 
-      {/* Toast notification */}
       {toast && (
-        <div className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-xl font-medium text-white shadow-lg transition-all duration-300 ${
-          toast.type === 'error' ? 'bg-red-600' : 'bg-teal-600'
-        }`}>
+        <div
+          className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-xl font-medium text-white shadow-lg transition-all duration-300 ${
+            toast.type === 'error' ? 'bg-red-600' : 'bg-teal-600'
+          }`}
+        >
           {toast.message}
         </div>
       )}
 
-      {/* Game component */}
       <div className="flex-1 relative overflow-auto">
         <GameComponent
           onSessionEnd={handleSessionEnd}

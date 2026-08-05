@@ -1,62 +1,77 @@
-﻿import { useState, useEffect } from 'react';
+// frontend/src/hooks/usePostureGuidance.js
+import { useMemo } from "react";
 
-/**
- * usePostureGuidance.js
- * Monitors posture and provides feedback based on raw upper body landmarks.
- */
-export function usePostureGuidance(upperBodyData) {
-  const [guidance, setGuidance] = useState({
-    isReady: false,
-    message: 'Initializing...',
-    flags: {
-      shouldersLevel: true,
-      seatedStraight: true,
-      inFrame: false
-    }
-  });
+export function usePostureGuidance(poseData, calibrationData) {
+  return useMemo(() => {
+    console.log("[usePostureGuidance] 📊 poseData received:", poseData ? "✅ has data" : "❌ null");
 
-  useEffect(() => {
-    if (!upperBodyData || !upperBodyData.leftShoulder || !upperBodyData.rightShoulder) {
-      setGuidance(prev => ({ ...prev, isReady: false, message: 'Please step into the camera view.' }));
-      return;
+    if (!poseData) {
+      return {
+        isReady: false,
+        message: "Waiting for camera and pose detection...",
+        overallStatus: "severe",
+        flags: { noPose: true },
+      };
     }
 
-    const { leftShoulder, rightShoulder, midChest } = upperBodyData;
+    const { raw, midChest } = poseData;
     
-    // Check if landmarks are visible enough
-    const inFrame = (leftShoulder.visibility || 0) > 0.5 && (rightShoulder.visibility || 0) > 0.5;
-    
-    // Check if shoulders are level (y-coordinates should be close)
-    const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
-    const isLevel = shoulderDiff < 0.15; // Relaxed from 0.05
-    
-    // Check if seated straight (chest not too low in frame)
-    const seatedStraight = midChest.y < 0.95; // Relaxed from 0.8
-    
-    let message = 'Ready to start!';
-    let isReady = true;
-
-    if (!inFrame) {
-      message = 'Adjust position to show your shoulders.';
-      isReady = false;
-    } else if (!isLevel) {
-      message = 'Please level your shoulders.';
-      isReady = true; // Allow starting even if slightly unlevel
-    } else if (!seatedStraight) {
-      message = 'Sit up straight.';
-      isReady = true; // Allow starting even if slightly low
+    if (!raw) {
+      return {
+        isReady: false,
+        message: "Waiting for pose data...",
+        overallStatus: "severe",
+        flags: { noPose: true },
+      };
     }
 
-    setGuidance({
-      isReady,
-      message,
-      flags: {
-        shouldersLevel: isLevel,
-        seatedStraight,
-        inFrame
-      }
-    });
-  }, [upperBodyData]);
+    const leftVisible = raw.leftShoulder?.visibility > 0.3;
+    const rightVisible = raw.rightShoulder?.visibility > 0.3;
+    const shouldersVisible = leftVisible && rightVisible;
+    const flags = {};
 
-  return guidance;
+    if (!shouldersVisible) {
+      flags.shouldersHidden = true;
+      return {
+        isReady: false,
+        message: "Adjust position to show your shoulders fully",
+        overallStatus: "severe",
+        flags,
+      };
+    }
+
+    if (Math.abs(raw.leftShoulder.y - raw.rightShoulder.y) > 0.12) {
+      flags.unevenShoulders = true;
+      return {
+        isReady: false,
+        message: "Level your shoulders",
+        overallStatus: "minor",
+        flags,
+      };
+    }
+
+    const baselineY = calibrationData?.baselineMidChestY;
+    const slouchDrift = baselineY != null ? midChest.y - baselineY : null;
+    const isSlouching = slouchDrift != null ? slouchDrift > 0.1 : midChest.y > 0.92;
+
+    if (midChest && isSlouching) {
+      flags.slouching = true;
+      return {
+        isReady: false,
+        message: "Sit up straight",
+        overallStatus: "minor",
+        flags,
+      };
+    }
+
+    return {
+      isReady: true,
+      message: "Posture good, ready to start!",
+      overallStatus: "ok",
+      flags,
+    };
+  }, [poseData, calibrationData]);
 }
+
+// ✅ ADD DEFAULT EXPORT
+export default usePostureGuidance;

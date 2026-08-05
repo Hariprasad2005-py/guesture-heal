@@ -84,7 +84,11 @@ export default function App() {
           <Route path="/qa-tests" element={<WithLayout><Suspense fallback={null}><PatientDashboardTest /></Suspense></WithLayout>} />
         )}
 
-        <Route path="/reports/patient/:patientId" element={<ProtectedRoute><WithLayout><ReportsPage /></WithLayout></ProtectedRoute>} />
+        {/* Patient-specific reports must stay accessible to public (GH-xxxx)
+            patients with no token — ReportsPage already branches internally
+            on whether patientId is a public ID vs a therapist-authed Mongo
+            ID, so it's safe to leave this unauthenticated at the route level. */}
+        <Route path="/reports/patient/:patientId" element={<WithLayout><ReportsPage /></WithLayout>} />
         <Route path="/reports" element={<ProtectedRoute><WithLayout><ReportsPage /></WithLayout></ProtectedRoute>} />
 
         <Route path="*" element={<Navigate to="/" replace />} />

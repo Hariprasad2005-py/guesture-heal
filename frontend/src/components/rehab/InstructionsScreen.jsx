@@ -1,7 +1,8 @@
-﻿import React from 'react';
+
+import React from 'react';
 
 export default function InstructionsScreen({
-  icon = '🎯',
+  icon = '??',
   title,
   startingPosture,
   armPosition,
@@ -52,3 +53,5 @@ export default function InstructionsScreen({
     </div>
   );
 }
+
+

@@ -1,140 +1,289 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+// frontend/src/hooks/useMediaPipeUpperBody.js
+import { useCallback, useEffect, useRef, useState } from "react";
+
+const MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+
+const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
+
+const LANDMARKS = {
+  nose: 0,
+  leftShoulder: 11,
+  rightShoulder: 12,
+  leftElbow: 13,
+  rightElbow: 14,
+  leftWrist: 15,
+  rightWrist: 16,
+  leftHip: 23,
+  rightHip: 24,
+  leftIndex: 19,
+  rightIndex: 20,
+};
+
+function calcAngle(a, b, c) {
+  if (!a || !b || !c) return 0;
+  const ab = { x: a.x - b.x, y: a.y - b.y };
+  const cb = { x: c.x - b.x, y: c.y - b.y };
+  const dot = ab.x * cb.x + ab.y * cb.y;
+  const magnitude = Math.hypot(ab.x, ab.y) * Math.hypot(cb.x, cb.y);
+  if (!magnitude) return 0;
+  const cosine = Math.min(1, Math.max(-1, dot / magnitude));
+  return (Math.acos(cosine) * 180) / Math.PI;
+}
+
+function calcFlexionAngle(shoulder, elbow) {
+  if (!shoulder || !elbow) return 0;
+  const se = {
+    x: elbow.x - shoulder.x,
+    y: elbow.y - shoulder.y,
+    z: (elbow.z ?? 0) - (shoulder.z ?? 0),
+  };
+  const up = { x: 0, y: -1, z: 0 };
+  const dot = se.x * up.x + se.y * up.y + se.z * up.z;
+  const mag = Math.hypot(se.x, se.y, se.z);
+  if (!mag) return 0;
+  const cosine = Math.min(1, Math.max(-1, dot / mag));
+  return (Math.acos(cosine) * 180) / Math.PI;
+}
+
+function pointFromLandmarks(landmarks, index) {
+  const point = landmarks[index];
+  return {
+    x: point?.x ?? 0,
+    y: point?.y ?? 0,
+    z: point?.z ?? 0,
+    visibility: point?.visibility ?? 0,
+  };
+}
 
 /**
- * useMediaPipeUpperBody.js
- * Initializes MediaPipe Pose on the webcam video stream.
- * Returns raw upper-body landmarks each frame.
+ * Tracks upper-body pose (shoulders/elbows/wrists) from the webcam feed.
+ *
+ * IMPORTANT: this hook intentionally has NO synthetic/mock data fallback.
+ * If the camera or the pose model fails to initialize, `error` is set and
+ * `isActive` stays false — callers must block "Start Session" on that
+ * instead of silently letting the patient play against fake pose data.
  */
-export function useMediaPipeUpperBody({
-  enabled = true,
-  onPoseUpdate,
-  onError,
-  videoRef: externalVideoRef,
-} = {}) {
-  const internalVideoRef = useRef(null);
-  const videoRef = externalVideoRef || internalVideoRef;
-  const poseRef = useRef(null);
-  const cameraRef = useRef(null);
-  const mountedRef = useRef(true);
-
-  const [isLoading, setIsLoading] = useState(true);
+export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true } = {}) {
   const [isActive, setIsActive] = useState(false);
+  const [calibrationData, setCalibrationData] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const onPoseUpdateRef = useRef(onPoseUpdate);
-  const onErrorRef = useRef(onError);
-  useEffect(() => { onPoseUpdateRef.current = onPoseUpdate; }, [onPoseUpdate]);
-  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  const landmarkerRef = useRef(null);
+  const streamRef = useRef(null);
+  const animationFrameRef = useRef(null);
+  const runningRef = useRef(false);
+  const callbackRef = useRef(onPoseUpdate);
+  const calibrationRef = useRef(null);
+  const initAttemptedRef = useRef(false);
 
-  const loadScript = useCallback((src) => {
-    return new Promise((resolve, reject) => {
-      if (document.querySelector(`script[src="${src}"]`)) return resolve();
-      const script = document.createElement('script');
-      script.src = src;
-      script.crossOrigin = 'anonymous';
-      script.async = true;
-      script.onload = resolve;
-      script.onerror = () => reject(new Error(`Failed to load: ${src}`));
-      document.head.appendChild(script);
+  callbackRef.current = onPoseUpdate;
+
+  const calibrate = useCallback(() => {
+    return new Promise((resolve) => {
+      calibrationRef.current = { resolve, done: false };
     });
   }, []);
 
-  const setupPose = useCallback(async (isCancelled) => {
-    try {
-      await loadScript('https://unpkg.com/@mediapipe/pose@0.5.1675469404/pose.js');
-      if (isCancelled()) return false;
-      await loadScript('https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js');
-      if (isCancelled()) return false;
+  useEffect(() => {
+    if (!enabled || !videoRef?.current || initAttemptedRef.current) {
+      return undefined;
+    }
 
-      const Pose = window.Pose;
-      const Camera = window.Camera;
+    initAttemptedRef.current = true;
+    let cancelled = false;
 
-      if (!Pose || !Camera) throw new Error('MediaPipe Pose modules not loaded.');
+    const stop = () => {
+      runningRef.current = false;
+      setIsActive(false);
 
-      const pose = new Pose({
-        locateFile: (file) => `https://unpkg.com/@mediapipe/pose@0.5.1675469404/${file}`,
-      });
-
-      pose.setOptions({
-        modelComplexity: 1,
-        smoothLandmarks: true,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-        selfieMode: true,
-      });
-
-      pose.onResults((results) => {
-        if (isCancelled() || !mountedRef.current || !results.poseLandmarks) return;
-        
-        // Extract upper body landmarks
-        // 11: L shoulder, 12: R shoulder, 13: L elbow, 14: R elbow, 15: L wrist, 16: R wrist
-        // Midpoint of shoulders as chest/torso midpoint
-        const lm = results.poseLandmarks;
-        const upperBody = {
-          leftShoulder: lm[11],
-          rightShoulder: lm[12],
-          leftElbow: lm[13],
-          rightElbow: lm[14],
-          leftWrist: lm[15],
-          rightWrist: lm[16],
-          nose: lm[0],
-          leftHip: lm[23],
-          rightHip: lm[24],
-          midChest: {
-            x: (lm[11].x + lm[12].x) / 2,
-            y: (lm[11].y + lm[12].y) / 2,
-            z: (lm[11].z + lm[12].z) / 2,
-            visibility: (lm[11].visibility + lm[12].visibility) / 2
-          },
-          raw: lm
-        };
-        
-        onPoseUpdateRef.current?.(upperBody);
-      });
-
-      poseRef.current = pose;
-
-      if (videoRef.current) {
-        const camera = new Camera(videoRef.current, {
-          onFrame: async () => {
-            if (isCancelled() || !mountedRef.current || !poseRef.current || !videoRef.current) return;
-            try {
-              await poseRef.current.send({ image: videoRef.current });
-            } catch (_) {}
-          },
-          width: 640,
-          height: 480,
-        });
-        await camera.start();
-        cameraRef.current = camera;
-        setIsActive(true);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
       }
 
-      setIsLoading(false);
-      return true;
-    } catch (err) {
-      if (isCancelled()) return false;
-      setError(err.message);
-      onErrorRef.current?.(err);
-      setIsLoading(false);
-      return false;
-    }
-  }, [loadScript, videoRef]);
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
 
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    const isCancelled = () => cancelled;
-    mountedRef.current = true;
-    setupPose(isCancelled);
+      if (landmarkerRef.current) {
+        try {
+          landmarkerRef.current.close?.();
+        } catch {
+          /* noop */
+        }
+        landmarkerRef.current = null;
+      }
+    };
+
+    async function initialize() {
+      try {
+        setIsLoading(true);
+        setError(null);
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+          audio: false,
+        });
+
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          stop();
+          return;
+        }
+
+        const video = videoRef.current;
+        if (!video) {
+          stream.getTracks().forEach((track) => track.stop());
+          stop();
+          return;
+        }
+
+        streamRef.current = stream;
+        video.srcObject = stream;
+        video.muted = true;
+        video.autoplay = true;
+        video.playsInline = true;
+
+        await new Promise((resolve) => {
+          const onLoaded = () => {
+            video.removeEventListener("loadedmetadata", onLoaded);
+            resolve();
+          };
+          video.addEventListener("loadedmetadata", onLoaded);
+          if (video.readyState >= 1) {
+            video.removeEventListener("loadedmetadata", onLoaded);
+            resolve();
+          }
+        });
+
+        await video.play();
+
+        // NOTE: no try/catch-and-fallback here on purpose. If the model
+        // fails to load, we surface a real error instead of switching to
+        // fake pose data — a clinical tool must never silently pretend it
+        // is tracking someone when it isn't.
+        const vision = await import("@mediapipe/tasks-vision");
+        const { PoseLandmarker, FilesetResolver } = vision;
+        const filesetResolver = await FilesetResolver.forVisionTasks(WASM_URL);
+
+        const landmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
+          baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
+          runningMode: "VIDEO",
+          numPoses: 1,
+        });
+
+        if (cancelled) {
+          try {
+            landmarker.close?.();
+          } catch {
+            /* noop */
+          }
+          stop();
+          return;
+        }
+
+        landmarkerRef.current = landmarker;
+        runningRef.current = true;
+        setIsActive(true);
+        setIsLoading(false);
+
+        const detect = () => {
+          if (!runningRef.current || cancelled) return;
+
+          const currentVideo = videoRef.current;
+          const currentLandmarker = landmarkerRef.current;
+
+          if (
+            currentVideo &&
+            currentLandmarker &&
+            currentVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+          ) {
+            try {
+              const result = currentLandmarker.detectForVideo(currentVideo, performance.now());
+              const landmarks = result?.landmarks?.[0];
+
+              if (landmarks) {
+                const raw = Object.fromEntries(
+                  Object.entries(LANDMARKS).map(([name, index]) => [
+                    name,
+                    pointFromLandmarks(landmarks, index),
+                  ])
+                );
+
+                const midChest = {
+                  x: (raw.leftShoulder.x + raw.rightShoulder.x) / 2,
+                  y: (raw.leftShoulder.y + raw.rightShoulder.y) / 2,
+                  z: (raw.leftShoulder.z + raw.rightShoulder.z) / 2,
+                  visibility: Math.min(raw.leftShoulder.visibility, raw.rightShoulder.visibility),
+                };
+
+                const leftFlexion = calcFlexionAngle(raw.leftShoulder, raw.leftElbow);
+                const rightFlexion = calcFlexionAngle(raw.rightShoulder, raw.rightElbow);
+
+                const data = {
+                  raw,
+                  midChest,
+                  leftShoulderAngle: calcAngle(raw.leftHip, raw.leftShoulder, raw.leftElbow),
+                  rightShoulderAngle: calcAngle(raw.rightHip, raw.rightShoulder, raw.rightElbow),
+                  leftFlexion,
+                  rightFlexion,
+                  leftElbowAngle: calcAngle(raw.leftShoulder, raw.leftElbow, raw.leftWrist),
+                  rightElbowAngle: calcAngle(raw.rightShoulder, raw.rightElbow, raw.rightWrist),
+                  maxShoulderAngle: Math.max(leftFlexion, rightFlexion),
+                  timestamp: performance.now(),
+                };
+
+                if (calibrationRef.current && !calibrationRef.current.done) {
+                  calibrationRef.current.done = true;
+                  const baseline = {
+                    leftRestAngle: leftFlexion,
+                    rightRestAngle: rightFlexion,
+                    baselineMidChestY: midChest.y,
+                    timestamp: Date.now(),
+                  };
+                  setCalibrationData(baseline);
+                  calibrationRef.current.resolve(baseline);
+                  calibrationRef.current = null;
+                }
+
+                callbackRef.current?.(data);
+              }
+            } catch (err) {
+              if (import.meta.env.DEV) {
+                console.debug("[useMediaPipeUpperBody] Inference error:", err.message);
+              }
+            }
+          }
+
+          animationFrameRef.current = requestAnimationFrame(detect);
+        };
+
+        animationFrameRef.current = requestAnimationFrame(detect);
+      } catch (err) {
+        console.error("[useMediaPipeUpperBody] Initialization failed:", err);
+        setError(
+          err?.message ||
+            "Could not start pose tracking. Check camera permissions and your connection, then retry."
+        );
+        setIsActive(false);
+        setIsLoading(false);
+        stop();
+      }
+    }
+
+    initialize();
 
     return () => {
       cancelled = true;
-      mountedRef.current = false;
-      if (cameraRef.current) cameraRef.current.stop();
-      if (poseRef.current) poseRef.current.close();
+      stop();
+      initAttemptedRef.current = false;
     };
-  }, [enabled, setupPose]);
+  }, [enabled, videoRef]);
 
-  return { videoRef, isLoading, isActive, error };
+  return { isActive, isLoading, error, calibrate, calibrationData };
 }
+
+export default useMediaPipeUpperBody;

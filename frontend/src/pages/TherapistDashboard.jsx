@@ -4,7 +4,12 @@ import {
 } from 'recharts';
 import { loadSessionHistory } from '../engine/SessionLogger';
 
-
+const GAME_LABELS = {
+  rehab_slicer: 'Rehab Slicer',
+  precision_reach: 'Precision Reach',
+  catch_flex: 'Catch & Flex',
+  canvas_air: 'Canvas Air',
+};
 
 function PostureHeatCell({ severity, count }) {
   const bg = severity === 'severe'

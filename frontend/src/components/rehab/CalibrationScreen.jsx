@@ -1,18 +1,19 @@
-﻿import React, { useState } from 'react';
+
+import React, { useState } from 'react';
 
 const STEPS = [
   {
     id: 'face',
     title: 'Neutral Face Calibration',
     instruction: 'Relax your face and look at the camera. Hold a neutral, relaxed expression.',
-    icon: '🙂',
+    icon: '??',
     durationLabel: '4 seconds',
   },
   {
     id: 'pose',
     title: 'Resting Arm Calibration',
     instruction: 'Sit or stand upright with both arms relaxed at your sides, facing the camera.',
-    icon: '🧍',
+    icon: '??',
     durationLabel: '2 seconds',
   },
 ];
@@ -48,7 +49,7 @@ export default function CalibrationScreen({ onCalibrateFace, onCalibratePose, on
 
         {!canRun && !running && (
           <div className="mb-4 text-amber-400 text-sm font-medium">
-            {step.id === 'face' ? 'Position your face in view of the camera…' : 'Step back so your upper body is visible…'}
+            {step.id === 'face' ? 'Position your face in view of the camera' : 'Step back so your upper body is visible'}
           </div>
         )}
 
@@ -57,9 +58,11 @@ export default function CalibrationScreen({ onCalibrateFace, onCalibratePose, on
           disabled={!canRun || running}
           className="w-full px-6 py-4 bg-teal-600 hover:bg-teal-500 disabled:bg-slate-700 disabled:cursor-not-allowed rounded-xl font-bold text-white text-lg transition"
         >
-          {running ? 'Calibrating…' : `Start ${step.title}`}
+          {running ? 'Calibrating' : `Start ${step.title}`}
         </button>
       </div>
     </div>
   );
 }
+
+

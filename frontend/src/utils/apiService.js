@@ -42,10 +42,22 @@ async function request(endpoint, options = {}) {
     
   if (!response.ok) {
       if (response.status === 401) {
+        // Only treat this as "your therapist/admin session expired" when
+        // there actually was a token to begin with. Public (GH-xxxx)
+        // patients never have a token, so a 401 for them just means "this
+        // particular endpoint needs auth" -- not "log back in" -- and must
+        // never hard-redirect them away from their own session/report pages.
+        const hadToken = !!token;
         localStorage.removeItem("gestureheal-storage");
         const path = window.location.pathname;
-        const publicPaths = ["/login", "/", "/patient", "/therapist-login", "/therapist-register", "/register"];
-        if (!publicPaths.includes(path)) {
+        const publicPrefixes = [
+          "/login", "/", "/patient", "/therapist-login", "/therapist-register",
+          "/register", "/session-report", "/reports/patient/", "/patient/dashboard/", "/game/",
+        ];
+        const isPublicPath = publicPrefixes.some(
+          (p) => path === p || path.startsWith(p)
+        );
+        if (hadToken && !isPublicPath) {
           if (path.startsWith("/patient")) {
             window.location.href = "/patient";
           } else if (path.startsWith("/admin")) {
@@ -81,16 +93,14 @@ export const authApi = {
     method: "POST", 
     body: JSON.stringify(payload) 
   }),
-  // inside authApi:
-therapistRegister: (payload) => request("/auth/therapist-register", {
-  method: "POST",
-  body: JSON.stringify(payload),
-}),
-
-therapistLogin: (payload) => request("/auth/therapist-login", {
-  method: "POST",
-  body: JSON.stringify(payload),
-}),
+  therapistRegister: (payload) => request("/auth/therapist-register", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }),
+  therapistLogin: (payload) => request("/auth/therapist-login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }),
   patientLogin: (payload) => request("/auth/patient-login", { 
     method: "POST", 
     body: JSON.stringify(payload) 
@@ -165,16 +175,61 @@ export const patientPublicApi = {
     body: JSON.stringify(payload) 
   }),
 };
+
+// ─── REPORT API ─────────────────────────────────────────────────────────────
 export const reportApi = {
   getAll: (patientId) => 
     request(`/reports${patientId ? `?patientId=${patientId}` : ""}`),
   getByPatient: (patientId) => request(`/reports/patient/${patientId}`),
-  getByPublicPatient: (patientId) => request(`/reports/public/${patientId}`),  // ← new
+  getByPublicPatient: (patientId) => request(`/reports/public/${patientId}`),
   getById: (id) => request(`/reports/${id}`),
   generate: (sessionId) => request(`/reports/generate/${sessionId}`, { method: "POST" }),
-  updateNotes: (id, notes) => request(`/reports/${id}/notes`, { method: "PUT", body: JSON.stringify({ therapistNotes: notes }) }),
+  updateNotes: (id, notes) => request(`/reports/${id}/notes`, { 
+    method: "PUT", 
+    body: JSON.stringify({ therapistNotes: notes }) 
+  }),
   delete: (id) => request(`/reports/${id}`, { method: "DELETE" }),
+  
+  // ─── LOCAL STORAGE METHODS (IndexedDB) ──────────────────────────────────
+  // These use the sessionStore for offline persistence
+  saveLocalReport: async (reportData) => {
+    try {
+      const { reportDB } = await import('./sessionStore');
+      return await reportDB.saveReport(reportData);
+    } catch (err) {
+      console.warn('Failed to save local report:', err);
+      return null;
+    }
+  },
+  getLocalReports: async (options) => {
+    try {
+      const { reportDB } = await import('./sessionStore');
+      return await reportDB.getReports(options || {});
+    } catch (err) {
+      console.warn('Failed to get local reports:', err);
+      return [];
+    }
+  },
+  getLocalReport: async (reportId) => {
+    try {
+      const { reportDB } = await import('./sessionStore');
+      return await reportDB.getReport(reportId);
+    } catch (err) {
+      console.warn('Failed to get local report:', err);
+      return null;
+    }
+  },
+  deleteLocalReport: async (reportId) => {
+    try {
+      const { reportDB } = await import('./sessionStore');
+      return await reportDB.deleteReport(reportId);
+    } catch (err) {
+      console.warn('Failed to delete local report:', err);
+      return null;
+    }
+  },
 };
+
 // ─── EXERCISE API ────────────────────────────────────────────────────────────
 // Builds a query string from a params object, skipping undefined/null/"" values.
 function toQueryString(params = {}) {
@@ -207,4 +262,15 @@ export const adminApi = {
   getCompletionRates: () => request("/admin/analytics/completion-rates"),
   getAtRiskPatients: (limit) => request(`/admin/analytics/at-risk${toQueryString({ limit })}`),
   getSessionHeatmap: (days) => request(`/admin/analytics/heatmap${toQueryString({ days })}`),
+};
+
+// ─── EXPORT ALL ──────────────────────────────────────────────────────────────
+export default {
+  authApi,
+  patientApi,
+  sessionApi,
+  dashboardApi,
+  patientPublicApi,
+  reportApi,
+  adminApi,
 };

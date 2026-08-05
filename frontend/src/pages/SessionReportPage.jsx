@@ -185,7 +185,9 @@ export default function SessionReportPage() {
     }
   }
 
-  const reportsLink = isTherapist
+  const reportsLink = isTherapist && patientId
+    ? `/reports/patient/${patientId}`
+    : isTherapist
     ? "/reports"
     : patientId
     ? `/patient/dashboard/${patientId}`

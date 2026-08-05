@@ -11,6 +11,7 @@
     "@mediapipe/camera_utils": "^0.3.1675466862",
     "@mediapipe/hands": "^0.4.1675469240",
     "@mediapipe/pose": "^0.5.1675469404",
+    "@mediapipe/tasks-vision": "^1.0.1",
     "axios": "^1.7.2",
     "framer-motion": "^11.18.2",
     "html2canvas": "^1.4.1",
