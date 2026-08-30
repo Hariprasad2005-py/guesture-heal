@@ -64,7 +64,7 @@ const sessionSchema = new mongoose.Schema(
     },
     gameType: {
       type: String,
-      enum: ["rehab_slicer", "catch_flex", "precision_reach", "canvas_air"],
+      enum: ["rehab_slicer", "catch_flex", "precision_reach", "canvas_air", "cloud_reach"],
       default: "rehab_slicer",
     },
     score: { type: Number, default: 0 },
@@ -102,4 +102,5 @@ sessionSchema.index({ patientIdRef: 1, createdAt: -1 });
 sessionSchema.index({ therapistId: 1 });
 sessionSchema.index({ status: 1 });
 
-module.exports = mongoose.model("Session", sessionSchema);
+module.exports =
+  mongoose.models.Session || mongoose.model("Session", sessionSchema);

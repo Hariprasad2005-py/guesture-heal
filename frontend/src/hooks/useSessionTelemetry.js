@@ -4,13 +4,7 @@ import { useAppStore } from '../store/appStore';
 import { sessionApi, reportApi } from '../utils/apiService';
 import { sessionDB, reportDB } from '../utils/sessionStore';
 import MetricsEngine from '../utils/metricsEngine';
-
-const GAME_TYPE_MAP = {
-  'precision-reach': 'precision_reach',
-  'rehab-slicer': 'rehab_slicer',
-  'catch-flex': 'catch_flex',
-  'canvas-air': 'canvas_air',
-};
+import { GAME_TYPE_MAP } from '../constants/games';
 
 const INITIAL_METRICS = {
   reps: [],
@@ -240,13 +234,6 @@ export function useSessionTelemetry(patientId, gameId) {
               setCurrentSession(res.session);
               savedToBackend = true;
 
-              // NEW: session saved server-side, but the /reports endpoints
-              // read from a separate Reports collection that's never
-              // populated automatically -- explicitly ask the backend to
-              // generate the report now, or ReportsPage's server-backed
-              // queries (reportApi.getByPublicPatient etc.) will keep
-              // returning an empty array forever, even though the session
-              // itself is safely stored.
               try {
                 await reportApi.generate(sessionIdRef.current);
               } catch (genErr) {

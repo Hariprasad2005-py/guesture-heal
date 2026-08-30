@@ -6,20 +6,16 @@ import PrecisionReach from '../games/PrecisionReach';
 import RehabSlicer from '../games/RehabSlicer';
 import CatchAndFlex from '../games/CatchAndFlex';
 import CanvasAir from '../games/CanvasAir';
+import CloudReach from '../games/CloudReach';
+import { GAME_IDS, GAME_DISPLAY_NAMES } from '../constants/games';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 
 const GAME_COMPONENTS = {
-  'precision-reach': PrecisionReach,
-  'rehab-slicer': RehabSlicer,
-  'catch-flex': CatchAndFlex,
-  'canvas-air': CanvasAir,
-};
-
-const GAME_NAMES = {
-  'precision-reach': 'Precision Reach',
-  'rehab-slicer': 'Rehab Slicer',
-  'catch-flex': 'Catch & Flex',
-  'canvas-air': 'Canvas Air',
+  [GAME_IDS.PRECISION_REACH]: PrecisionReach,
+  [GAME_IDS.REHAB_SLICER]: RehabSlicer,
+  [GAME_IDS.CATCH_FLEX]: CatchAndFlex,
+  [GAME_IDS.CANVAS_AIR]: CanvasAir,
+  [GAME_IDS.CLOUD_REACH]: CloudReach,
 };
 
 const GameEngine = () => {
@@ -31,7 +27,7 @@ const GameEngine = () => {
   const [toast, setToast] = useState(null);
 
   const GameComponent = GAME_COMPONENTS[gameId];
-  const gameName = GAME_NAMES[gameId];
+  const gameName = GAME_DISPLAY_NAMES[gameId] || gameId;
 
   const patientId = currentPatient?.patientId || publicPatientId || user?.patientId || null;
 
@@ -56,11 +52,6 @@ const GameEngine = () => {
     setTimeout(() => setToast(null), 5000);
   }, []);
 
-  // useSessionTelemetry (invoked inside each game component) owns session
-  // persistence end-to-end. This handler pulls sessionId from appStore's
-  // currentSession (set there by useSessionTelemetry at start time) and
-  // forwards it along with patientId so SessionReportPage can fetch the
-  // canonical session, and ReportsPage can find it later.
   const handleSessionEnd = useCallback(
     (data) => {
       const { currentSession } = useAppStore.getState();

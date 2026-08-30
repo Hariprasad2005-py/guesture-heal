@@ -39,13 +39,25 @@ export default function SessionSummary({
     }
   };
 
+  // NOTE: every value below uses `??` (nullish coalescing), not `||`.
+  // A legitimate 0 (0% accuracy, 0 reps, 0° ROM) must render as 0, not
+  // silently fall through to a default because 0 is falsy.
   const stats = [
-    { icon: Trophy, label: 'Score', value: sessionData.score || 0, color: 'text-yellow-400' },
-    { icon: Target, label: 'Accuracy', value: `${sessionData.accuracyPercent || 0}%`, color: 'text-blue-400' },
-    { icon: Activity, label: 'Reps', value: sessionData.reps || 0, color: 'text-green-400' },
-    { icon: TrendingUp, label: 'ROM', value: `${sessionData.romData?.averageRomDegrees || 0}°`, color: 'text-purple-400' },
-    { icon: Clock, label: 'Duration', value: `${Math.floor((sessionData.durationSeconds || 0) / 60)}m ${(sessionData.durationSeconds || 0) % 60}s`, color: 'text-cyan-400' },
-    { icon: Zap, label: 'Best Streak', value: sessionData.gameSpecificMetrics?.longestHitStreak || 0, color: 'text-orange-400' },
+    { icon: Trophy, label: 'Score', value: sessionData.score ?? 0, color: 'text-yellow-400' },
+    { icon: Target, label: 'Accuracy', value: `${sessionData.accuracyPercent ?? 0}%`, color: 'text-blue-400' },
+    { icon: Activity, label: 'Reps', value: sessionData.reps ?? 0, color: 'text-green-400' },
+    { icon: TrendingUp, label: 'ROM', value: `${sessionData.romData?.averageRomDegrees ?? 0}°`, color: 'text-purple-400' },
+    { icon: Clock, label: 'Duration', value: `${Math.floor((sessionData.durationSeconds ?? 0) / 60)}m ${(sessionData.durationSeconds ?? 0) % 60}s`, color: 'text-cyan-400' },
+    // CloudReach stores this under gameSpecificMetrics.bestCombo. Other
+    // games in this suite may still use `longestHitStreak` -- both are
+    // checked so this card works across the whole rehab-game suite, not
+    // just Cloud Reach.
+    {
+      icon: Zap,
+      label: 'Best Streak',
+      value: sessionData.gameSpecificMetrics?.bestCombo ?? sessionData.gameSpecificMetrics?.longestHitStreak ?? 0,
+      color: 'text-orange-400',
+    },
   ];
 
   const hasRomData = sessionData.romData?.perRep?.length > 0;
@@ -91,14 +103,24 @@ export default function SessionSummary({
           <div className="bg-slate-900 rounded-xl p-6 border border-slate-800 mb-8">
             <h3 className="text-lg font-bold mb-4">Game Details</h3>
             <div className="grid grid-cols-2 gap-4">
-              {Object.entries(sessionData.gameSpecificMetrics).map(([key, value]) => (
-                <div key={key} className="flex justify-between py-2 border-b border-slate-800 last:border-0">
-                  <span className="text-slate-400 text-sm capitalize">
-                    {key.replace(/([A-Z])/g, ' $1').trim()}
-                  </span>
-                  <span className="font-medium">{value}</span>
-                </div>
-              ))}
+              {/*
+                CloudReach nests non-primitive objects in gameSpecificMetrics
+                (scoreBreakdown, fullMetrics) for use elsewhere (e.g. the
+                clinical report). Rendering those directly as JSX text
+                produced "[object Object]". This grid now only shows
+                primitive (string/number/boolean) values; nested objects
+                are simply skipped here rather than rendered badly.
+              */}
+              {Object.entries(sessionData.gameSpecificMetrics)
+                .filter(([, value]) => value === null || typeof value !== 'object')
+                .map(([key, value]) => (
+                  <div key={key} className="flex justify-between py-2 border-b border-slate-800 last:border-0">
+                    <span className="text-slate-400 text-sm capitalize">
+                      {key.replace(/([A-Z])/g, ' $1').trim()}
+                    </span>
+                    <span className="font-medium">{value ?? '—'}</span>
+                  </div>
+                ))}
             </div>
           </div>
         )}

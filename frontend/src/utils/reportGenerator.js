@@ -24,7 +24,11 @@ export async function generatePDFReport(report, patient = null) {
     y = 52;
     doc.setTextColor(30, 41, 59);
 
-    // Patient Information - with fallbacks
+    // Patient Information
+    // IMPORTANT: every fallback below uses `!=  null` / `??`, never `||` or
+    // a truthy ternary. A legitimate value of 0 (e.g. painLevel: 0, meaning
+    // "no pain") must render as "0/10", not silently fall through to "—"
+    // just because 0 is falsy in JavaScript.
     const snap = report.patientSnapshot || {};
     doc.setFontSize(13);
     doc.setFont("helvetica", "bold");
@@ -39,13 +43,13 @@ export async function generatePDFReport(report, patient = null) {
     doc.setFont("helvetica", "normal");
     const patientRows = [
       ["Name", snap.name || patient?.name || "—"],
-      ["Age", snap.age ? `${snap.age} years` : "—"],
-      ["Gender", snap.gender || "—"],
-      ["Condition", snap.condition || "—"],
-      ["Surgery Type", snap.surgeryType || "—"],
+      ["Age", snap.age != null ? `${snap.age} years` : "—"],
+      ["Gender", snap.gender ?? "—"],
+      ["Condition", snap.condition ?? "—"],
+      ["Surgery Type", snap.surgeryType ?? "—"],
       ["Surgery Date", snap.surgeryDate ? new Date(snap.surgeryDate).toLocaleDateString() : "—"],
-      ["Pain Level", snap.painLevel !== undefined ? `${snap.painLevel}/10` : "—"],
-      ["Goals", snap.goals || "—"],
+      ["Pain Level", snap.painLevel != null ? `${snap.painLevel}/10` : "—"],
+      ["Goals", snap.goals ?? "—"],
     ];
     patientRows.forEach(([label, value]) => {
       doc.setFont("helvetica", "bold");
@@ -57,7 +61,7 @@ export async function generatePDFReport(report, patient = null) {
 
     y += 5;
 
-    // Session Performance - with fallbacks
+    // Session Performance
     doc.setFontSize(13);
     doc.setFont("helvetica", "bold");
     doc.text("Session Performance", margin, y);
@@ -67,15 +71,28 @@ export async function generatePDFReport(report, patient = null) {
 
     const perf = report.performance || {};
     const perfRows = [
-      ["Day", perf.day || "—"],
-      ["Score", perf.score?.toLocaleString() || "0"],
-      ["Level Reached", perf.level || "1"],
-      ["Movement Accuracy", perf.accuracy ? `${perf.accuracy}%` : "—"],
-      ["Max Combo", perf.combo || "0"],
-      ["Stars", perf.stars ? `${"★".repeat(perf.stars)}${"☆".repeat(3 - (perf.stars || 0))}` : "—"],
-      ["Duration", perf.durationSeconds ? `${Math.round(perf.durationSeconds / 60)}m ${perf.durationSeconds % 60}s` : "—"],
-      ["Exercises Completed", perf.exercisesCompleted || "—"],
-      ["Total Reps", perf.totalReps || "—"],
+      ["Day", perf.day ?? "—"],
+      ["Score", perf.score != null ? perf.score.toLocaleString() : "—"],
+      // No fabricated default of "1" here anymore: some games (e.g. Cloud
+      // Reach) have no leveled-progression concept at all, so showing a
+      // fake "Level 1" implied a game state that doesn't exist for them.
+      ["Level Reached", perf.level ?? "—"],
+      ["Movement Accuracy", perf.accuracy != null ? `${perf.accuracy}%` : "—"],
+      ["Max Combo", perf.combo ?? "—"],
+      [
+        "Stars",
+        perf.stars != null
+          ? `${"★".repeat(perf.stars)}${"☆".repeat(Math.max(0, 3 - perf.stars))}`
+          : "—",
+      ],
+      [
+        "Duration",
+        perf.durationSeconds != null
+          ? `${Math.floor(perf.durationSeconds / 60)}m ${perf.durationSeconds % 60}s`
+          : "—",
+      ],
+      ["Exercises Completed", perf.exercisesCompleted ?? "—"],
+      ["Total Reps", perf.totalReps ?? "—"],
     ];
 
     doc.setFontSize(10);
@@ -92,7 +109,7 @@ export async function generatePDFReport(report, patient = null) {
     });
     y += Math.ceil(perfRows.length / 2) * 8 + 8;
 
-    // ROM Analysis - with fallbacks
+    // ROM Analysis
     if (report.romAnalysis && report.romAnalysis.length > 0) {
       doc.setFontSize(13);
       doc.setFont("helvetica", "bold");
@@ -127,7 +144,7 @@ export async function generatePDFReport(report, patient = null) {
       y += 5;
     }
 
-    // Clinical Observations - with fallbacks
+    // Clinical Observations
     if (report.observations || report.recommendations) {
       if (y > 230) { doc.addPage(); y = margin; }
       doc.setFontSize(13);

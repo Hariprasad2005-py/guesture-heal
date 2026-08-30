@@ -1,0 +1,3929 @@
+
+============================================================
+FILE: frontend/src/games/RehabSlicer.jsx
+============================================================
+
+// frontend/src/games/RehabSlicer.jsx
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pause, Play, X } from "lucide-react";
+
+import useMediaPipeUpperBody from "../hooks/useMediaPipeUpperBody";
+import usePoseDetection from "../hooks/usePoseDetection";
+import usePostureGuidance from "../hooks/usePostureGuidance";
+import useFacialPainDetection from "../hooks/useFacialPainDetection";
+import useAdaptiveDifficulty from "../hooks/useAdaptiveDifficulty";
+import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
+import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
+import { useAudioFeedback } from "../hooks/useAudioFeedback";
+import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
+import SessionSummary from "../components/rehab/SessionSummary";
+import MetricsEngine from "../utils/metricsEngine";
+
+const SESSION_SECONDS = 120;
+const HIT_RADIUS = 12;
+const SLICE_VELOCITY_THRESHOLD = 0.8;
+const NEXT_BALL_DELAY_MS = 600;
+const FRUIT_EMOJI = ["🍎", "🍊", "🍋", "🍇", "🍉", "🍓", "🥝", "🍑"];
+
+function spawnBall(speed, difficulty) {
+  const sizeMap = { Beginner: 50, Intermediate: 40, Advanced: 30 };
+  const size = sizeMap[difficulty] || 40;
+  return {
+    id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+    x: 15 + Math.random() * 70,
+    y: -10,
+    speed: speed || 0.4,
+    emoji: FRUIT_EMOJI[Math.floor(Math.random() * FRUIT_EMOJI.length)],
+    sliced: false,
+    size: size,
+  };
+}
+
+export default function RehabSlicer({
+  onSessionEnd,
+  patientId,
+  gameId = "rehab-slicer",
+}) {
+  const videoRef = useRef(null);
+  const [poseData, setPoseData] = useState(null);
+  const [ball, setBall] = useState(null);
+  const [hits, setHits] = useState(0);
+  const [misses, setMisses] = useState(0);
+  const [combo, setCombo] = useState(0);
+  const [bestCombo, setBestCombo] = useState(0);
+  const [flash, setFlash] = useState(null);
+  const [trail, setTrail] = useState([]);
+  const [score, setScore] = useState(0);
+  const [repData, setRepData] = useState([]);
+
+  const minAngleRef = useRef(null);
+  const maxAngleRef = useRef(0);
+  const nextSpawnTimerRef = useRef(null);
+  const hasEndedRef = useRef(false);
+  const gameLoopRef = useRef(null);
+  const metricsEngine = useRef(new MetricsEngine());
+
+  const { isActive } = useMediaPipeUpperBody({
+    videoRef,
+    onPoseUpdate: setPoseData,
+  });
+
+  const { position, velocity, shoulderAngle, activeSide } = usePoseDetection(poseData);
+  const guidance = usePostureGuidance(poseData);
+  const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
+  const { currentDifficulty, settings, adapt } = useAdaptiveDifficulty();
+  const telemetry = useSessionTelemetry(patientId, gameId);
+  const audio = useAudioFeedback(true);
+
+  const accuracy = useMemo(() => {
+    const attempts = hits + misses;
+    return attempts ? Math.round((hits / attempts) * 100) : 100;
+  }, [hits, misses]);
+
+  const romDegrees = useMemo(() => {
+    if (minAngleRef.current === null) return 0;
+    return Math.max(0, Math.round(maxAngleRef.current - minAngleRef.current));
+  }, [shoulderAngle]);
+
+  const engine = useGameEngine({
+    sessionLength: SESSION_SECONDS,
+    onRepComplete: (success) => {
+      telemetry.recordRep(success);
+      if (success) audio.playSuccess();
+      else audio.playMiss();
+    },
+    onSessionComplete: () => {
+      finalizeTelemetry();
+    },
+  });
+
+  const {
+    gameState,
+    countdown,
+    timeLeft,
+    isPaused,
+    startSession,
+    pauseSession,
+    resumeSession,
+    completeRep,
+    endSession,
+  } = engine;
+
+  const clearSpawnTimer = useCallback(() => {
+    if (nextSpawnTimerRef.current) {
+      clearTimeout(nextSpawnTimerRef.current);
+      nextSpawnTimerRef.current = null;
+    }
+  }, []);
+
+  const spawnNextBall = useCallback(() => {
+    clearSpawnTimer();
+    setBall(spawnBall(settings.speed || 0.4, currentDifficulty));
+  }, [clearSpawnTimer, settings.speed, currentDifficulty]);
+
+  // Track ROM with metrics engine
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    
+    const repResult = metricsEngine.current.trackAngle(shoulderAngle, performance.now());
+    if (repResult) {
+      setRepData(prev => [...prev, repResult]);
+    }
+  }, [gameState, isPaused, shoulderAngle]);
+
+  // Main game loop
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) {
+      if (gameLoopRef.current) {
+        cancelAnimationFrame(gameLoopRef.current);
+        gameLoopRef.current = null;
+      }
+      return;
+    }
+
+    let lastTime = performance.now();
+
+    const gameLoop = (timestamp) => {
+      const delta = Math.min((timestamp - lastTime) / 16, 3);
+      lastTime = timestamp;
+
+      setTrail((current) => [...current.slice(-9), { ...position }]);
+
+      setBall((current) => {
+        if (!current || current.sliced) return current;
+
+        const nextY = current.y + current.speed * delta;
+        const distance = Math.hypot(position.x - current.x, position.y - nextY);
+        const isSliced = distance < HIT_RADIUS && velocity > SLICE_VELOCITY_THRESHOLD;
+
+        if (isSliced) {
+          setHits((h) => h + 1);
+          setScore((s) => s + 10 + combo * 2);
+          setCombo((c) => {
+            const next = c + 1;
+            setBestCombo((best) => Math.max(best, next));
+            return next;
+          });
+          completeRep(true);
+          setFlash({ type: "hit", key: current.id });
+          
+          setTimeout(() => {
+            if (gameState === GAME_STATES.ACTIVE && !isPaused) {
+              spawnNextBall();
+            }
+          }, NEXT_BALL_DELAY_MS);
+          
+          return { ...current, sliced: true, y: nextY };
+        }
+
+        if (nextY > 105) {
+          setMisses((m) => m + 1);
+          setCombo(0);
+          completeRep(false);
+          setFlash({ type: "miss", key: current.id });
+          
+          setTimeout(() => {
+            if (gameState === GAME_STATES.ACTIVE && !isPaused) {
+              spawnNextBall();
+            }
+          }, NEXT_BALL_DELAY_MS);
+          
+          return null;
+        }
+
+        return { ...current, y: nextY };
+      });
+
+      telemetry.trackMovement(position);
+      telemetry.trackAngle(shoulderAngle);
+
+      if (minAngleRef.current === null || (shoulderAngle > 0 && shoulderAngle < minAngleRef.current)) {
+        minAngleRef.current = shoulderAngle > 0 ? shoulderAngle : 0;
+      }
+      if (shoulderAngle > maxAngleRef.current) {
+        maxAngleRef.current = shoulderAngle;
+      }
+
+      gameLoopRef.current = requestAnimationFrame(gameLoop);
+    };
+
+    gameLoopRef.current = requestAnimationFrame(gameLoop);
+
+    return () => {
+      if (gameLoopRef.current) {
+        cancelAnimationFrame(gameLoopRef.current);
+        gameLoopRef.current = null;
+      }
+    };
+  }, [gameState, isPaused, position, velocity, shoulderAngle, completeRep, telemetry, spawnNextBall, combo]);
+
+  // Spawn first ball when game becomes active
+  useEffect(() => {
+    if (gameState === GAME_STATES.ACTIVE && !ball && !nextSpawnTimerRef.current && !isPaused) {
+      spawnNextBall();
+    }
+  }, [gameState, ball, isPaused, spawnNextBall]);
+
+  // Clear flash after animation
+  useEffect(() => {
+    if (!flash) return undefined;
+    const timer = setTimeout(() => setFlash(null), 450);
+    return () => clearTimeout(timer);
+  }, [flash]);
+
+  // Adaptive difficulty
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return undefined;
+    const timer = setInterval(() => {
+      adapt({ accuracy, papsScore, combo: bestCombo });
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [gameState, isPaused, adapt, accuracy, papsScore, bestCombo]);
+
+  // Pain detection
+  useEffect(() => {
+    if (!isPainDetected || gameState !== GAME_STATES.ACTIVE) return;
+    pauseSession();
+    telemetry.trackPain(papsScore);
+  }, [isPainDetected, gameState, pauseSession, telemetry, papsScore]);
+
+  useEffect(() => () => clearSpawnTimer(), [clearSpawnTimer]);
+
+  const finalizeTelemetry = useCallback(() => {
+    if (hasEndedRef.current) return;
+    hasEndedRef.current = true;
+    const sessionStats = metricsEngine.current.getSessionStats();
+    telemetry.endSession({
+      gameName: "Rehab Slicer",
+      score: score,
+      hits,
+      misses,
+      accuracy,
+      bestCombo,
+      romDegrees: sessionStats.averageRom || romDegrees,
+      papsScore,
+      difficulty: currentDifficulty,
+      gameSpecific: {
+        avgSwipeSpeed: score / ((hits + misses) || 1),
+        longestHitStreak: bestCombo,
+        totalSwipes: hits + misses,
+        repData: sessionStats.reps || repData,
+      },
+    });
+  }, [telemetry, score, hits, misses, accuracy, bestCombo, romDegrees, papsScore, currentDifficulty, repData]);
+
+  // ========== RENDER ==========
+
+  if (gameState === GAME_STATES.INSTRUCTIONS) {
+    return (
+      <div className="min-h-screen bg-[#0B1120] p-8 text-white">
+        <div className="max-w-4xl mx-auto">
+          <h1 className="mb-2 text-3xl font-black">🍉 Rehab Slicer</h1>
+          <p className="mb-6 text-slate-400">
+            Slice the falling fruit with your hand movement! Each fruit must be sliced
+            before it falls off screen. One fruit at a time — accuracy matters!
+          </p>
+
+          <div className="relative overflow-hidden rounded-2xl border-4 border-slate-800 aspect-video">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full scale-x-[-1] object-cover"
+            />
+            <SkeletonOverlay
+              poseData={poseData}
+              overallStatus={guidance.overallStatus}
+              shoulderAngle={shoulderAngle}
+            />
+            <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+              {Math.round(shoulderAngle)}° | {activeSide} | PAPS {papsScore}
+            </div>
+          </div>
+
+          <div className={`mt-4 rounded-xl border p-4 ${
+            guidance.overallStatus === 'ok' 
+              ? 'border-green-800 bg-green-950/30 text-green-300' 
+              : 'border-amber-800 bg-amber-950/30 text-amber-300'
+          }`}>
+            {guidance.message}
+          </div>
+
+          <button
+            onClick={() => {
+              telemetry.startTracking();
+              startSession();
+            }}
+            disabled={!guidance.isReady || !isActive}
+            className="mt-6 rounded-xl bg-cyan-500 px-8 py-3 font-bold text-white hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500"
+          >
+            Start Session
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (gameState === GAME_STATES.COMPLETE) {
+    const sessionData = {
+      sessionId: telemetry.sessionId,
+      gameId: gameId,
+      patientId: patientId,
+      date: new Date().toISOString(),
+      durationSeconds: SESSION_SECONDS - timeLeft,
+      score: score,
+      accuracyPercent: accuracy,
+      romData: {
+        averageRomDegrees: romDegrees || 0,
+        maxRomDegrees: maxAngleRef.current || 0,
+        perRep: repData.map((r, i) => ({ 
+          rep: i + 1, 
+          romDegrees: r.romDegrees || 0, 
+          success: r.success !== false 
+        })),
+      },
+      reps: hits + misses,
+      hitsOrCatchesOrCompletions: hits,
+      missesOrDrops: misses,
+      gameSpecificMetrics: {
+        avgSwipeSpeed: score / ((hits + misses) || 1),
+        longestHitStreak: bestCombo,
+        totalSwipes: hits + misses,
+      },
+    };
+
+    return (
+      <SessionSummary
+        sessionData={sessionData}
+        gameName="Rehab Slicer"
+        gameId={gameId}
+        onSaveReport={async () => {
+          const result = await telemetry.saveReport(sessionData);
+          return result;
+        }}
+        onFinish={() => {
+          onSessionEnd?.(sessionData);
+        }}
+      />
+    );
+  }
+
+  // Active game state
+  return (
+    <div className="min-h-screen bg-[#0B1120] p-8 pt-24 text-white">
+      {gameState === GAME_STATES.COUNTDOWN && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-cyan-400">
+          {countdown || "GO"}
+        </div>
+      )}
+
+      {isPainDetected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div className="rounded-2xl bg-slate-900 p-8 text-center max-w-md">
+            <h2 className="mb-3 text-xl font-bold text-red-400">Discomfort Detected</h2>
+            <p className="mb-6 text-slate-300">Please rest before resuming.</p>
+            <button
+              onClick={() => {
+                resetPainState();
+                resumeSession();
+              }}
+              className="rounded-lg bg-cyan-500 px-6 py-2 font-bold hover:bg-cyan-400"
+            >
+              Resume
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Top bar */}
+      <div className="fixed left-0 right-0 top-0 z-40 flex justify-between border-b border-slate-800 bg-slate-950/90 px-8 py-4 backdrop-blur">
+        <div className="flex gap-5 font-mono text-sm overflow-x-auto">
+          <span>⏱ {timeLeft}s</span>
+          <span>🎯 Score: {score}</span>
+          <span>✅ Hits: {hits}</span>
+          <span>❌ Misses: {misses}</span>
+          <span>🔥 Combo: {combo}</span>
+          <span>📊 Acc: {accuracy}%</span>
+          <span className="text-cyan-400">{currentDifficulty}</span>
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => (isPaused ? resumeSession() : pauseSession())}
+            className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
+          >
+            {isPaused ? <Play size={18} /> : <Pause size={18} />}
+          </button>
+          <button onClick={endSession} className="rounded-lg bg-red-950 p-2 hover:bg-red-900">
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* Game area */}
+      <div className="flex h-[calc(100vh-140px)] gap-6">
+        {/* Camera view */}
+        <div className="relative w-[38%] overflow-hidden rounded-2xl border-4 border-slate-800 flex-shrink-0">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full scale-x-[-1] object-cover"
+          />
+          <SkeletonOverlay
+            poseData={poseData}
+            overallStatus={guidance.overallStatus}
+            shoulderAngle={shoulderAngle}
+          />
+          <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+            {Math.round(shoulderAngle)}° | {activeSide}
+          </div>
+        </div>
+
+        {/* Game canvas */}
+        <div className="relative w-[62%] overflow-hidden rounded-2xl border-4 border-slate-800 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900">
+          {flash && (
+            <div
+              key={flash.key}
+              className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-4xl font-black ${
+                flash.type === "hit" ? "text-emerald-400" : "text-red-400"
+              }`}
+              style={{ animation: "slicer-flash 450ms ease-out forwards" }}
+            >
+              {flash.type === "hit" ? "💥 SLICED!" : "❌ MISSED"}
+            </div>
+          )}
+
+          <svg
+            viewBox="0 0 100 100"
+            className="pointer-events-none absolute inset-0 w-full h-full"
+            preserveAspectRatio="none"
+          >
+            <polyline
+              points={trail.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke="#22d3ee"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              opacity="0.6"
+            />
+          </svg>
+
+          {ball && !ball.sliced && (
+            <div
+              className="absolute select-none transition-transform drop-shadow-[0_0_12px_rgba(255,255,255,.35)]"
+              style={{
+                left: `${ball.x}%`,
+                top: `${ball.y}%`,
+                transform: "translate(-50%, -50%)",
+                fontSize: `${ball.size}px`,
+              }}
+            >
+              {ball.emoji}
+            </div>
+          )}
+
+          <div
+            className="absolute w-6 h-6 rounded-full border-4 border-cyan-400 bg-cyan-200/40 shadow-[0_0_14px_4px_rgba(34,211,238,.4)] pointer-events-none"
+            style={{
+              left: `${position.x}%`,
+              top: `${position.y}%`,
+              transform: "translate(-50%, -50%)",
+              transition: "left 0.05s, top 0.05s",
+            }}
+          />
+
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-slate-500 text-xs">
+            Move your hand to slice the fruit
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes slicer-flash {
+          0% { opacity: 0; transform: scale(0.8); }
+          25% { opacity: 1; transform: scale(1.1); }
+          100% { opacity: 0; transform: scale(1); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+
+
+============================================================
+FILE: frontend/src/games/PrecisionReach.jsx
+============================================================
+
+// frontend/src/games/PrecisionReach.jsx
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pause, Play, X, Rocket } from "lucide-react";
+
+import useMediaPipeUpperBody from "../hooks/useMediaPipeUpperBody";
+import usePoseDetection from "../hooks/usePoseDetection";
+import usePostureGuidance from "../hooks/usePostureGuidance";
+import useFacialPainDetection from "../hooks/useFacialPainDetection";
+import useAdaptiveDifficulty from "../hooks/useAdaptiveDifficulty";
+import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
+import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
+import { useAudioFeedback } from "../hooks/useAudioFeedback";
+import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
+import SessionSummary from "../components/rehab/SessionSummary";
+import MetricsEngine from "../utils/metricsEngine";
+
+const SESSION_SECONDS = 120;
+const BASE_ANGLE = 10;
+const LAUNCH_ANGLE = 145;
+const ATTEMPT_START_ANGLE = 60;
+const ATTEMPT_FAIL_ANGLE = 30;
+const CHECKPOINTS = [30, 60, 90, 120];
+
+export default function PrecisionReach({
+  onSessionEnd,
+  patientId,
+  gameId = "precision-reach",
+}) {
+  const videoRef = useRef(null);
+  const launchTimerRef = useRef(null);
+  const resetTimerRef = useRef(null);
+  const hasEndedRef = useRef(false);
+  const metricsEngine = useRef(new MetricsEngine());
+
+  const [poseData, setPoseData] = useState(null);
+  const [launches, setLaunches] = useState(0);
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [maxAngle, setMaxAngle] = useState(0);
+  const [minAngle, setMinAngle] = useState(null);
+  const [isLaunched, setIsLaunched] = useState(false);
+  const [attemptInProgress, setAttemptInProgress] = useState(false);
+  const [stars, setStars] = useState(0);
+  const [showLaunchEffect, setShowLaunchEffect] = useState(false);
+  const [score, setScore] = useState(0);
+  const [repData, setRepData] = useState([]);
+  const [checkpointsReached, setCheckpointsReached] = useState([]);
+
+  const attemptStateRef = useRef("idle");
+
+  const { isActive } = useMediaPipeUpperBody({
+    videoRef,
+    onPoseUpdate: setPoseData,
+  });
+
+  const { shoulderAngle, activeSide } = usePoseDetection(poseData);
+  const guidance = usePostureGuidance(poseData);
+  const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
+  const { currentDifficulty, adapt } = useAdaptiveDifficulty();
+  const telemetry = useSessionTelemetry(patientId, gameId);
+  const audio = useAudioFeedback(true);
+
+  const attempts = launches + failedAttempts;
+  const accuracy = attempts ? Math.round((launches / attempts) * 100) : 100;
+  const romDegrees = minAngle === null ? 0 : Math.max(0, Math.round(maxAngle - minAngle));
+
+  const rocketProgress = useMemo(
+    () => Math.min(100, Math.max(0, ((shoulderAngle - BASE_ANGLE) / (LAUNCH_ANGLE - BASE_ANGLE)) * 100)),
+    [shoulderAngle]
+  );
+
+  const engine = useGameEngine({
+    sessionLength: SESSION_SECONDS,
+    onRepComplete: (success) => {
+      telemetry.recordRep(success);
+      if (success) {
+        audio.playSuccess();
+        setStars((s) => Math.min(5, s + 1));
+        setShowLaunchEffect(true);
+        setTimeout(() => setShowLaunchEffect(false), 800);
+      }
+    },
+    onSessionComplete: () => {
+      finalizeTelemetry();
+    },
+  });
+
+  const {
+    gameState,
+    countdown,
+    timeLeft,
+    isPaused,
+    startSession,
+    pauseSession,
+    resumeSession,
+    completeRep,
+    endSession,
+  } = engine;
+
+  // Track ROM with metrics engine
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    
+    const repResult = metricsEngine.current.trackAngle(shoulderAngle, performance.now());
+    if (repResult) {
+      setRepData(prev => [...prev, repResult]);
+    }
+  }, [gameState, isPaused, shoulderAngle]);
+
+  // Checkpoint detection
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    
+    CHECKPOINTS.forEach(cp => {
+      if (shoulderAngle >= cp && !checkpointsReached.includes(cp)) {
+        setCheckpointsReached(prev => [...prev, cp]);
+        setScore(s => s + 10);
+        // Play a subtle sound for checkpoint
+      }
+    });
+  }, [gameState, isPaused, shoulderAngle, checkpointsReached]);
+
+  // Game logic
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+
+    telemetry.trackAngle(shoulderAngle);
+    telemetry.trackMovement({
+      x: poseData?.raw?.leftWrist?.x || 0,
+      y: poseData?.raw?.leftWrist?.y || 0,
+    });
+
+    setMaxAngle((v) => Math.max(v, shoulderAngle));
+    setMinAngle((v) => {
+      if (v === null && shoulderAngle > 0) return shoulderAngle;
+      if (shoulderAngle > 0 && shoulderAngle < v) return shoulderAngle;
+      return v;
+    });
+
+    // Attempt state machine
+    if (attemptStateRef.current === "idle" && shoulderAngle >= ATTEMPT_START_ANGLE) {
+      attemptStateRef.current = "attempting";
+      setAttemptInProgress(true);
+    }
+
+    if (attemptStateRef.current === "attempting" && shoulderAngle < ATTEMPT_FAIL_ANGLE && !isLaunched) {
+      attemptStateRef.current = "idle";
+      setAttemptInProgress(false);
+      setFailedAttempts((v) => v + 1);
+      completeRep(false);
+    }
+
+    // Launch detection with hold timer
+    if (shoulderAngle > LAUNCH_ANGLE && !isLaunched) {
+      if (!launchTimerRef.current) {
+        launchTimerRef.current = setTimeout(() => {
+          setIsLaunched(true);
+          setLaunches((v) => v + 1);
+          setScore((s) => s + 25);
+          attemptStateRef.current = "idle";
+          setAttemptInProgress(false);
+          completeRep(true);
+
+          resetTimerRef.current = setTimeout(() => {
+            setIsLaunched(false);
+            launchTimerRef.current = null;
+          }, 1200);
+        }, 400);
+      }
+    }
+
+    if (shoulderAngle <= LAUNCH_ANGLE && launchTimerRef.current) {
+      clearTimeout(launchTimerRef.current);
+      launchTimerRef.current = null;
+    }
+  }, [gameState, isPaused, shoulderAngle, isLaunched, completeRep, poseData, telemetry]);
+
+  // Adaptive difficulty
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    const timer = setInterval(() => {
+      adapt({ accuracy, papsScore, combo: launches });
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [gameState, isPaused, adapt, accuracy, papsScore, launches]);
+
+  // Pain detection
+  useEffect(() => {
+    if (!isPainDetected || gameState !== GAME_STATES.ACTIVE) return;
+    pauseSession();
+    telemetry.trackPain(papsScore);
+  }, [isPainDetected, gameState, pauseSession, telemetry, papsScore]);
+
+  useEffect(() => () => {
+    if (launchTimerRef.current) clearTimeout(launchTimerRef.current);
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+  }, []);
+
+  const finalizeTelemetry = useCallback(() => {
+    if (hasEndedRef.current) return;
+    hasEndedRef.current = true;
+    const sessionStats = metricsEngine.current.getSessionStats();
+    telemetry.endSession({
+      gameName: "Precision Reach",
+      score: score,
+      launches,
+      failedAttempts,
+      accuracy,
+      romDegrees: sessionStats.averageRom || romDegrees,
+      maxAngle: Math.round(maxAngle),
+      papsScore,
+      difficulty: currentDifficulty,
+      stars,
+      gameSpecific: {
+        targetAngleDegrees: LAUNCH_ANGLE,
+        avgTimeToReachTarget: sessionStats.totalDuration / (launches || 1),
+        checkpointsReached: checkpointsReached.length,
+        repData: sessionStats.reps || repData,
+      },
+    });
+  }, [telemetry, score, launches, failedAttempts, accuracy, romDegrees, maxAngle, papsScore, currentDifficulty, stars, checkpointsReached, repData]);
+
+  // ========== RENDER ==========
+
+  if (gameState === GAME_STATES.INSTRUCTIONS) {
+    return (
+      <div className="min-h-screen bg-[#0B1120] p-8 text-white">
+        <div className="mx-auto max-w-4xl">
+          <h1 className="mb-2 text-3xl font-black">🚀 Precision Reach</h1>
+          <p className="mb-6 text-slate-400">
+            Raise your arm to launch a rocket into space! The rocket climbs with your
+            shoulder movement. Hold at the top to launch!
+          </p>
+
+          <div className="relative overflow-hidden rounded-2xl border-4 border-slate-800 bg-slate-900 aspect-video">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full scale-x-[-1] object-cover"
+            />
+            <SkeletonOverlay
+              poseData={poseData}
+              overallStatus={guidance.overallStatus}
+              shoulderAngle={shoulderAngle}
+            />
+            <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+              {Math.round(shoulderAngle)}° | PAPS: {papsScore}
+            </div>
+          </div>
+
+          <div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-800">
+            <div
+              className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-300"
+              style={{ width: `${rocketProgress}%` }}
+            />
+          </div>
+
+          <div className={`mt-4 rounded-xl border p-4 ${
+            guidance.overallStatus === 'ok' 
+              ? 'border-green-800 bg-green-950/30 text-green-300' 
+              : 'border-amber-800 bg-amber-950/30 text-amber-300'
+          }`}>
+            {guidance.message}
+          </div>
+
+          <button
+            onClick={() => {
+              telemetry.startTracking();
+              startSession();
+            }}
+            disabled={!guidance.isReady || !isActive}
+            className="mt-6 rounded-xl bg-cyan-500 px-8 py-3 font-bold hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500"
+          >
+            Start Session
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (gameState === GAME_STATES.COMPLETE) {
+    const sessionData = {
+      sessionId: telemetry.sessionId,
+      gameId: gameId,
+      patientId: patientId,
+      date: new Date().toISOString(),
+      durationSeconds: SESSION_SECONDS - timeLeft,
+      score: score,
+      accuracyPercent: accuracy,
+      romData: {
+        averageRomDegrees: romDegrees || 0,
+        maxRomDegrees: maxAngle || 0,
+        perRep: repData.map((r, i) => ({ 
+          rep: i + 1, 
+          romDegrees: r.romDegrees || 0, 
+          success: r.success !== false 
+        })),
+      },
+      reps: launches + failedAttempts,
+      hitsOrCatchesOrCompletions: launches,
+      missesOrDrops: failedAttempts,
+      gameSpecificMetrics: {
+        targetAngleDegrees: LAUNCH_ANGLE,
+        avgTimeToReachTarget: repData.length ? repData.reduce((sum, r) => sum + (r.durationSeconds || 0), 0) / repData.length : 0,
+        checkpointsReached: checkpointsReached.length,
+        stars: stars,
+      },
+    };
+
+    return (
+      <SessionSummary
+        sessionData={sessionData}
+        gameName="Precision Reach"
+        gameId={gameId}
+        onSaveReport={async () => {
+          const result = await telemetry.saveReport(sessionData);
+          return result;
+        }}
+        onFinish={() => {
+          onSessionEnd?.(sessionData);
+        }}
+      />
+    );
+  }
+
+  // Active game state
+  return (
+    <div className="relative min-h-screen bg-[#0B1120] p-8 pt-24 text-white overflow-hidden">
+      {/* Stars background */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        {Array.from({ length: 150 }).map((_, i) => (
+          <div
+            key={i}
+            className="absolute rounded-full bg-white"
+            style={{
+              width: Math.random() * 2 + 1 + "px",
+              height: Math.random() * 2 + 1 + "px",
+              left: Math.random() * 100 + "%",
+              top: Math.random() * 100 + "%",
+              opacity: Math.random() * 0.8 + 0.2,
+              animation: `twinkle ${Math.random() * 3 + 2}s infinite alternate`,
+              animationDelay: `${Math.random() * 3}s`,
+            }}
+          />
+        ))}
+      </div>
+
+      {gameState === GAME_STATES.COUNTDOWN && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <span className="text-8xl font-black text-cyan-400">{countdown || "GO"}</span>
+        </div>
+      )}
+
+      {isPainDetected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div className="max-w-md rounded-2xl border border-red-800 bg-slate-900 p-8 text-center">
+            <h2 className="mb-3 text-xl font-bold text-red-400">Discomfort Detected</h2>
+            <p className="mb-6 text-slate-300">Take a rest before continuing.</p>
+            <button
+              onClick={() => {
+                resetPainState();
+                resumeSession();
+              }}
+              className="rounded-lg bg-cyan-500 px-6 py-2 font-bold hover:bg-cyan-400"
+            >
+              I'm OK, Resume
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Top bar */}
+      <div className="fixed left-0 right-0 top-0 z-40 flex items-center justify-between border-b border-slate-800 bg-slate-950/90 px-8 py-4 backdrop-blur">
+        <div className="flex gap-5 font-mono text-sm overflow-x-auto">
+          <span>⏱ {timeLeft}s</span>
+          <span>📐 {Math.round(shoulderAngle)}°</span>
+          <span>🚀 Launches: {launches}</span>
+          <span>🎯 Acc: {accuracy}%</span>
+          <span>💪 ROM: {romDegrees}°</span>
+          <span className="text-cyan-400">{currentDifficulty}</span>
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => (isPaused ? resumeSession() : pauseSession())}
+            className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
+          >
+            {isPaused ? <Play size={18} /> : <Pause size={18} />}
+          </button>
+          <button onClick={endSession} className="rounded-lg bg-red-950 p-2 text-red-300 hover:bg-red-900">
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* Game area */}
+      <div className="flex h-[calc(100vh-140px)] gap-6">
+        {/* Camera view */}
+        <div className="relative w-[38%] overflow-hidden rounded-2xl border-4 border-slate-800 flex-shrink-0">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full scale-x-[-1] object-cover"
+          />
+          <SkeletonOverlay
+            poseData={poseData}
+            overallStatus={guidance.overallStatus}
+            shoulderAngle={shoulderAngle}
+          />
+          <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+            {Math.round(shoulderAngle)}° | {activeSide}
+          </div>
+        </div>
+
+        {/* Space Launch View */}
+        <div className="relative flex w-[62%] items-end justify-center overflow-hidden rounded-2xl border-4 border-slate-800 bg-gradient-to-b from-[#0a0a2e] via-[#1a1a4e] to-[#2a1a3e]">
+          {/* Launch pad */}
+          <div className="absolute bottom-6 left-1/2 h-2 w-32 -translate-x-1/2 rounded-full bg-slate-600 shadow-lg" />
+          <div className="absolute bottom-8 left-1/2 h-4 w-20 -translate-x-1/2 rounded-full bg-slate-700/50" />
+
+          {/* Target line */}
+          <div className="absolute left-6 right-6 top-8 border-t border-dashed border-cyan-500/40">
+            <span className="absolute -top-3 left-1/2 -translate-x-1/2 text-xs text-cyan-500/60 font-mono">LAUNCH</span>
+          </div>
+
+          {/* Altitude bar */}
+          <div className="absolute bottom-6 right-6 top-6 w-4 overflow-hidden rounded-full bg-slate-800/80">
+            <div
+              className={`absolute bottom-0 w-full transition-all duration-150 ${
+                attemptInProgress ? "bg-gradient-to-t from-orange-500 to-yellow-300" : "bg-gradient-to-t from-cyan-500 to-blue-400"
+              }`}
+              style={{ height: `${rocketProgress}%` }}
+            />
+          </div>
+
+          {/* Checkpoint markers */}
+          <div className="absolute left-4 top-12 flex flex-col gap-1">
+            {CHECKPOINTS.map((cp, i) => (
+              <div key={i} className="flex items-center gap-1">
+                <span className={`text-[8px] font-mono ${
+                  checkpointsReached.includes(cp) ? 'text-yellow-400' : 'text-slate-600'
+                }`}>
+                  {cp}°
+                </span>
+                <div className={`w-2 h-2 rounded-full ${
+                  checkpointsReached.includes(cp) ? 'bg-yellow-400' : 'bg-slate-600'
+                }`} />
+              </div>
+            ))}
+          </div>
+
+          {/* Rocket */}
+          <div
+            className="transition-all duration-150 relative"
+            style={{ marginBottom: `${rocketProgress * 0.8}%` }}
+          >
+            {isLaunched ? (
+              <div className="relative">
+                <span className="text-8xl animate-pulse">🚀</span>
+                {showLaunchEffect && (
+                  <div className="absolute -bottom-16 left-1/2 -translate-x-1/2 text-4xl">
+                    💫✨
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="relative">
+                <Rocket
+                  size={80}
+                  className={attemptInProgress ? "text-amber-400 animate-bounce" : "text-slate-500"}
+                />
+                {attemptInProgress && (
+                  <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 text-xs text-amber-400/60 font-mono whitespace-nowrap">
+                    LIFTING OFF...
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Status info */}
+          <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-xs">
+            <div className="text-cyan-400">{Math.round(rocketProgress)}% to launch</div>
+            <div className="text-slate-400">Missed: {failedAttempts}</div>
+          </div>
+
+          {/* Stars rating */}
+          <div className="absolute left-4 bottom-16 flex gap-1 text-xl">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <span key={i} className={i < stars ? "text-yellow-400" : "text-slate-600"}>
+                ★
+              </span>
+            ))}
+          </div>
+
+          {/* Angle indicator */}
+          <div className="absolute right-4 bottom-16 text-right">
+            <div className="text-xs text-slate-400">Shoulder Angle</div>
+            <div className="text-2xl font-bold text-cyan-400">{Math.round(shoulderAngle)}°</div>
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes twinkle {
+          0% { opacity: 0.2; transform: scale(1); }
+          50% { opacity: 0.8; transform: scale(1.2); }
+          100% { opacity: 0.2; transform: scale(1); }
+        }
+        @keyframes bounce {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-10px); }
+        }
+        .animate-bounce {
+          animation: bounce 0.8s infinite;
+        }
+      `}</style>
+    </div>
+  );
+}
+
+
+
+============================================================
+FILE: frontend/src/games/CatchAndFlex.jsx
+============================================================
+
+// frontend/src/games/CatchAndFlex.jsx
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pause, Play, X, ShoppingBasket } from "lucide-react";
+
+import useMediaPipeUpperBody from "../hooks/useMediaPipeUpperBody";
+import usePoseDetection from "../hooks/usePoseDetection";
+import usePostureGuidance from "../hooks/usePostureGuidance";
+import useFacialPainDetection from "../hooks/useFacialPainDetection";
+import useAdaptiveDifficulty from "../hooks/useAdaptiveDifficulty";
+import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
+import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
+import { useAudioFeedback } from "../hooks/useAudioFeedback";
+import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
+import SessionSummary from "../components/rehab/SessionSummary";
+import MetricsEngine from "../utils/metricsEngine";
+
+const FRUITS = ["🍎", "🍊", "🍋", "🍇", "🍉", "🍓", "🥝", "🍑", "🍒", "🍌", "🥭", "🍍"];
+
+function spawnFruit(speed, size) {
+  return {
+    id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+    x: 5 + Math.random() * 90,
+    y: -10,
+    speed: speed || 0.35,
+    emoji: FRUITS[Math.floor(Math.random() * FRUITS.length)],
+    size: size || 32,
+    caught: false,
+  };
+}
+
+export default function CatchAndFlex({
+  onSessionEnd,
+  patientId,
+  gameId = "catch-flex",
+}) {
+  const videoRef = useRef(null);
+  const [poseData, setPoseData] = useState(null);
+  const [fruits, setFruits] = useState([]);
+  const [caught, setCaught] = useState(0);
+  const [missed, setMissed] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [bestStreak, setBestStreak] = useState(0);
+  const [flash, setFlash] = useState(null);
+  const [score, setScore] = useState(0);
+  const [basketTrail, setBasketTrail] = useState([]);
+  const [repData, setRepData] = useState([]);
+
+  const minAngleRef = useRef(null);
+  const maxAngleRef = useRef(0);
+  const hasEndedRef = useRef(false);
+  const gameLoopRef = useRef(null);
+  const metricsEngine = useRef(new MetricsEngine());
+
+  const { isActive } = useMediaPipeUpperBody({
+    videoRef,
+    onPoseUpdate: setPoseData,
+  });
+
+  const { position, shoulderAngle, activeSide } = usePoseDetection(poseData);
+  const guidance = usePostureGuidance(poseData);
+  const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
+  const { currentDifficulty, settings, adapt } = useAdaptiveDifficulty();
+  const telemetry = useSessionTelemetry(patientId, gameId);
+  const audio = useAudioFeedback(true);
+
+  const totalAttempts = caught + missed;
+  const accuracy = totalAttempts ? Math.round((caught / totalAttempts) * 100) : 100;
+  const romDegrees = useMemo(() => {
+    if (minAngleRef.current === null) return 0;
+    return Math.max(0, Math.round(maxAngleRef.current - minAngleRef.current));
+  }, [shoulderAngle]);
+
+  const engine = useGameEngine({
+    sessionLength: 120,
+    onRepComplete: (success) => {
+      telemetry.recordRep(success);
+      if (success) {
+        audio.playSuccess();
+        setScore((s) => s + 10);
+      } else {
+        audio.playMiss();
+      }
+    },
+  });
+
+  const {
+    gameState,
+    countdown,
+    timeLeft,
+    isPaused,
+    startSession,
+    pauseSession,
+    resumeSession,
+    completeRep,
+    endSession,
+  } = engine;
+
+  const basketWidth = 70;
+  const basketX = position.x - basketWidth / 2;
+
+  // Track ROM with metrics engine
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    
+    const repResult = metricsEngine.current.trackAngle(shoulderAngle, performance.now());
+    if (repResult) {
+      setRepData(prev => [...prev, repResult]);
+    }
+  }, [gameState, isPaused, shoulderAngle]);
+
+  // Game loop
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) {
+      if (gameLoopRef.current) {
+        cancelAnimationFrame(gameLoopRef.current);
+        gameLoopRef.current = null;
+      }
+      return;
+    }
+
+    let lastTime = performance.now();
+
+    const gameLoop = (timestamp) => {
+      const delta = Math.min((timestamp - lastTime) / 16, 3);
+      lastTime = timestamp;
+
+      setBasketTrail((current) => [...current.slice(-5), { x: position.x }]);
+
+      setFruits((current) => {
+        const next = [];
+        let caughtThisFrame = 0;
+        let missedThisFrame = 0;
+
+        current.forEach((fruit) => {
+          if (fruit.caught) return;
+
+          const newY = fruit.y + fruit.speed * delta;
+
+          const isCaught = newY >= 80 && newY <= 92 && 
+            Math.abs(fruit.x - position.x) < basketWidth / 2 - 8;
+
+          if (isCaught) {
+            caughtThisFrame++;
+            setCaught((c) => c + 1);
+            setStreak((s) => {
+              const next = s + 1;
+              setBestStreak((best) => Math.max(best, next));
+              return next;
+            });
+            completeRep(true);
+            setFlash({ type: "catch", key: fruit.id });
+            return;
+          }
+
+          if (newY > 105) {
+            missedThisFrame++;
+            setMissed((m) => m + 1);
+            setStreak(0);
+            completeRep(false);
+            setFlash({ type: "miss", key: fruit.id });
+            return;
+          }
+
+          next.push({ ...fruit, y: newY });
+        });
+
+        return next;
+      });
+
+      telemetry.trackMovement(position);
+      telemetry.trackAngle(shoulderAngle);
+
+      if (minAngleRef.current === null || (shoulderAngle > 0 && shoulderAngle < minAngleRef.current)) {
+        minAngleRef.current = shoulderAngle > 0 ? shoulderAngle : 0;
+      }
+      if (shoulderAngle > maxAngleRef.current) {
+        maxAngleRef.current = shoulderAngle;
+      }
+
+      gameLoopRef.current = requestAnimationFrame(gameLoop);
+    };
+
+    gameLoopRef.current = requestAnimationFrame(gameLoop);
+
+    return () => {
+      if (gameLoopRef.current) {
+        cancelAnimationFrame(gameLoopRef.current);
+        gameLoopRef.current = null;
+      }
+    };
+  }, [gameState, isPaused, position, shoulderAngle, completeRep, telemetry]);
+
+  // Spawn fruits
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+
+    const spawnTimer = setInterval(() => {
+      setFruits((current) => {
+        if (current.filter(f => !f.caught).length > 8) return current;
+        return [...current, spawnFruit(settings.speed || 0.35, settings.objectSize || 32)];
+      });
+    }, settings.spawnRate || 2200);
+
+    return () => clearInterval(spawnTimer);
+  }, [gameState, isPaused, settings.spawnRate, settings.speed]);
+
+  // Clear flash
+  useEffect(() => {
+    if (!flash) return undefined;
+    const timer = setTimeout(() => setFlash(null), 400);
+    return () => clearTimeout(timer);
+  }, [flash]);
+
+  // Adaptive difficulty
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    const timer = setInterval(() => {
+      adapt({ accuracy, papsScore, combo: bestStreak });
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [gameState, isPaused, adapt, accuracy, papsScore, bestStreak]);
+
+  // Pain detection
+  useEffect(() => {
+    if (!isPainDetected || gameState !== GAME_STATES.ACTIVE) return;
+    pauseSession();
+    telemetry.trackPain(papsScore);
+  }, [isPainDetected, gameState, pauseSession, telemetry, papsScore]);
+
+  const finalizeTelemetry = useCallback(() => {
+    if (hasEndedRef.current) return;
+    hasEndedRef.current = true;
+    const sessionStats = metricsEngine.current.getSessionStats();
+    telemetry.endSession({
+      gameName: "Catch & Flex",
+      score: score,
+      caught,
+      missed,
+      accuracy,
+      bestStreak,
+      romDegrees: sessionStats.averageRom || romDegrees,
+      papsScore,
+      difficulty: currentDifficulty,
+      gameSpecific: {
+        fruitsPerMinute: (caught + missed) / ((SESSION_SECONDS - timeLeft) / 60) || 0,
+        maxSimultaneousFruitsOnScreen: 8,
+        repData: sessionStats.reps || repData,
+      },
+    });
+  }, [telemetry, score, caught, missed, accuracy, bestStreak, romDegrees, papsScore, currentDifficulty, timeLeft, repData]);
+
+  // ========== RENDER ==========
+
+  if (gameState === GAME_STATES.INSTRUCTIONS) {
+    return (
+      <div className="min-h-screen bg-[#0B1120] p-8 text-white">
+        <div className="max-w-4xl mx-auto">
+          <h1 className="mb-2 text-3xl font-black">🧺 Catch & Flex</h1>
+          <p className="mb-6 text-slate-400">
+            Move your hand to control the basket and catch falling fruit!
+            The basket follows your hand position. Catch as many as you can!
+          </p>
+
+          <div className="relative overflow-hidden rounded-2xl border-4 border-slate-800 aspect-video">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full scale-x-[-1] object-cover"
+            />
+            <SkeletonOverlay
+              poseData={poseData}
+              overallStatus={guidance.overallStatus}
+              shoulderAngle={shoulderAngle}
+            />
+            <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+              {Math.round(shoulderAngle)}° | {activeSide} | PAPS {papsScore}
+            </div>
+          </div>
+
+          <div className={`mt-4 rounded-xl border p-4 ${
+            guidance.overallStatus === 'ok' 
+              ? 'border-green-800 bg-green-950/30 text-green-300' 
+              : 'border-amber-800 bg-amber-950/30 text-amber-300'
+          }`}>
+            {guidance.message}
+          </div>
+
+          <button
+            onClick={() => {
+              telemetry.startTracking();
+              startSession();
+            }}
+            disabled={!guidance.isReady || !isActive}
+            className="mt-6 rounded-xl bg-cyan-500 px-8 py-3 font-bold hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500"
+          >
+            Start Session
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (gameState === GAME_STATES.COMPLETE) {
+    const sessionData = {
+      sessionId: telemetry.sessionId,
+      gameId: gameId,
+      patientId: patientId,
+      date: new Date().toISOString(),
+      durationSeconds: 120 - timeLeft,
+      score: score,
+      accuracyPercent: accuracy,
+      romData: {
+        averageRomDegrees: romDegrees || 0,
+        maxRomDegrees: maxAngleRef.current || 0,
+        perRep: repData.map((r, i) => ({ 
+          rep: i + 1, 
+          romDegrees: r.romDegrees || 0, 
+          success: r.success !== false 
+        })),
+      },
+      reps: caught + missed,
+      hitsOrCatchesOrCompletions: caught,
+      missesOrDrops: missed,
+      gameSpecificMetrics: {
+        fruitsPerMinute: (caught + missed) / ((120 - timeLeft) / 60) || 0,
+        maxSimultaneousFruitsOnScreen: 8,
+        bestStreak: bestStreak,
+      },
+    };
+
+    return (
+      <SessionSummary
+        sessionData={sessionData}
+        gameName="Catch & Flex"
+        gameId={gameId}
+        onSaveReport={async () => {
+          const result = await telemetry.saveReport(sessionData);
+          return result;
+        }}
+        onFinish={() => {
+          onSessionEnd?.(sessionData);
+        }}
+      />
+    );
+  }
+
+  // Active game state
+  return (
+    <div className="min-h-screen bg-[#0B1120] p-8 pt-24 text-white">
+      {gameState === GAME_STATES.COUNTDOWN && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-cyan-400">
+          {countdown || "GO"}
+        </div>
+      )}
+
+      {isPainDetected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div className="rounded-2xl bg-slate-900 p-8 text-center max-w-md">
+            <h2 className="mb-3 text-xl font-bold text-red-400">Discomfort Detected</h2>
+            <p className="mb-6 text-slate-300">Please rest before resuming.</p>
+            <button
+              onClick={() => {
+                resetPainState();
+                resumeSession();
+              }}
+              className="rounded-lg bg-cyan-500 px-6 py-2 font-bold hover:bg-cyan-400"
+            >
+              Resume
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Top bar */}
+      <div className="fixed left-0 right-0 top-0 z-40 flex justify-between border-b border-slate-800 bg-slate-950/90 px-8 py-4 backdrop-blur">
+        <div className="flex gap-5 font-mono text-sm overflow-x-auto">
+          <span>⏱ {timeLeft}s</span>
+          <span>🧺 Caught: {caught}</span>
+          <span>❌ Missed: {missed}</span>
+          <span>🔥 Streak: {streak}</span>
+          <span>🎯 Acc: {accuracy}%</span>
+          <span>💪 ROM: {romDegrees}°</span>
+          <span className="text-cyan-400">{currentDifficulty}</span>
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => (isPaused ? resumeSession() : pauseSession())}
+            className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
+          >
+            {isPaused ? <Play size={18} /> : <Pause size={18} />}
+          </button>
+          <button onClick={endSession} className="rounded-lg bg-red-950 p-2 hover:bg-red-900">
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* Game area */}
+      <div className="flex h-[calc(100vh-140px)] gap-6">
+        {/* Camera view */}
+        <div className="relative w-[38%] overflow-hidden rounded-2xl border-4 border-slate-800 flex-shrink-0">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full scale-x-[-1] object-cover"
+          />
+          <SkeletonOverlay
+            poseData={poseData}
+            overallStatus={guidance.overallStatus}
+            shoulderAngle={shoulderAngle}
+          />
+          <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+            {Math.round(shoulderAngle)}° | {activeSide}
+          </div>
+        </div>
+
+        {/* Game canvas */}
+        <div className="relative w-[62%] overflow-hidden rounded-2xl border-4 border-slate-800 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900">
+          {flash && (
+            <div
+              key={flash.key}
+              className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-4xl font-black ${
+                flash.type === "catch" ? "text-emerald-400" : "text-red-400"
+              }`}
+              style={{ animation: "catch-flash 400ms ease-out forwards" }}
+            >
+              {flash.type === "catch" ? "🎯 CAUGHT!" : "💨 MISSED"}
+            </div>
+          )}
+
+          <svg
+            viewBox="0 0 100 100"
+            className="pointer-events-none absolute inset-0 w-full h-full"
+            preserveAspectRatio="none"
+          >
+            {basketTrail.map((p, i) => (
+              <circle
+                key={i}
+                cx={p.x}
+                cy={90}
+                r={4 - i * 0.5}
+                fill="rgba(251,191,36,0.3)"
+              />
+            ))}
+          </svg>
+
+          {fruits.map((fruit) => (
+            !fruit.caught && (
+              <div
+                key={fruit.id}
+                className="absolute select-none transition-transform drop-shadow-lg"
+                style={{
+                  left: `${fruit.x}%`,
+                  top: `${fruit.y}%`,
+                  transform: "translate(-50%, -50%)",
+                  fontSize: `${fruit.size}px`,
+                }}
+              >
+                {fruit.emoji}
+              </div>
+            )
+          ))}
+
+          <div
+            className="absolute transition-all duration-100"
+            style={{
+              left: `${basketX}%`,
+              bottom: "2%",
+              width: `${basketWidth}%`,
+              height: "16%",
+            }}
+          >
+            <div className="relative w-full h-full flex items-end justify-center">
+              <ShoppingBasket
+                size={80}
+                className="text-amber-400 drop-shadow-[0_0_30px_rgba(251,191,36,0.2)]"
+                style={{ width: "100%", height: "auto", maxHeight: "100%" }}
+              />
+              <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-3/4 h-1 rounded-full bg-amber-400/20 blur-xl" />
+            </div>
+          </div>
+
+          <div className="absolute right-4 top-4 rounded-lg bg-black/60 px-4 py-2 text-right font-mono text-sm">
+            <div className="text-amber-400 font-bold text-lg">⭐ {score}</div>
+            <div className="text-slate-400">Streak: {streak}</div>
+          </div>
+
+          <div className="absolute bottom-16 left-1/2 -translate-x-1/2 text-slate-500 text-xs whitespace-nowrap">
+            Move your hand to catch falling fruit
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes catch-flash {
+          0% { opacity: 0; transform: scale(0.8); }
+          30% { opacity: 1; transform: scale(1.1); }
+          100% { opacity: 0; transform: scale(1); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+
+
+============================================================
+FILE: frontend/src/games/CanvasAir.jsx
+============================================================
+
+// frontend/src/games/CanvasAir.jsx
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pause, Play, X } from "lucide-react";
+
+import useMediaPipeUpperBody from "../hooks/useMediaPipeUpperBody";
+import useHandTracking from "../hooks/useHandTracking";
+import usePoseDetection from "../hooks/usePoseDetection";
+import usePostureGuidance from "../hooks/usePostureGuidance";
+import useFacialPainDetection from "../hooks/useFacialPainDetection";
+import useAdaptiveDifficulty from "../hooks/useAdaptiveDifficulty";
+import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
+import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
+import { useAudioFeedback } from "../hooks/useAudioFeedback";
+import { samplePath, createPathCoverageTracker } from "../utils/svgPathSampler";
+import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
+import SessionSummary from "../components/rehab/SessionSummary";
+import MetricsEngine from "../utils/metricsEngine";
+
+const SESSION_SECONDS = 120;
+const SHAPE_COMPLETE_THRESHOLD = 85; // % of path that must be traced
+const TRACE_TOLERANCE_UNITS = 5; // how close to the line counts as "on it" (0-100 viewBox)
+const MIN_TRACE_TOLERANCE_UNITS = 2.5; // floor for precision-mode tightening
+const SHAPE_TIME_LIMIT_SECONDS = 15; // time allowed per shape before it counts as missed
+const SPARKLE_LIFETIME_MS = 700;
+
+const SHAPES = {
+  Beginner: [
+    { path: "M20 50 L80 50", name: "Line" },
+    { path: "M20 20 L80 80", name: "Diagonal" },
+    { path: "M50 20 L50 80", name: "Vertical" },
+    { path: "M20 80 L80 20", name: "Diagonal" },
+  ],
+  Intermediate: [
+    { path: "M25 25 L75 25 L75 75 L25 75 Z", name: "Square" },
+    { path: "M50 15 A35 35 0 1 1 49.99 15", name: "Circle" },
+    { path: "M20 80 L50 20 L80 80 Z", name: "Triangle" },
+    { path: "M25 50 L50 25 L75 50 L50 75 Z", name: "Diamond" },
+  ],
+  Advanced: [
+    { path: "M50 15 A35 35 0 1 1 49.99 15", name: "Circle" },
+    { path: "M20 80 L35 20 L65 20 L80 80 L50 60 Z", name: "Star" },
+    { path: "M20 50 Q50 0 80 50 Q50 80 20 50", name: "Heart" },
+    { path: "M25 25 L75 25 L50 75 Z", name: "Triangle" },
+  ],
+};
+
+// Color-coded biofeedback bands (Enhancement #3). Pure function, no
+// component state, so it's safe to call from anywhere during render.
+// `pulse` is the animation-duration in seconds for the shape's pulse
+// effect — faster pulse = better form, matching the "heart-rate-like"
+// feedback spec.
+function getAccuracyBand(pct) {
+  if (pct >= 90) return { label: "Smooth, controlled", stroke: "#22c55e", text: "text-green-400", pulse: 0.7 };
+  if (pct >= 70) return { label: "Steady improvement", stroke: "#3b82f6", text: "text-blue-400", pulse: 1.1 };
+  if (pct >= 50) return { label: "Needs focus", stroke: "#f97316", text: "text-orange-400", pulse: 1.6 };
+  return { label: "Slow down, be deliberate", stroke: "#ef4444", text: "text-red-400", pulse: 2.4 };
+}
+
+export default function CanvasAir({ onSessionEnd, patientId, gameId = "canvas-air" }) {
+  const videoRef = useRef(null);
+  const [poseData, setPoseData] = useState(null);
+
+  // ---- Existing single-hand state (UNCHANGED) ----
+  const [trace, setTrace] = useState([]);
+  const [completed, setCompleted] = useState(0);
+  const [currentShapeIndex, setCurrentShapeIndex] = useState(0);
+  const [shapeProgress, setShapeProgress] = useState(0);
+  const [showShapeComplete, setShowShapeComplete] = useState(false);
+  const [isTracing, setIsTracing] = useState(false);
+  const [stars, setStars] = useState(0);
+  const [score, setScore] = useState(0);
+  const [repData, setRepData] = useState([]);
+  const [tracingAccuracy, setTracingAccuracy] = useState(0);
+  const [missed, setMissed] = useState(0);
+  const [showShapeMissed, setShowShapeMissed] = useState(false);
+  const [shapeTimeLeft, setShapeTimeLeft] = useState(SHAPE_TIME_LIMIT_SECONDS);
+  const [calibrated, setCalibrated] = useState(false);
+
+  // ---- NEW: hand mode. Locked to whatever it was when the session
+  // started (only changeable from the instructions screen) so switching
+  // it never re-initializes the hand landmarker mid-session. ----
+  const [handMode, setHandMode] = useState("single"); // "single" | "symmetry"
+
+  // ---- NEW: symmetry-mode state (parallel to the single-hand state
+  // above, only ever touched when handMode === "symmetry") ----
+  const [traceLeft, setTraceLeft] = useState([]);
+  const [traceRight, setTraceRight] = useState([]);
+  const [shapeProgressLeft, setShapeProgressLeft] = useState(0);
+  const [shapeProgressRight, setShapeProgressRight] = useState(0);
+  const [tracingAccuracyLeft, setTracingAccuracyLeft] = useState(0);
+  const [tracingAccuracyRight, setTracingAccuracyRight] = useState(0);
+  const [isTracingLeft, setIsTracingLeft] = useState(false);
+  const [isTracingRight, setIsTracingRight] = useState(false);
+  const [guidePointsRight, setGuidePointsRight] = useState([]);
+
+  // ---- NEW: streak / combo / precision-mode / sparkle trail (apply to
+  // both modes, driven centrally from onRepComplete below) ----
+  const [streak, setStreak] = useState(0);
+  const [bestStreak, setBestStreak] = useState(0);
+  const [celebrateStreak, setCelebrateStreak] = useState(null);
+  const [dynamicTolerance, setDynamicTolerance] = useState(TRACE_TOLERANCE_UNITS);
+  const [sparkles, setSparkles] = useState([]);
+  const comboMultiplierRef = useRef(1);
+
+  const minAngleRef = useRef(null);
+  const maxAngleRef = useRef(0);
+  // NEW: per-side ROM, only ever populated if usePoseDetection is able to
+  // supply leftShoulderAngle/rightShoulderAngle (see that hook's doc
+  // comment — depends on useMediaPipeUpperBody exposing them).
+  const leftMinAngleRef = useRef(null);
+  const leftMaxAngleRef = useRef(0);
+  const rightMinAngleRef = useRef(null);
+  const rightMaxAngleRef = useRef(0);
+
+  const hasEndedRef = useRef(false);
+  const metricsEngine = useRef(new MetricsEngine());
+
+  const sampledPathRef = useRef([]);
+  const trackerRef = useRef(null);
+  const tracingStatsRef = useRef({ totalSamples: 0, onPathSamples: 0 });
+
+  // NEW: symmetry-mode trackers
+  const trackerLeftRef = useRef(null);
+  const trackerRightRef = useRef(null);
+  const statsLeftRef = useRef({ totalSamples: 0, onPathSamples: 0 });
+  const statsRightRef = useRef({ totalSamples: 0, onPathSamples: 0 });
+
+  const { isActive, error: poseError, calibrate, calibrationData } = useMediaPipeUpperBody({
+    videoRef,
+    onPoseUpdate: setPoseData,
+  });
+
+  // numHands only switches between session attempts (see useHandTracking's
+  // doc comment on why this must not change mid-session). handMode is only
+  // editable from the instructions screen below, so this is safe.
+  const {
+    fingertip,
+    leftHand,
+    rightHand,
+    isReady: handReady,
+    error: handError,
+  } = useHandTracking({ videoRef, numHands: handMode === "symmetry" ? 2 : 1 });
+
+  useEffect(() => {
+    if (!isActive || calibrated) return undefined;
+    let cancelled = false;
+    calibrate().then(() => {
+      if (!cancelled) setCalibrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isActive, calibrated, calibrate]);
+
+  const { shoulderAngle, leftShoulderAngle, rightShoulderAngle } = usePoseDetection(poseData);
+  const guidance = usePostureGuidance(poseData, calibrationData);
+  const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
+  const { currentDifficulty, adapt } = useAdaptiveDifficulty();
+  const telemetry = useSessionTelemetry(patientId, gameId);
+  const audio = useAudioFeedback(true);
+
+  const shapeList = useMemo(() => SHAPES[currentDifficulty] || SHAPES.Beginner, [currentDifficulty]);
+  const currentShape = shapeList[currentShapeIndex % shapeList.length];
+  const shapePath = currentShape?.path || "M20 50 L80 50";
+  const totalShapes = shapeList.length;
+
+  const romDegrees =
+    minAngleRef.current === null ? 0 : Math.max(0, Math.round(maxAngleRef.current - minAngleRef.current));
+  const leftROM =
+    leftMinAngleRef.current === null ? null : Math.max(0, Math.round(leftMaxAngleRef.current - leftMinAngleRef.current));
+  const rightROM =
+    rightMinAngleRef.current === null ? null : Math.max(0, Math.round(rightMaxAngleRef.current - rightMinAngleRef.current));
+
+  // Symmetry score: (smaller ROM / larger ROM) * 100, flagged below 80%.
+  // Stays null until leftROM/rightROM are both measurable.
+  const symmetryScore =
+    leftROM !== null && rightROM !== null && leftROM > 0 && rightROM > 0
+      ? Math.round((Math.min(leftROM, rightROM) / Math.max(leftROM, rightROM)) * 100)
+      : null;
+  const symmetryFlag = symmetryScore !== null && symmetryScore < 80;
+
+  const totalAttempted = completed + missed;
+  const shapeAccuracy = totalAttempted > 0 ? Math.round((completed / totalAttempted) * 100) : 100;
+
+  // Unified display values so the header/session-report don't need to
+  // know which mode produced them.
+  const displayShapeProgress =
+    handMode === "symmetry" ? Math.round((shapeProgressLeft + shapeProgressRight) / 2) : shapeProgress;
+  const displayTracingAccuracy =
+    handMode === "symmetry" ? Math.round((tracingAccuracyLeft + tracingAccuracyRight) / 2) : tracingAccuracy;
+  const displayIsTracing = handMode === "symmetry" ? isTracingLeft || isTracingRight : isTracing;
+  const accuracyBand = getAccuracyBand(displayTracingAccuracy);
+  const comboMultiplier = streak >= 10 ? 3 : streak >= 5 ? 2 : streak >= 3 ? 1.5 : 1;
+
+  useEffect(() => {
+    comboMultiplierRef.current = comboMultiplier;
+  }, [comboMultiplier]);
+
+  // Prune expired sparkles. Only calls setState when something actually
+  // needs removing, so this doesn't force a re-render 5x/sec while idle.
+  useEffect(() => {
+    const id = setInterval(() => {
+      setSparkles((prev) => {
+        const next = prev.filter((s) => Date.now() - s.createdAt < SPARKLE_LIFETIME_MS);
+        return next.length === prev.length ? prev : next;
+      });
+    }, 200);
+    return () => clearInterval(id);
+  }, []);
+
+  const engine = useGameEngine({
+    sessionLength: SESSION_SECONDS,
+    totalReps: 0, // Canvas Air is continuous shape-tracing, not discrete reps —
+                   // disables useGameEngine's FEEDBACK/REST cycling and the
+                   // 10-rep auto-end, both of which were stealing ~2.8s of
+                   // active tracking time after every single shape attempt.
+    onRepComplete: (success) => {
+      telemetry.recordRep(success);
+      if (success) {
+        audio.playSuccess();
+        setStars((s) => Math.min(5, s + 1));
+        setScore((s) => s + Math.round(20 * comboMultiplierRef.current));
+        setStreak((prev) => {
+          const next = prev + 1;
+          setBestStreak((b) => Math.max(b, next));
+          if (next === 3 || next === 5 || next === 10) {
+            setCelebrateStreak(next);
+            setTimeout(() => setCelebrateStreak(null), 1500);
+          }
+          return next;
+        });
+        // Precision mode: tighten tolerance slightly on every clean
+        // completion, floor at MIN_TRACE_TOLERANCE_UNITS. Takes effect at
+        // the next shape boundary (see the tracker-rebuild effects below).
+        setDynamicTolerance((t) => Math.max(MIN_TRACE_TOLERANCE_UNITS, t - 0.3));
+      } else {
+        setStreak(0);
+        setDynamicTolerance(TRACE_TOLERANCE_UNITS);
+      }
+    },
+    onSessionComplete: () => {
+      finalizeTelemetry();
+    },
+  });
+
+  const {
+    gameState,
+    countdown,
+    timeLeft,
+    isPaused,
+    startSession,
+    pauseSession,
+    resumeSession,
+    completeRep,
+    endSession,
+  } = engine;
+
+  // ===== Shape-reset effect: SINGLE-HAND mode (unchanged behavior) =====
+  useEffect(() => {
+    sampledPathRef.current = samplePath(shapePath, 150);
+    trackerRef.current = createPathCoverageTracker(sampledPathRef.current, dynamicTolerance);
+    tracingStatsRef.current = { totalSamples: 0, onPathSamples: 0 };
+    setTrace([]);
+    setShapeProgress(0);
+    setShapeTimeLeft(SHAPE_TIME_LIMIT_SECONDS);
+    setShowShapeMissed(false);
+  }, [shapePath, dynamicTolerance]);
+
+  // ===== NEW: shape-reset effect for SYMMETRY mode. Builds a mirrored
+  // guide + tracker for the right hand by mirroring the same sampled
+  // points used for the left/primary shape (rather than trying to mirror
+  // the raw SVG path string, which would need to parse arcs/curves). =====
+  useEffect(() => {
+    if (handMode !== "symmetry") return undefined;
+    const leftPoints = samplePath(shapePath, 150);
+    const rightPoints = leftPoints.map((p) => ({ x: 100 - p.x, y: p.y }));
+    trackerLeftRef.current = createPathCoverageTracker(leftPoints, dynamicTolerance);
+    trackerRightRef.current = createPathCoverageTracker(rightPoints, dynamicTolerance);
+    statsLeftRef.current = { totalSamples: 0, onPathSamples: 0 };
+    statsRightRef.current = { totalSamples: 0, onPathSamples: 0 };
+    setGuidePointsRight(rightPoints);
+    setTraceLeft([]);
+    setTraceRight([]);
+    setShapeProgressLeft(0);
+    setShapeProgressRight(0);
+  }, [shapePath, handMode, dynamicTolerance]);
+
+  // Track ROM with metrics engine (unchanged)
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    const repResult = metricsEngine.current.trackAngle(shoulderAngle, performance.now());
+    if (repResult) {
+      setRepData((prev) => [...prev, repResult]);
+    }
+  }, [gameState, isPaused, shoulderAngle]);
+
+  // NEW: per-side ROM tracking, additive, only runs when the values exist.
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    if (typeof leftShoulderAngle === "number") {
+      if (leftMinAngleRef.current === null || (leftShoulderAngle > 0 && leftShoulderAngle < leftMinAngleRef.current)) {
+        leftMinAngleRef.current = leftShoulderAngle > 0 ? leftShoulderAngle : 0;
+      }
+      if (leftShoulderAngle > leftMaxAngleRef.current) leftMaxAngleRef.current = leftShoulderAngle;
+    }
+    if (typeof rightShoulderAngle === "number") {
+      if (rightMinAngleRef.current === null || (rightShoulderAngle > 0 && rightShoulderAngle < rightMinAngleRef.current)) {
+        rightMinAngleRef.current = rightShoulderAngle > 0 ? rightShoulderAngle : 0;
+      }
+      if (rightShoulderAngle > rightMaxAngleRef.current) rightMaxAngleRef.current = rightShoulderAngle;
+    }
+  }, [gameState, isPaused, leftShoulderAngle, rightShoulderAngle]);
+
+  // ===== Main tracing loop: SINGLE-HAND mode. Identical to the original
+  // implementation, gated behind a mode check at the top so symmetry mode
+  // never runs this. =====
+  useEffect(() => {
+    if (handMode !== "single") return undefined;
+    if (gameState !== GAME_STATES.ACTIVE || isPaused || showShapeComplete || showShapeMissed) return undefined;
+
+    if (!fingertip) {
+      setIsTracing(false);
+      return undefined;
+    }
+
+    const point = { x: (1 - fingertip.x) * 100, y: fingertip.y * 100 };
+    const tracker = trackerRef.current;
+    if (!tracker) return undefined;
+
+    const { onPath } = tracker.update(point);
+
+    tracingStatsRef.current.totalSamples += 1;
+    if (onPath) tracingStatsRef.current.onPathSamples += 1;
+
+    const stats = tracingStatsRef.current;
+    const accuracy = stats.totalSamples
+      ? Math.round((stats.onPathSamples / stats.totalSamples) * 100)
+      : 0;
+    setTracingAccuracy(accuracy);
+
+    setIsTracing(onPath);
+    if (onPath) {
+      setTrace((current) => [...current.slice(-199), point]);
+      // NEW: sparkle trail, throttled so it doesn't flood state updates.
+      if (Math.random() < 0.12) {
+        setSparkles((prev) => [
+          ...prev.slice(-14),
+          { id: `${Date.now()}-${Math.random()}`, x: point.x, y: point.y, color: getAccuracyBand(accuracy).stroke, side: "single", createdAt: Date.now() },
+        ]);
+      }
+    }
+
+    const coverage = tracker.getCoverage();
+    setShapeProgress(coverage);
+
+    if (coverage >= SHAPE_COMPLETE_THRESHOLD && !showShapeComplete) {
+      setShowShapeComplete(true);
+      setCompleted((v) => v + 1);
+      setCurrentShapeIndex((i) => i + 1);
+      completeRep(true);
+      setTimeout(() => setShowShapeComplete(false), 1200);
+    }
+
+    telemetry.trackAngle(shoulderAngle);
+
+    if (minAngleRef.current === null || (shoulderAngle > 0 && shoulderAngle < minAngleRef.current)) {
+      minAngleRef.current = shoulderAngle > 0 ? shoulderAngle : 0;
+    }
+    if (shoulderAngle > maxAngleRef.current) {
+      maxAngleRef.current = shoulderAngle;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handMode, fingertip, gameState, isPaused, showShapeComplete, showShapeMissed, shoulderAngle]);
+
+  // ===== NEW: main tracing loop for SYMMETRY mode. Parallel structure to
+  // the single-hand loop above, driving two independent trackers off
+  // leftHand / rightHand. Both sides must clear SHAPE_COMPLETE_THRESHOLD
+  // before the shape is marked complete. =====
+  useEffect(() => {
+    if (handMode !== "symmetry") return undefined;
+    if (gameState !== GAME_STATES.ACTIVE || isPaused || showShapeComplete || showShapeMissed) return undefined;
+
+    const trackerL = trackerLeftRef.current;
+    const trackerR = trackerRightRef.current;
+    if (!trackerL || !trackerR) return undefined;
+
+    let leftCoverage = shapeProgressLeft;
+    let rightCoverage = shapeProgressRight;
+
+    if (leftHand) {
+      const pointL = { x: (1 - leftHand.x) * 100, y: leftHand.y * 100 };
+      const { onPath } = trackerL.update(pointL);
+      statsLeftRef.current.totalSamples += 1;
+      if (onPath) statsLeftRef.current.onPathSamples += 1;
+      const accL = statsLeftRef.current.totalSamples
+        ? Math.round((statsLeftRef.current.onPathSamples / statsLeftRef.current.totalSamples) * 100)
+        : 0;
+      setTracingAccuracyLeft(accL);
+      setIsTracingLeft(onPath);
+      if (onPath) {
+        setTraceLeft((cur) => [...cur.slice(-199), pointL]);
+        if (Math.random() < 0.12) {
+          setSparkles((prev) => [
+            ...prev.slice(-14),
+            { id: `${Date.now()}-${Math.random()}-l`, x: pointL.x, y: pointL.y, color: getAccuracyBand(accL).stroke, side: "left", createdAt: Date.now() },
+          ]);
+        }
+      }
+      leftCoverage = trackerL.getCoverage();
+      setShapeProgressLeft(leftCoverage);
+    } else {
+      setIsTracingLeft(false);
+    }
+
+    if (rightHand) {
+      const pointR = { x: (1 - rightHand.x) * 100, y: rightHand.y * 100 };
+      const { onPath } = trackerR.update(pointR);
+      statsRightRef.current.totalSamples += 1;
+      if (onPath) statsRightRef.current.onPathSamples += 1;
+      const accR = statsRightRef.current.totalSamples
+        ? Math.round((statsRightRef.current.onPathSamples / statsRightRef.current.totalSamples) * 100)
+        : 0;
+      setTracingAccuracyRight(accR);
+      setIsTracingRight(onPath);
+      if (onPath) {
+        setTraceRight((cur) => [...cur.slice(-199), pointR]);
+        if (Math.random() < 0.12) {
+          setSparkles((prev) => [
+            ...prev.slice(-14),
+            { id: `${Date.now()}-${Math.random()}-r`, x: pointR.x, y: pointR.y, color: getAccuracyBand(accR).stroke, side: "right", createdAt: Date.now() },
+          ]);
+        }
+      }
+      rightCoverage = trackerR.getCoverage();
+      setShapeProgressRight(rightCoverage);
+    } else {
+      setIsTracingRight(false);
+    }
+
+    telemetry.trackAngle(shoulderAngle);
+
+    if (leftCoverage >= SHAPE_COMPLETE_THRESHOLD && rightCoverage >= SHAPE_COMPLETE_THRESHOLD && !showShapeComplete) {
+      setShowShapeComplete(true);
+      setCompleted((v) => v + 1);
+      setCurrentShapeIndex((i) => i + 1);
+      completeRep(true);
+      setTimeout(() => setShowShapeComplete(false), 1200);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handMode, leftHand, rightHand, gameState, isPaused, showShapeComplete, showShapeMissed, shoulderAngle]);
+
+  // Per-shape countdown (unchanged — shared across both modes)
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused || showShapeComplete || showShapeMissed) {
+      return undefined;
+    }
+
+    if (shapeTimeLeft <= 0) {
+      setShowShapeMissed(true);
+      setMissed((m) => m + 1);
+      completeRep(false);
+      setCurrentShapeIndex((i) => i + 1);
+      const clearFlash = setTimeout(() => setShowShapeMissed(false), 1200);
+      return () => clearTimeout(clearFlash);
+    }
+
+    const tick = setTimeout(() => {
+      setShapeTimeLeft((t) => Math.max(0, t - 1));
+    }, 1000);
+    return () => clearTimeout(tick);
+  }, [gameState, isPaused, showShapeComplete, showShapeMissed, shapeTimeLeft, completeRep]);
+
+  // Adaptive difficulty (unchanged)
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    const timer = setInterval(() => {
+      adapt({ accuracy: displayTracingAccuracy, papsScore, combo: completed });
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [gameState, isPaused, adapt, displayTracingAccuracy, papsScore, completed]);
+
+  // Pain detection (unchanged)
+  useEffect(() => {
+    if (!isPainDetected || gameState !== GAME_STATES.ACTIVE) return;
+    pauseSession();
+    telemetry.trackPain(papsScore);
+  }, [isPainDetected, gameState, pauseSession, telemetry, papsScore]);
+
+  const finalizeTelemetry = useCallback(() => {
+    if (hasEndedRef.current) return;
+    hasEndedRef.current = true;
+    const sessionStats = metricsEngine.current.getSessionStats();
+    telemetry.endSession({
+      gameName: "Canvas Air",
+      score,
+      completed,
+      totalShapes,
+      accuracy: shapeAccuracy,
+      romDegrees: sessionStats.averageRom || romDegrees,
+      papsScore,
+      difficulty: currentDifficulty,
+      stars,
+      gameSpecific: {
+        pathCoveragePercent: displayShapeProgress,
+        shapesCompleted: completed,
+        shapesMissed: missed,
+        shapeSuccessRatePercent: shapeAccuracy,
+        totalShapes,
+        tracingAccuracyPercent: displayTracingAccuracy,
+        repData: sessionStats.reps || repData,
+        // NEW fields — additive, existing consumers of this object are
+        // unaffected by extra keys.
+        handMode,
+        streak,
+        bestStreak,
+        leftROM,
+        rightROM,
+        symmetryScore,
+        symmetryFlag,
+      },
+    });
+  }, [
+    telemetry,
+    score,
+    completed,
+    missed,
+    shapeAccuracy,
+    totalShapes,
+    displayTracingAccuracy,
+    romDegrees,
+    papsScore,
+    currentDifficulty,
+    stars,
+    displayShapeProgress,
+    repData,
+    handMode,
+    streak,
+    bestStreak,
+    leftROM,
+    rightROM,
+    symmetryScore,
+    symmetryFlag,
+  ]);
+
+  const canStart = isActive && handReady && !poseError && !handError && calibrated;
+
+  // ========== RENDER ==========
+
+  const isInstructions = gameState === GAME_STATES.INSTRUCTIONS;
+  const isComplete = gameState === GAME_STATES.COMPLETE;
+  const isActiveScreen = !isInstructions && !isComplete;
+  const isSymmetry = handMode === "symmetry";
+
+  if (isComplete) {
+    const sessionData = {
+      sessionId: telemetry.sessionId,
+      gameId,
+      patientId,
+      date: new Date().toISOString(),
+      durationSeconds: SESSION_SECONDS - timeLeft,
+      score,
+      accuracyPercent: displayTracingAccuracy,
+      romData: {
+        averageRomDegrees: romDegrees || 0,
+        maxRomDegrees: maxAngleRef.current || 0,
+        perRep: repData.map((r, i) => ({
+          rep: i + 1,
+          romDegrees: r.romDegrees || 0,
+          success: r.success !== false,
+        })),
+        leftRomDegrees: leftROM,
+        rightRomDegrees: rightROM,
+        symmetryScorePercent: symmetryScore,
+      },
+      reps: completed + missed,
+      hitsOrCatchesOrCompletions: completed,
+      missesOrDrops: missed,
+      gameSpecificMetrics: {
+        pathCoveragePercent: Math.round(displayShapeProgress),
+        shapesCompleted: completed,
+        shapesMissed: missed,
+        shapeSuccessRatePercent: shapeAccuracy,
+        totalShapes,
+        stars,
+        handMode,
+        bestStreak,
+      },
+    };
+
+    return (
+      <SessionSummary
+        sessionData={sessionData}
+        gameName="Canvas Air"
+        gameId={gameId}
+        patientId={patientId}
+        onSaveReport={async () => await telemetry.saveReport(sessionData)}
+        onFinish={() => onSessionEnd?.(sessionData)}
+      />
+    );
+  }
+
+  const cameraFeed = (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted
+      className="w-full h-full scale-x-[-1] object-cover"
+    />
+  );
+
+  return (
+    <div className="min-h-screen bg-[#0B1120] text-white">
+      {/* Pulse-effect keyframes, defined once. Duration is set per-element
+          via inline style based on the current accuracy band. */}
+      <style>{`
+        @keyframes canvasAirPulse {
+          0%, 100% { opacity: 0.55; }
+          50% { opacity: 1; }
+        }
+        @keyframes canvasAirSparkle {
+          0% { opacity: 0.9; transform: scale(1); }
+          100% { opacity: 0; transform: scale(2.2); }
+        }
+      `}</style>
+
+      {isActiveScreen && gameState === GAME_STATES.COUNTDOWN && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-cyan-400">
+          {countdown || "GO"}
+        </div>
+      )}
+
+      {isActiveScreen && isPainDetected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div className="rounded-2xl bg-slate-900 p-8 text-center max-w-md">
+            <h2 className="mb-3 text-xl font-bold text-red-400">Discomfort Detected</h2>
+            <p className="mb-6 text-slate-300">Please rest before continuing.</p>
+            <button
+              onClick={() => {
+                resetPainState();
+                resumeSession();
+              }}
+              className="rounded-lg bg-cyan-500 px-6 py-2 font-bold hover:bg-cyan-400"
+            >
+              Resume
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isActiveScreen && celebrateStreak && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center pointer-events-none">
+          <div className="rounded-2xl bg-black/70 px-10 py-6 text-center animate-pulse">
+            <div className="text-5xl font-black text-amber-400">🔥 Streak {celebrateStreak}!</div>
+            <div className="mt-1 text-sm text-amber-200">x{comboMultiplier} score multiplier</div>
+          </div>
+        </div>
+      )}
+
+      {isActiveScreen && (
+        <div className="fixed left-0 right-0 top-0 z-40 flex justify-between border-b border-slate-800 bg-slate-950/90 px-8 py-4 backdrop-blur">
+          <div className="flex gap-5 font-mono text-sm overflow-x-auto">
+            <span>⏱ {timeLeft}s</span>
+            <span>📐 {Math.round(shoulderAngle)}°</span>
+            <span>✅ Shapes: {completed}/{totalShapes}</span>
+            <span>🎯 Progress: {Math.round(displayShapeProgress)}%</span>
+            <span className={accuracyBand.text}>🖊️ Trace Accuracy: {displayTracingAccuracy}%</span>
+            <span>✅❌ {completed}/{totalAttempted} ({shapeAccuracy}%)</span>
+            <span>💪 ROM: {romDegrees}°</span>
+            {streak > 0 && <span className="text-amber-400">🔥 Streak: {streak} (x{comboMultiplier})</span>}
+            {isSymmetry && (
+              <span className={symmetryFlag ? "text-red-400" : "text-slate-300"}>
+                ⚖️ Symmetry: {symmetryScore !== null ? `${symmetryScore}%` : "—"}
+              </span>
+            )}
+            <span className="text-cyan-400">{currentDifficulty}</span>
+          </div>
+          <div className="flex gap-2 flex-shrink-0">
+            <button
+              onClick={() => (isPaused ? resumeSession() : pauseSession())}
+              className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
+            >
+              {isPaused ? <Play size={18} /> : <Pause size={18} />}
+            </button>
+            <button onClick={endSession} className="rounded-lg bg-red-950 p-2 hover:bg-red-900">
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className={isActiveScreen ? `flex h-[calc(100vh-140px)] gap-6 p-8 pt-24` : "p-8"}>
+        <div className={isActiveScreen ? "max-w-none" : "max-w-4xl mx-auto w-full"}>
+          {isInstructions && (
+            <>
+              <h1 className="mb-2 text-3xl font-black">🎨 Canvas Air</h1>
+              <p className="mb-6 text-slate-400">
+                Trace the outlined shape with your fingertip. Progress is measured against how much of
+                the actual line you've traced, not just where your hand is on screen.
+              </p>
+
+              <div className="mb-4 flex gap-2">
+                <button
+                  onClick={() => setHandMode("single")}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                    handMode === "single" ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  Single Hand
+                </button>
+                <button
+                  onClick={() => setHandMode("symmetry")}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                    handMode === "symmetry" ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  Symmetry Mode (Both Hands)
+                </button>
+              </div>
+              {handMode === "symmetry" && (
+                <p className="mb-4 text-xs text-slate-500">
+                  Traces a mirrored copy of the shape with each hand at once. Symmetry score compares
+                  left vs. right shoulder range of motion and needs both to register during the session.
+                </p>
+              )}
+            </>
+          )}
+
+          <div
+            className={
+              isActiveScreen
+                ? `relative overflow-hidden rounded-2xl border-4 border-slate-800 flex-shrink-0 ${isSymmetry ? "w-[24%]" : "w-[38%]"}`
+                : "relative overflow-hidden rounded-2xl border-4 border-slate-800 aspect-video"
+            }
+          >
+            {cameraFeed}
+            <SkeletonOverlay poseData={poseData} overallStatus={guidance.overallStatus} shoulderAngle={shoulderAngle} />
+            {isInstructions && (
+              <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+                {Math.round(shoulderAngle)}° | PAPS {papsScore} | Hand {handReady ? (fingertip ? "✅" : "🔍") : "⏳"}
+              </div>
+            )}
+            {isActiveScreen && (
+              <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+                {isSymmetry
+                  ? `L ${leftHand ? "✓" : "…"}  R ${rightHand ? "✓" : "…"}`
+                  : `${Math.round(shoulderAngle)}° ${fingertip ? "" : "| hand not visible"}`}
+              </div>
+            )}
+            {isSymmetry && (
+              <div className="absolute right-3 top-3 flex flex-col gap-1 text-xs font-mono">
+                <span className={`rounded px-2 py-0.5 ${leftHand ? "bg-cyan-900/80 text-cyan-300" : "bg-slate-800/80 text-slate-500"}`}>
+                  L {leftHand ? "✓" : "…"}
+                </span>
+                <span className={`rounded px-2 py-0.5 ${rightHand ? "bg-cyan-900/80 text-cyan-300" : "bg-slate-800/80 text-slate-500"}`}>
+                  R {rightHand ? "✓" : "…"}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {isInstructions && (
+            <>
+              <div
+                className={`mt-4 rounded-xl border p-4 ${
+                  guidance.overallStatus === "ok"
+                    ? "border-green-800 bg-green-950/30 text-green-300"
+                    : "border-amber-800 bg-amber-950/30 text-amber-300"
+                }`}
+              >
+                {guidance.message}
+              </div>
+
+              {(poseError || handError) && (
+                <div className="mt-4 rounded-xl border border-red-800 bg-red-950/30 p-4 text-red-300">
+                  {poseError || handError}. Check camera permissions and connection, then reload.
+                </div>
+              )}
+
+              <div className="mt-4 flex flex-wrap gap-3 text-xs font-mono text-slate-400">
+                <span>🟢 90-100% Smooth control</span>
+                <span>🔵 70-89% Steady</span>
+                <span>🟠 50-69% Needs focus</span>
+                <span>🔴 &lt;50% Slow down</span>
+              </div>
+
+              <button
+                onClick={() => {
+                  telemetry.startTracking();
+                  startSession();
+                }}
+                disabled={!guidance.isReady || !canStart}
+                className="mt-6 rounded-xl bg-cyan-500 px-8 py-3 font-bold hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500"
+              >
+                {canStart
+                  ? "Start Session"
+                  : isActive && !calibrated
+                  ? "Hold still, calibrating…"
+                  : "Waiting for hand + pose tracking…"}
+              </button>
+            </>
+          )}
+        </div>
+
+        {isActiveScreen && !isSymmetry && (
+          <div className="relative w-[62%] overflow-hidden rounded-2xl border-4 border-slate-800 bg-white">
+            <svg viewBox="0 0 100 100" className="w-full h-full" preserveAspectRatio="none">
+              <path
+                d={shapePath}
+                fill="none"
+                stroke="#334155"
+                strokeWidth="2.5"
+                strokeDasharray="4 4"
+                style={{ animation: `canvasAirPulse ${accuracyBand.pulse}s ease-in-out infinite` }}
+              />
+
+              <polyline
+                points={trace.map((p) => `${p.x},${p.y}`).join(" ")}
+                fill="none"
+                stroke={isTracing ? accuracyBand.stroke : "#94a3b8"}
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ transition: "stroke 0.3s" }}
+              />
+
+              {sparkles
+                .filter((s) => s.side === "single")
+                .map((s) => (
+                  <circle
+                    key={s.id}
+                    cx={s.x}
+                    cy={s.y}
+                    r="2.2"
+                    fill={s.color}
+                    style={{ animation: "canvasAirSparkle 0.7s ease-out forwards" }}
+                  />
+                ))}
+
+              <text x="50" y="95" textAnchor="middle" className="text-xs font-medium text-slate-500">
+                {currentShape?.name || "Trace"} • {currentDifficulty}
+              </text>
+            </svg>
+
+            {!fingertip && (
+              <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 text-center text-sm text-slate-400">
+                Show your hand to the camera
+              </div>
+            )}
+
+            <div className="absolute right-4 top-20 rounded-lg bg-black/70 px-3 py-1 text-xs font-mono text-white">
+              ⏱ {shapeTimeLeft}s
+            </div>
+
+            <div className="absolute right-4 top-4 flex h-14 w-14 items-center justify-center rounded-full bg-black/70">
+              <div className="relative h-12 w-12">
+                <svg className="h-12 w-12 -rotate-90">
+                  <circle cx="24" cy="24" r="18" fill="none" stroke="#2d3748" strokeWidth="3" />
+                  <circle
+                    cx="24"
+                    cy="24"
+                    r="18"
+                    fill="none"
+                    stroke={isTracing ? accuracyBand.stroke : "#94a3b8"}
+                    strokeWidth="3"
+                    strokeDasharray={`${2 * Math.PI * 18 * (shapeProgress / 100)} ${2 * Math.PI * 18}`}
+                    style={{ transition: "stroke-dasharray 0.3s, stroke 0.3s" }}
+                  />
+                </svg>
+                <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white">
+                  {Math.round(shapeProgress)}%
+                </span>
+              </div>
+            </div>
+
+            <div className="absolute left-4 top-4 flex gap-1">
+              {Array.from({ length: Math.min(5, completed) }).map((_, i) => (
+                <span key={i} className="text-yellow-400 text-lg">⭐</span>
+              ))}
+            </div>
+
+            <div className="absolute left-4 bottom-4 text-sm font-bold text-cyan-400">Score: {score}</div>
+
+            {showShapeComplete && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 text-6xl font-black text-emerald-400 animate-pulse">
+                ✨ COMPLETE!
+              </div>
+            )}
+
+            {showShapeMissed && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 text-5xl font-black text-red-400 animate-pulse">
+                ⏰ Time's Up
+              </div>
+            )}
+
+            {fingertip && (
+              <div
+                className="absolute w-5 h-5 rounded-full border-2 border-pink-500 bg-pink-200/30 shadow-lg pointer-events-none"
+                style={{
+                  left: `${(1 - fingertip.x) * 100}%`,
+                  top: `${fingertip.y * 100}%`,
+                  transform: "translate(-50%, -50%)",
+                  transition: "left 0.05s, top 0.05s",
+                }}
+              />
+            )}
+          </div>
+        )}
+
+        {isActiveScreen && isSymmetry && (
+          <div className="flex w-[74%] gap-4">
+            {/* Left-hand panel */}
+            <div className="relative w-1/2 overflow-hidden rounded-2xl border-4 border-slate-800 bg-white">
+              <svg viewBox="0 0 100 100" className="w-full h-full" preserveAspectRatio="none">
+                <path
+                  d={shapePath}
+                  fill="none"
+                  stroke="#334155"
+                  strokeWidth="2.5"
+                  strokeDasharray="4 4"
+                  style={{ animation: `canvasAirPulse ${getAccuracyBand(tracingAccuracyLeft).pulse}s ease-in-out infinite` }}
+                />
+                <polyline
+                  points={traceLeft.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke={isTracingLeft ? getAccuracyBand(tracingAccuracyLeft).stroke : "#94a3b8"}
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{ transition: "stroke 0.3s" }}
+                />
+                {sparkles
+                  .filter((s) => s.side === "left")
+                  .map((s) => (
+                    <circle key={s.id} cx={s.x} cy={s.y} r="2.2" fill={s.color} style={{ animation: "canvasAirSparkle 0.7s ease-out forwards" }} />
+                  ))}
+                <text x="50" y="95" textAnchor="middle" className="text-xs font-medium text-slate-500">
+                  Left hand • {Math.round(shapeProgressLeft)}%
+                </text>
+              </svg>
+              {leftHand && (
+                <div
+                  className="absolute w-4 h-4 rounded-full border-2 border-pink-500 bg-pink-200/30 shadow-lg pointer-events-none"
+                  style={{
+                    left: `${(1 - leftHand.x) * 100}%`,
+                    top: `${leftHand.y * 100}%`,
+                    transform: "translate(-50%, -50%)",
+                    transition: "left 0.05s, top 0.05s",
+                  }}
+                />
+              )}
+            </div>
+
+            {/* Right-hand panel — mirrored shape */}
+            <div className="relative w-1/2 overflow-hidden rounded-2xl border-4 border-slate-800 bg-white">
+              <svg viewBox="0 0 100 100" className="w-full h-full" preserveAspectRatio="none">
+                <polyline
+                  points={guidePointsRight.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke="#334155"
+                  strokeWidth="2.5"
+                  strokeDasharray="4 4"
+                  style={{ animation: `canvasAirPulse ${getAccuracyBand(tracingAccuracyRight).pulse}s ease-in-out infinite` }}
+                />
+                <polyline
+                  points={traceRight.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke={isTracingRight ? getAccuracyBand(tracingAccuracyRight).stroke : "#94a3b8"}
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{ transition: "stroke 0.3s" }}
+                />
+                {sparkles
+                  .filter((s) => s.side === "right")
+                  .map((s) => (
+                    <circle key={s.id} cx={s.x} cy={s.y} r="2.2" fill={s.color} style={{ animation: "canvasAirSparkle 0.7s ease-out forwards" }} />
+                  ))}
+                <text x="50" y="95" textAnchor="middle" className="text-xs font-medium text-slate-500">
+                  Right hand (mirrored) • {Math.round(shapeProgressRight)}%
+                </text>
+              </svg>
+              {rightHand && (
+                <div
+                  className="absolute w-4 h-4 rounded-full border-2 border-pink-500 bg-pink-200/30 shadow-lg pointer-events-none"
+                  style={{
+                    left: `${(1 - rightHand.x) * 100}%`,
+                    top: `${rightHand.y * 100}%`,
+                    transform: "translate(-50%, -50%)",
+                    transition: "left 0.05s, top 0.05s",
+                  }}
+                />
+              )}
+            </div>
+
+            <div className="absolute right-4 top-4 rounded-lg bg-black/70 px-3 py-1 text-xs font-mono text-white">
+              ⏱ {shapeTimeLeft}s
+            </div>
+            {showShapeComplete && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/60 text-5xl font-black text-emerald-400 animate-pulse">
+                ✨ COMPLETE!
+              </div>
+            )}
+            {showShapeMissed && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/60 text-4xl font-black text-red-400 animate-pulse">
+                ⏰ Time's Up
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+
+============================================================
+FILE: frontend/src/hooks/useAdaptiveDifficulty.js
+============================================================
+
+import { useCallback, useMemo, useRef, useState } from "react";
+
+export const DIFFICULTY_LEVELS = [
+  "Beginner",
+  "Intermediate",
+  "Advanced",
+];
+
+export const DIFFICULTY_SETTINGS = {
+  Beginner: {
+    spawnRate: 3500,
+    objectSize: 150,
+    speed: 0.35,
+    holdDuration: 900,
+    tolerance: 10,
+  },
+  Intermediate: {
+    spawnRate: 2200,
+    objectSize: 115,
+    speed: 0.6,
+    holdDuration: 600,
+    tolerance: 6,
+  },
+  Advanced: {
+    spawnRate: 1300,
+    objectSize: 85,
+    speed: 0.9,
+    holdDuration: 350,
+    tolerance: 4,
+  },
+};
+
+export function useAdaptiveDifficulty(initialDifficulty = "Beginner") {
+  const initial = DIFFICULTY_LEVELS.includes(initialDifficulty)
+    ? initialDifficulty
+    : "Beginner";
+
+  const [currentDifficulty, setCurrentDifficulty] = useState(initial);
+  const difficultyIndexRef = useRef(
+    DIFFICULTY_LEVELS.indexOf(initial)
+  );
+
+  const adapt = useCallback(
+    ({
+      accuracy = 0,
+      papsScore = 0,
+      combo = 0,
+    } = {}) => {
+      let index = difficultyIndexRef.current;
+
+      if (papsScore > 7) {
+        index = 0;
+      } else if (
+        accuracy > 85 &&
+        papsScore < 3 &&
+        combo > 3
+      ) {
+        index = Math.min(
+          DIFFICULTY_LEVELS.length - 1,
+          index + 1
+        );
+      } else if (accuracy < 45 || papsScore > 5) {
+        index = Math.max(0, index - 1);
+      }
+
+      if (index !== difficultyIndexRef.current) {
+        difficultyIndexRef.current = index;
+        setCurrentDifficulty(DIFFICULTY_LEVELS[index]);
+      }
+
+      return DIFFICULTY_LEVELS[index];
+    },
+    []
+  );
+
+  const settings = useMemo(
+    () => DIFFICULTY_SETTINGS[currentDifficulty],
+    [currentDifficulty]
+  );
+
+  return {
+    currentDifficulty,
+    settings,
+    adapt,
+  };
+}
+
+export default useAdaptiveDifficulty;
+
+
+
+============================================================
+FILE: frontend/src/hooks/useSessionTelemetry.js
+============================================================
+
+// frontend/src/hooks/useSessionTelemetry.js
+import { useState, useCallback, useRef } from 'react';
+import { useAppStore } from '../store/appStore';
+import { sessionApi, reportApi } from '../utils/apiService';
+import { sessionDB, reportDB } from '../utils/sessionStore';
+import MetricsEngine from '../utils/metricsEngine';
+
+const GAME_TYPE_MAP = {
+  'precision-reach': 'precision_reach',
+  'rehab-slicer': 'rehab_slicer',
+  'catch-flex': 'catch_flex',
+  'canvas-air': 'canvas_air',
+};
+
+const INITIAL_METRICS = {
+  reps: [],
+  accuracy: 0,
+  completionPercentage: 0,
+  totalDistance: 0,
+  successfulReps: 0,
+  totalReps: 0,
+  startTime: null,
+  endTime: null,
+  totalTime: 0,
+  minAngle: null,
+  maxAngle: null,
+  romRange: 0,
+  painFluctuations: [],
+  gameSpecific: {},
+};
+
+export function useSessionTelemetry(patientId, gameId) {
+  const { token, user, currentPatient, setCurrentSession } = useAppStore();
+  const [metrics, setMetrics] = useState(INITIAL_METRICS);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const lastPosition = useRef(null);
+  const sessionIdRef = useRef(null);
+  const metricsEngineRef = useRef(new MetricsEngine());
+  const repAnglesRef = useRef([]);
+
+  // Get actual patient ID from store if not provided
+  const actualPatientId = patientId || currentPatient?.patientId || user?.patientId || 'guest';
+  
+  // Check if user is authenticated
+  const isTherapistMode = !!token && user?.role === 'therapist';
+  const isPatientMode = !!token && user?.role === 'patient';
+  const isPublicMode = !isTherapistMode && !isPatientMode && actualPatientId !== 'guest';
+
+  const startTracking = useCallback(async () => {
+    setMetrics({ ...INITIAL_METRICS, startTime: Date.now() });
+    lastPosition.current = null;
+    sessionIdRef.current = null;
+    repAnglesRef.current = [];
+    metricsEngineRef.current = new MetricsEngine();
+
+    const gameType = GAME_TYPE_MAP[gameId] || 'rehab_slicer';
+    
+    // Guest mode - use local session only
+    if (actualPatientId === 'guest') {
+      sessionIdRef.current = `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      return;
+    }
+
+    try {
+      let res = null;
+      if (isTherapistMode) {
+        res = await sessionApi.start({ 
+          patientId: actualPatientId, 
+          gameType 
+        });
+      } else if (isPatientMode || isPublicMode) {
+        res = await sessionApi.publicStart({ 
+          patientId: actualPatientId, 
+          gameType 
+        });
+      }
+      
+      const session = res?.session;
+      if (session) {
+        sessionIdRef.current = session._id;
+        setCurrentSession(session);
+      } else {
+        // Fallback to local session
+        sessionIdRef.current = `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      }
+    } catch (err) {
+      console.warn('[useSessionTelemetry] Failed to start session:', err);
+      // Fallback to local session
+      sessionIdRef.current = `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+  }, [actualPatientId, gameId, isTherapistMode, isPatientMode, isPublicMode, setCurrentSession]);
+
+  const trackMovement = useCallback((pos) => {
+    if (!pos) return;
+    if (lastPosition.current && pos) {
+      const dx = pos.x - lastPosition.current.x;
+      const dy = pos.y - lastPosition.current.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      setMetrics((prev) => ({ ...prev, totalDistance: prev.totalDistance + dist }));
+    }
+    lastPosition.current = pos;
+  }, []);
+
+  const trackAngle = useCallback((angleDeg) => {
+    if (typeof angleDeg !== 'number' || Number.isNaN(angleDeg)) return;
+    
+    setMetrics((prev) => {
+      const minAngle = prev.minAngle === null ? angleDeg : Math.min(prev.minAngle, angleDeg);
+      const maxAngle = prev.maxAngle === null ? angleDeg : Math.max(prev.maxAngle, angleDeg);
+      return { ...prev, minAngle, maxAngle, romRange: Math.round(maxAngle - minAngle) };
+    });
+
+    repAnglesRef.current.push(angleDeg);
+    if (repAnglesRef.current.length > 100) {
+      repAnglesRef.current = repAnglesRef.current.slice(-100);
+    }
+  }, []);
+
+  const trackPain = useCallback((papsScore) => {
+    setMetrics(prev => ({
+      ...prev,
+      painFluctuations: [...prev.painFluctuations, { papsScore, timestamp: Date.now() }]
+    }));
+  }, []);
+
+  const recordRep = useCallback((success, data = {}) => {
+    const repAngles = repAnglesRef.current;
+    const repRom = repAngles.length > 0 ? 
+      Math.max(...repAngles) - Math.min(...repAngles) : 0;
+    
+    repAnglesRef.current = [];
+
+    setMetrics((prev) => {
+      const newReps = [...prev.reps, { 
+        success, 
+        timestamp: Date.now(), 
+        rom: repRom,
+        angles: repAngles,
+        ...data 
+      }];
+      const successful = newReps.filter((r) => r.success).length;
+      return {
+        ...prev,
+        reps: newReps,
+        successfulReps: successful,
+        totalReps: newReps.length,
+        accuracy: Math.round((successful / newReps.length) * 100),
+        completionPercentage: Math.round((successful / Math.max(prev.totalReps, 1)) * 100),
+      };
+    });
+  }, []);
+
+  const saveReport = useCallback(async (reportData) => {
+    setIsSaving(true);
+    try {
+      const endTime = Date.now();
+      const totalTime = metrics.startTime ? Math.round((endTime - metrics.startTime) / 1000) : 0;
+      
+      const finalMetrics = { ...metrics, endTime, totalTime };
+      
+      const payload = {
+        sessionId: sessionIdRef.current || `local_${Date.now()}`,
+        gameId: gameId,
+        patientId: actualPatientId,
+        patientName: currentPatient?.name || user?.name || 'Guest',
+        date: new Date().toISOString(),
+        durationSeconds: totalTime,
+        score: reportData.score || 0,
+        accuracyPercent: finalMetrics.accuracy || 0,
+        romData: {
+          averageRomDegrees: finalMetrics.romRange || 0,
+          maxRomDegrees: finalMetrics.maxAngle || 0,
+          minRomDegrees: finalMetrics.minAngle || 0,
+          perRep: finalMetrics.reps.map((r, i) => ({ 
+            rep: i + 1, 
+            romDegrees: r.rom || 0,
+            success: r.success,
+            timestamp: r.timestamp,
+          })),
+        },
+        reps: finalMetrics.totalReps || 0,
+        hitsOrCatchesOrCompletions: finalMetrics.successfulReps || 0,
+        missesOrDrops: (finalMetrics.totalReps || 0) - (finalMetrics.successfulReps || 0),
+        gameSpecificMetrics: reportData.gameSpecific || {},
+        painFluctuations: finalMetrics.painFluctuations,
+        ...reportData,
+      };
+
+      // Save locally first (always)
+      await sessionDB.saveSession(payload);
+      await reportDB.saveReport(payload);
+
+      // Try to save to backend if possible
+      let savedToBackend = false;
+      if (sessionIdRef.current && actualPatientId !== 'guest') {
+        try {
+          const gameType = GAME_TYPE_MAP[gameId] || 'rehab_slicer';
+          const completePayload = {
+            score: payload.score,
+            level: reportData.level || 1,
+            accuracy: payload.accuracyPercent,
+            combo: reportData.combo || 0,
+            maxCombo: reportData.maxCombo || 0,
+            stars: reportData.stars || 0,
+            exerciseResults: [
+              {
+                exerciseId: gameId,
+                name: reportData.gameName || gameId,
+                setsCompleted: 1,
+                repsCompleted: payload.reps,
+                averageRom: payload.romData.averageRomDegrees,
+                maxRom: payload.romData.maxRomDegrees,
+                accuracy: payload.accuracyPercent,
+                score: payload.score,
+              },
+            ],
+            durationSeconds: payload.durationSeconds,
+            gameType,
+            romData: payload.romData,
+            missedActions: payload.missesOrDrops,
+            painFluctuations: finalMetrics.painFluctuations,
+            notes: '',
+          };
+
+          let finish;
+          if (isTherapistMode) {
+            finish = sessionApi.complete(sessionIdRef.current, completePayload);
+          } else if (isPatientMode || isPublicMode) {
+            finish = sessionApi.publicFinish({ 
+              patientId: actualPatientId, 
+              sessionId: sessionIdRef.current, 
+              ...completePayload 
+            });
+          }
+
+          if (finish) {
+            const res = await finish;
+            if (res?.session) {
+              setCurrentSession(res.session);
+              savedToBackend = true;
+
+              // NEW: session saved server-side, but the /reports endpoints
+              // read from a separate Reports collection that's never
+              // populated automatically -- explicitly ask the backend to
+              // generate the report now, or ReportsPage's server-backed
+              // queries (reportApi.getByPublicPatient etc.) will keep
+              // returning an empty array forever, even though the session
+              // itself is safely stored.
+              try {
+                await reportApi.generate(sessionIdRef.current);
+              } catch (genErr) {
+                console.warn('[useSessionTelemetry] Failed to generate backend report:', genErr);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('[useSessionTelemetry] Failed to save to backend:', err);
+        }
+      }
+
+      return { 
+        success: true, 
+        sessionId: sessionIdRef.current, 
+        savedToBackend,
+        reportId: payload.reportId || payload.sessionId,
+      };
+    } catch (err) {
+      console.error('[useSessionTelemetry] Failed to save report:', err);
+      return { success: false, error: err.message };
+    } finally {
+      setIsSaving(false);
+    }
+  }, [metrics, actualPatientId, gameId, isTherapistMode, isPatientMode, isPublicMode, setCurrentSession, currentPatient, user]);
+
+  const endSession = useCallback(async (customMetrics = {}) => {
+    return await saveReport(customMetrics);
+  }, [saveReport]);
+
+  return {
+    metrics,
+    startTracking,
+    trackMovement,
+    trackAngle,
+    trackPain,
+    recordRep,
+    endSession,
+    saveReport,
+    isSaving,
+    get sessionId() {
+      return sessionIdRef.current;
+    },
+    get patientId() {
+      return actualPatientId;
+    },
+  };
+}
+
+export default useSessionTelemetry;
+
+
+
+============================================================
+FILE: frontend/src/hooks/usePostureGuidance.js
+============================================================
+
+// frontend/src/hooks/usePostureGuidance.js
+import { useMemo } from "react";
+
+export function usePostureGuidance(poseData, calibrationData) {
+  return useMemo(() => {
+    console.log("[usePostureGuidance] 📊 poseData received:", poseData ? "✅ has data" : "❌ null");
+
+    if (!poseData) {
+      return {
+        isReady: false,
+        message: "Waiting for camera and pose detection...",
+        overallStatus: "severe",
+        flags: { noPose: true },
+      };
+    }
+
+    const { raw, midChest } = poseData;
+    
+    if (!raw) {
+      return {
+        isReady: false,
+        message: "Waiting for pose data...",
+        overallStatus: "severe",
+        flags: { noPose: true },
+      };
+    }
+
+    const leftVisible = raw.leftShoulder?.visibility > 0.3;
+    const rightVisible = raw.rightShoulder?.visibility > 0.3;
+    const shouldersVisible = leftVisible && rightVisible;
+    const flags = {};
+
+    if (!shouldersVisible) {
+      flags.shouldersHidden = true;
+      return {
+        isReady: false,
+        message: "Adjust position to show your shoulders fully",
+        overallStatus: "severe",
+        flags,
+      };
+    }
+
+    if (Math.abs(raw.leftShoulder.y - raw.rightShoulder.y) > 0.12) {
+      flags.unevenShoulders = true;
+      return {
+        isReady: false,
+        message: "Level your shoulders",
+        overallStatus: "minor",
+        flags,
+      };
+    }
+
+    const baselineY = calibrationData?.baselineMidChestY;
+    const slouchDrift = baselineY != null ? midChest.y - baselineY : null;
+    const isSlouching = slouchDrift != null ? slouchDrift > 0.1 : midChest.y > 0.92;
+
+    if (midChest && isSlouching) {
+      flags.slouching = true;
+      return {
+        isReady: false,
+        message: "Sit up straight",
+        overallStatus: "minor",
+        flags,
+      };
+    }
+
+    return {
+      isReady: true,
+      message: "Posture good, ready to start!",
+      overallStatus: "ok",
+      flags,
+    };
+  }, [poseData, calibrationData]);
+}
+
+// ✅ ADD DEFAULT EXPORT
+export default usePostureGuidance;
+
+
+
+============================================================
+FILE: frontend/src/hooks/useFacialPainDetection.js
+============================================================
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+const WASM_URL =
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
+
+const MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+const FRAME_SKIP = 4;
+const PAIN_THRESHOLD = 6;
+const PAIN_CONFIRMATION_MS = 2000;
+
+function maximum(categories, names) {
+  return Math.max(
+    ...names.map(
+      (name) =>
+        categories.find((category) => category.categoryName === name)
+          ?.score || 0
+    ),
+    0
+  );
+}
+
+function getPainLevel(score) {
+  if (score > 8) return "severe";
+  if (score > 6) return "moderate";
+  if (score > 3.5) return "mild";
+  return "none";
+}
+
+export function useFacialPainDetection({
+  videoRef,
+  enabled = true,
+} = {}) {
+  const [papsScore, setPapsScore] = useState(0);
+  const [isPainDetected, setIsPainDetected] = useState(false);
+  const [painLevel, setPainLevel] = useState("none");
+
+  const landmarkerRef = useRef(null);
+  const animationFrameRef = useRef(null);
+  const frameRef = useRef(0);
+  const painStartedAtRef = useRef(null);
+  const runningRef = useRef(false);
+
+  const resetPainState = useCallback(() => {
+    painStartedAtRef.current = null;
+    setIsPainDetected(false);
+  }, []);
+
+  useEffect(() => {
+    if (!enabled || !videoRef?.current) return undefined;
+
+    let cancelled = false;
+
+    async function initialize() {
+      try {
+        const vision = await import("@mediapipe/tasks-vision");
+        const { FaceLandmarker, FilesetResolver } = vision;
+
+        const resolver = await FilesetResolver.forVisionTasks(WASM_URL);
+
+        const landmarker = await FaceLandmarker.createFromOptions(
+          resolver,
+          {
+            baseOptions: {
+              modelAssetPath: MODEL_URL,
+              delegate: "GPU",
+            },
+            runningMode: "VIDEO",
+            numFaces: 1,
+            outputFaceBlendshapes: true,
+          }
+        );
+
+        if (cancelled) {
+          landmarker.close?.();
+          return;
+        }
+
+        landmarkerRef.current = landmarker;
+        runningRef.current = true;
+
+        const loop = () => {
+          if (cancelled || !runningRef.current) return;
+
+          frameRef.current += 1;
+
+          const video = videoRef.current;
+
+          if (
+            frameRef.current % FRAME_SKIP === 0 &&
+            video &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+          ) {
+            try {
+              const result = landmarker.detectForVideo(
+                video,
+                performance.now()
+              );
+
+              const categories =
+                result?.faceBlendshapes?.[0]?.categories || [];
+
+              if (categories.length) {
+                const browDown = maximum(categories, [
+                  "browDownLeft",
+                  "browDownRight",
+                ]);
+
+                const cheekSquint = maximum(categories, [
+                  "cheekSquintLeft",
+                  "cheekSquintRight",
+                ]);
+
+                const eyeSquint = maximum(categories, [
+                  "eyeSquintLeft",
+                  "eyeSquintRight",
+                ]);
+
+                const noseSneer = maximum(categories, [
+                  "noseSneerLeft",
+                  "noseSneerRight",
+                ]);
+
+                const upperLip = maximum(categories, [
+                  "mouthUpperUpLeft",
+                  "mouthUpperUpRight",
+                ]);
+
+                const eyeClose = maximum(categories, [
+                  "eyeBlinkLeft",
+                  "eyeBlinkRight",
+                ]);
+
+                const raw =
+                  browDown * 2 +
+                  cheekSquint * 1.2 +
+                  eyeSquint * 1.2 +
+                  noseSneer * 1.5 +
+                  upperLip * 0.8 +
+                  eyeClose * 0.3;
+
+                const score = Math.min(10, raw * 3.2);
+                const roundedScore = Math.round(score);
+
+                setPapsScore(roundedScore);
+                setPainLevel(getPainLevel(score));
+
+                if (score > PAIN_THRESHOLD) {
+                  if (!painStartedAtRef.current) {
+                    painStartedAtRef.current = performance.now();
+                  }
+
+                  if (
+                    performance.now() - painStartedAtRef.current >=
+                    PAIN_CONFIRMATION_MS
+                  ) {
+                    setIsPainDetected(true);
+                  }
+                } else {
+                  painStartedAtRef.current = null;
+                  setIsPainDetected(false);
+                }
+              }
+            } catch {
+              // Keep detection loop alive after transient inference errors.
+            }
+          }
+
+          animationFrameRef.current = requestAnimationFrame(loop);
+        };
+
+        animationFrameRef.current = requestAnimationFrame(loop);
+      } catch {
+        // Facial pain detection is best effort and must not block rehabilitation.
+      }
+    }
+
+    initialize();
+
+    return () => {
+      cancelled = true;
+      runningRef.current = false;
+
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+
+      landmarkerRef.current?.close?.();
+      landmarkerRef.current = null;
+    };
+  }, [enabled, videoRef]);
+
+  return {
+    papsScore,
+    isPainDetected,
+    painLevel,
+    resetPainState,
+  };
+}
+
+export default useFacialPainDetection;
+
+
+
+============================================================
+FILE: frontend/src/App.jsx
+============================================================
+
+import React, { Suspense } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { useAppStore } from "./store/appStore";
+import Layout from "./components/Layout";
+import Toast from "./components/ui/Toast";
+import HomePage from "./pages/HomePage";
+import LoginPage from "./pages/LoginPage";
+import RegisterPage from "./pages/RegisterPage";
+import DashboardPage from "./pages/DashboardPage";
+import PatientsPage from "./pages/PatientsPage";
+import PatientDetailPage from "./pages/PatientDetailPage";
+import IntakePage from "./pages/IntakePage";
+import RehabPage from "./pages/RehabPage";
+import ReportsPage from "./pages/ReportsPage";
+import SessionReportPage from "./pages/SessionReportPage";
+import PatientPortalPage from "./pages/PatientPortalPage";
+import PatientRegistrationPage from "./pages/PatientRegistrationPage";
+import PatientPublicDashboard from "./pages/PatientPublicDashboard";
+import GameEngine from './pages/GameEngine';
+import GameSelectPage from './pages/GameSelectPage';
+// Dev-only QA test page (lazy-loaded to avoid bundling in production)
+let PatientDashboardTest = null;
+if (import.meta.env.DEV) {
+  PatientDashboardTest = React.lazy(() => import('./pages/PatientDashboardTest'));
+}
+import AdminPage from "./pages/AdminPage";
+import TherapistRegister from "./pages/TherapistRegister";
+import TherapistLogin from "./pages/TherapistLogin";
+
+function ProtectedRoute({ children }) {
+  const { token, user } = useAppStore();
+  if (!token) return <Navigate to="/login" replace />;
+  if (user?.role === "admin") return <Navigate to="/admin" replace />;
+  return children;
+}
+
+function AdminRoute({ children }) {
+  const { token, user } = useAppStore();
+  if (!token) return <Navigate to="/login" replace />;
+  if (user?.role !== "admin") return <Navigate to="/dashboard" replace />;
+  return children;
+}
+
+function WithLayout({ children }) {
+  return <Layout>{children}</Layout>;
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Toast />
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+
+        {/* Patient Routes */}
+        <Route path="/patient" element={<PatientPortalPage />} />
+        <Route path="/patient/register" element={<PatientRegistrationPage />} />
+        <Route path="/patient/dashboard/:id" element={<WithLayout><PatientPublicDashboard /></WithLayout>} />
+
+        {/* Protected Routes */}
+        <Route path="/dashboard" element={<ProtectedRoute><WithLayout><DashboardPage /></WithLayout></ProtectedRoute>} />
+        <Route path="/patients" element={<ProtectedRoute><WithLayout><PatientsPage /></WithLayout></ProtectedRoute>} />
+        <Route path="/patients/:id" element={<ProtectedRoute><WithLayout><PatientDetailPage /></WithLayout></ProtectedRoute>} />
+        <Route path="/intake" element={<ProtectedRoute><WithLayout><IntakePage /></WithLayout></ProtectedRoute>} />
+        <Route path="/rehab/:sessionId" element={<ProtectedRoute><WithLayout><RehabPage /></WithLayout></ProtectedRoute>} />
+        <Route path="/rehab" element={<ProtectedRoute><WithLayout><RehabPage /></WithLayout></ProtectedRoute>} />
+        <Route path="/admin/*" element={<AdminRoute><WithLayout><AdminPage /></WithLayout></AdminRoute>} />
+        <Route path="/therapist-register" element={<TherapistRegister />} />
+        <Route path="/therapist-login" element={<TherapistLogin />} />
+
+        {/* Public Routes with Layout */}
+        <Route path="/games" element={<WithLayout><GameSelectPage /></WithLayout>} />
+        <Route path="/game/:gameId" element={<GameEngine />} />
+        {/* FIX: this route was missing entirely. Every game's onSessionEnd
+            navigates to /session-report — with no route defined, the
+            catch-all below sent every completed session straight to "/",
+            silently dropping the session summary. Deliberately NOT wrapped
+            in ProtectedRoute: public (GH-xxxx) patients with no token must
+            be able to land here too. */}
+        <Route path="/session-report" element={<WithLayout><SessionReportPage /></WithLayout>} />
+        {import.meta.env.DEV && PatientDashboardTest && (
+          <Route path="/qa-tests" element={<WithLayout><Suspense fallback={null}><PatientDashboardTest /></Suspense></WithLayout>} />
+        )}
+
+        {/* Patient-specific reports must stay accessible to public (GH-xxxx)
+            patients with no token — ReportsPage already branches internally
+            on whether patientId is a public ID vs a therapist-authed Mongo
+            ID, so it's safe to leave this unauthenticated at the route level. */}
+        <Route path="/reports/patient/:patientId" element={<WithLayout><ReportsPage /></WithLayout>} />
+        <Route path="/reports" element={<ProtectedRoute><WithLayout><ReportsPage /></WithLayout></ProtectedRoute>} />
+
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+
+
+============================================================
+FILE: backend/src/models/Session.js
+============================================================
+
+const mongoose = require("mongoose");
+
+const repDataSchema = new mongoose.Schema(
+  {
+    exerciseId: { type: String, required: true },
+    exerciseName: { type: String },
+    repNumber: { type: Number },
+    rom: { type: Number },
+    confidence: { type: Number },
+    isCorrect: { type: Boolean, default: true },
+    timestamp: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
+const exerciseResultSchema = new mongoose.Schema(
+  {
+    exerciseId: { type: String, required: true },
+    name: { type: String, required: true },
+    setsCompleted: { type: Number, default: 0 },
+    repsCompleted: { type: Number, default: 0 },
+    averageRom: { type: Number, default: 0 },
+    maxRom: { type: Number, default: 0 },
+    accuracy: { type: Number, default: 0 },
+    score: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
+const sessionSchema = new mongoose.Schema(
+  {
+    sessionId: {
+      type: String,
+      unique: true,
+      default: function() {
+        return `SES-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      },
+    },
+    patientId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Patient",
+      required: true,
+    },
+    patientIdRef: {
+      type: String,
+      required: true,
+      index: true,
+    },
+    therapistId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    mode: {
+      type: String,
+      enum: ["therapist", "public"],
+      default: "therapist",
+    },
+    day: { type: Number, required: true, min: 1, max: 7 },
+    status: {
+      type: String,
+      enum: ["in_progress", "completed", "abandoned"],
+      default: "in_progress",
+    },
+    gameType: {
+      type: String,
+      enum: ["rehab_slicer", "catch_flex", "precision_reach", "canvas_air"],
+      default: "rehab_slicer",
+    },
+    score: { type: Number, default: 0 },
+    level: { type: Number, default: 1 },
+    accuracy: { type: Number, default: 0 },
+    combo: { type: Number, default: 0 },
+    maxCombo: { type: Number, default: 0 },
+    stars: { type: Number, default: 0, min: 0, max: 3 },
+    exerciseResults: [exerciseResultSchema],
+    repData: [repDataSchema],
+    romData: {
+      shoulder: { flexion: { type: Number, default: 0 }, extension: { type: Number, default: 0 } },
+      elbow: { flexion: { type: Number, default: 0 }, extension: { type: Number, default: 0 } },
+      wrist: { flexion: { type: Number, default: 0 }, extension: { type: Number, default: 0 }, rotation: { type: Number, default: 0 } },
+    },
+    smoothness: { type: Number, default: 0 },
+    stability: { type: Number, default: 0 },
+    missedActions: { type: Number, default: 0 },
+    painFluctuations: { type: [Number], default: [] },
+    startedAt: { type: Date, default: Date.now },
+    completedAt: { type: Date },
+    durationSeconds: { type: Number, default: 0 },
+    reportId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Report",
+    },
+    notes: { type: String, trim: true, default: "" },
+    calibrationData: { type: mongoose.Schema.Types.Mixed, default: {} },
+  },
+  { timestamps: true }
+);
+
+sessionSchema.index({ patientId: 1, createdAt: -1 });
+sessionSchema.index({ patientIdRef: 1, createdAt: -1 });
+sessionSchema.index({ therapistId: 1 });
+sessionSchema.index({ status: 1 });
+
+module.exports =
+  mongoose.models.Session || mongoose.model("Session", sessionSchema);
+
+
+
+============================================================
+FILE: backend/src/controllers/sessionController.js
+============================================================
+
+// backend/src/controllers/sessionController.js
+const mongoose = require("mongoose");
+const Session = require("../models/Session");
+const Patient = require("../models/Patient");
+const reportController = require("./reportController");
+
+exports.getSessionsByPatient = async (req, res, next) => {
+  try {
+    const { patientId } = req.params;
+
+    const query = { therapistId: req.user._id };
+    if (patientId.startsWith("GH-")) {
+      query.patientId = patientId;
+    } else {
+      if (!mongoose.Types.ObjectId.isValid(patientId)) {
+        return res.status(400).json({ success: false, message: "Invalid patient ID format." });
+      }
+      query._id = patientId;
+    }
+
+    const patient = await Patient.findOne(query);
+    
+    if (!patient) {
+      return res.status(404).json({ success: false, message: "Patient not found." });
+    }
+
+    const sessions = await Session.find({ patientId: patient._id })
+      .sort({ createdAt: -1 })
+      .populate("reportId", "reportNumber");
+
+    res.json({ success: true, sessions });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getSession = async (req, res, next) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid session ID format." });
+    }
+
+    const session = await Session.findById(req.params.id)
+      .populate("patientId", "name condition patientId")
+      .populate("reportId");
+
+    if (!session || String(session.therapistId) !== String(req.user._id)) {
+      return res.status(404).json({ success: false, message: "Session not found." });
+    }
+
+    res.json({ success: true, session });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.startSession = async (req, res, next) => {
+  try {
+    const { patientId, day, gameType } = req.body;
+
+    const query = { therapistId: req.user._id };
+    if (patientId.startsWith("GH-")) {
+      query.patientId = patientId;
+    } else {
+      if (!mongoose.Types.ObjectId.isValid(patientId)) {
+        return res.status(400).json({ success: false, message: "Invalid patient ID format." });
+      }
+      query._id = patientId;
+    }
+
+    const patient = await Patient.findOne(query);
+    
+    if (!patient) {
+      return res.status(404).json({ success: false, message: "Patient not found." });
+    }
+
+    await Session.updateMany(
+      { patientId: patient._id, status: "in_progress" },
+      { status: "abandoned" }
+    );
+
+    const session = await Session.create({
+      patientId: patient._id,
+      patientIdRef: patient.patientId,
+      therapistId: req.user._id,
+      day: day || patient.currentDay || 1,
+      gameType: gameType || "rehab_slicer",
+      status: "in_progress",
+      startedAt: new Date(),
+    });
+
+    res.status(201).json({ success: true, session });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.completeSession = async (req, res, next) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid session ID format." });
+    }
+
+    const {
+      score, level, accuracy, combo, maxCombo, stars,
+      exerciseResults, durationSeconds, notes, gameType,
+      romData, smoothness, stability, missedActions, painFluctuations
+    } = req.body;
+
+    const session = await Session.findById(req.params.id);
+    if (!session || String(session.therapistId) !== String(req.user._id)) {
+      return res.status(404).json({ success: false, message: "Session not found." });
+    }
+
+    // Prevent completing already completed sessions
+    if (session.status !== "in_progress") {
+      return res.status(400).json({ success: false, message: "Session is not in progress." });
+    }
+
+    session.score = score || 0;
+    session.level = level || 1;
+    session.accuracy = accuracy || 0;
+    session.combo = combo || 0;
+    session.maxCombo = maxCombo || combo || 0;
+    session.stars = stars || 0;
+    session.exerciseResults = exerciseResults || [];
+    session.durationSeconds = durationSeconds || 0;
+    session.notes = notes || "";
+    session.gameType = gameType || session.gameType || "rehab_slicer";
+    session.status = "completed";
+    session.completedAt = new Date();
+    
+    if (romData) session.romData = romData;
+    if (smoothness !== undefined) session.smoothness = smoothness;
+    if (stability !== undefined) session.stability = stability;
+    if (missedActions !== undefined) session.missedActions = missedActions;
+    if (painFluctuations) session.painFluctuations = painFluctuations;
+
+    await session.save();
+
+    const patient = await Patient.findById(session.patientId);
+    if (patient) {
+      patient.totalSessions += 1;
+      patient.totalScore += score || 0;
+      
+      const prevTotal = patient.totalSessions - 1;
+      patient.averageAccuracy = Math.round(
+        ((patient.averageAccuracy * prevTotal) + (accuracy || 0)) / patient.totalSessions
+      );
+      
+      if (level > patient.currentLevel) patient.currentLevel = level;
+
+      const dayPlan = patient.rehabPlan.find((d) => d.day === session.day);
+      if (dayPlan) {
+        dayPlan.isCompleted = true;
+        dayPlan.completedAt = new Date();
+      }
+
+      if (session.day === patient.currentDay && patient.currentDay < 7) {
+        patient.currentDay += 1;
+      }
+
+      await patient.save();
+
+      // NEW: same auto-generation as finishPublicSession below -- keeps
+      // therapist-run sessions and public/patient sessions consistent so
+      // neither path silently ends up with zero reports.
+      try {
+        await reportController.buildReportForSession(session, patient, req.user._id);
+      } catch (reportErr) {
+        console.warn("[completeSession] Failed to auto-generate report:", reportErr);
+      }
+    }
+
+    res.json({ success: true, session });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.saveRepData = async (req, res, next) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid session ID format." });
+    }
+
+    const { exerciseId, exerciseName, repNumber, rom, confidence, isCorrect } = req.body;
+
+    const session = await Session.findById(req.params.id);
+    if (!session || String(session.therapistId) !== String(req.user._id)) {
+      return res.status(404).json({ success: false, message: "Session not found." });
+    }
+
+    // Only allow saving rep data for in-progress sessions
+    if (session.status !== "in_progress") {
+      return res.status(400).json({ success: false, message: "Session is not in progress." });
+    }
+
+    session.repData.push({
+      exerciseId,
+      exerciseName,
+      repNumber,
+      rom,
+      confidence,
+      isCorrect: isCorrect !== false,
+      timestamp: new Date(),
+    });
+
+    await session.save();
+    res.json({ success: true, message: "Rep data saved." });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Public Session Endpoints (no auth — patientId only) ──────────────────
+
+exports.startPublicSession = async (req, res, next) => {
+  try {
+    const { patientId, gameType } = req.body;
+
+    if (!patientId || !String(patientId).startsWith("GH-")) {
+      return res.status(400).json({ success: false, message: "Valid patientId (GH-XXXX) is required." });
+    }
+
+    const patient = await Patient.findOne({ patientId: String(patientId), isActive: true });
+    if (!patient) {
+      return res.status(404).json({ success: false, message: "Patient not found." });
+    }
+
+    await Session.updateMany(
+      { patientId: patient._id, status: "in_progress", mode: "public" },
+      { status: "abandoned" }
+    );
+
+    const session = await Session.create({
+      patientId: patient._id,
+      patientIdRef: patient.patientId,
+      therapistId: null,
+      mode: "public",
+      day: patient.currentDay || 1,
+      gameType: gameType || "rehab_slicer",
+      status: "in_progress",
+      startedAt: new Date(),
+    });
+
+    res.status(201).json({ success: true, session });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.updatePublicSession = async (req, res, next) => {
+  try {
+    const { patientId, sessionId, metrics } = req.body;
+
+    if (!patientId || !String(patientId).startsWith("GH-") || !sessionId) {
+      return res.status(400).json({ success: false, message: "Valid patientId and sessionId are required." });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sessionId)) {
+      return res.status(400).json({ success: false, message: "Invalid session ID format." });
+    }
+
+    const session = await Session.findById(sessionId);
+    if (!session || session.patientIdRef !== String(patientId)) {
+      return res.status(404).json({ success: false, message: "Session not found for this patient." });
+    }
+    if (session.mode !== "public") {
+      return res.status(403).json({ success: false, message: "Not a public session." });
+    }
+    if (session.status === "completed") {
+      return res.status(400).json({ success: false, message: "Session already completed." });
+    }
+
+    if (metrics) {
+      if (typeof metrics.score === "number") session.score = metrics.score;
+      if (typeof metrics.accuracy === "number") session.accuracy = metrics.accuracy;
+      if (typeof metrics.combo === "number") session.combo = metrics.combo;
+      if (typeof metrics.maxCombo === "number") session.maxCombo = metrics.maxCombo;
+      if (typeof metrics.level === "number") session.level = metrics.level;
+      if (typeof metrics.durationSeconds === "number") session.durationSeconds = metrics.durationSeconds;
+      if (typeof metrics.missedActions === "number") session.missedActions = metrics.missedActions;
+    }
+
+    await session.save();
+    res.json({ success: true, session });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.finishPublicSession = async (req, res, next) => {
+  try {
+    const {
+      patientId, sessionId,
+      score, level, accuracy, combo, maxCombo, stars,
+      exerciseResults, durationSeconds, notes, gameType,
+      romData, smoothness, stability, missedActions, painFluctuations,
+    } = req.body;
+
+    if (!patientId || !String(patientId).startsWith("GH-") || !sessionId) {
+      return res.status(400).json({ success: false, message: "Valid patientId and sessionId are required." });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sessionId)) {
+      return res.status(400).json({ success: false, message: "Invalid session ID format." });
+    }
+
+    const session = await Session.findById(sessionId);
+    if (!session || session.patientIdRef !== String(patientId)) {
+      return res.status(404).json({ success: false, message: "Session not found for this patient." });
+    }
+    if (session.mode !== "public") {
+      return res.status(403).json({ success: false, message: "Not a public session." });
+    }
+    if (session.status === "completed") {
+      return res.status(400).json({ success: false, message: "Session already completed." });
+    }
+
+    session.score = score || 0;
+    session.level = level || 1;
+    session.accuracy = accuracy || 0;
+    session.combo = combo || 0;
+    session.maxCombo = maxCombo || combo || 0;
+    session.stars = stars || 0;
+    session.exerciseResults = exerciseResults || [];
+    session.durationSeconds = durationSeconds || 0;
+    session.notes = notes || "";
+    session.gameType = gameType || session.gameType || "rehab_slicer";
+    session.status = "completed";
+    session.completedAt = new Date();
+
+    if (romData) session.romData = romData;
+    if (smoothness !== undefined) session.smoothness = smoothness;
+    if (stability !== undefined) session.stability = stability;
+    if (missedActions !== undefined) session.missedActions = missedActions;
+    if (painFluctuations) session.painFluctuations = painFluctuations;
+
+    await session.save();
+
+    // Update patient stats (same logic as therapist completeSession)
+    const patient = await Patient.findOne({ patientId: String(patientId) });
+    if (patient) {
+      patient.totalSessions += 1;
+      patient.totalScore += score || 0;
+
+      const prevTotal = patient.totalSessions - 1;
+      patient.averageAccuracy = Math.round(
+        ((patient.averageAccuracy * prevTotal) + (accuracy || 0)) / patient.totalSessions
+      );
+
+      if (level > patient.currentLevel) patient.currentLevel = level;
+
+      const dayPlan = patient.rehabPlan.find((d) => d.day === session.day);
+      if (dayPlan) {
+        dayPlan.isCompleted = true;
+        dayPlan.completedAt = new Date();
+      }
+
+      if (session.day === patient.currentDay && patient.currentDay < 7) {
+        patient.currentDay += 1;
+      }
+
+      await patient.save();
+
+      // NEW: automatically generate the report right after a public
+      // session completes. Public sessions have no req.user/therapistId to
+      // authenticate the protected /reports/generate/:sessionId route, so
+      // this can't be triggered from the frontend after the fact -- it has
+      // to happen here, server-side, using the same build logic.
+      try {
+        await reportController.buildReportForSession(session, patient);
+      } catch (reportErr) {
+        console.warn("[finishPublicSession] Failed to auto-generate report:", reportErr);
+        // Don't fail the session-finish response over this -- the session
+        // itself is already safely saved either way.
+      }
+    }
+
+    res.json({ success: true, session });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getPublicSession = async (req, res, next) => {
+  try {
+    const patientId = req.query.patientId || req.body?.patientId;
+    const { sessionId } = req.params;
+
+    if (!sessionId || !patientId) {
+      return res.status(400).json({ success: false, message: "sessionId and patientId are required." });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sessionId)) {
+      return res.status(400).json({ success: false, message: "Invalid session ID format." });
+    }
+
+    const session = await Session.findById(sessionId).populate("reportId", "reportNumber");
+
+    if (!session || session.patientIdRef !== String(patientId)) {
+      return res.status(404).json({ success: false, message: "Session not found." });
+    }
+    if (session.mode !== "public") {
+      return res.status(403).json({ success: false, message: "Not a public session." });
+    }
+
+    res.json({ success: true, session });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.deleteSession = async (req, res, next) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid session ID format." });
+    }
+
+    const session = await Session.findOneAndDelete({
+      _id: req.params.id,
+      therapistId: req.user._id,
+    });
+    if (!session) {
+      return res.status(404).json({ success: false, message: "Session not found." });
+    }
+    res.json({ success: true, message: "Session deleted." });
+  } catch (err) {
+    next(err);
+  }
+};
+
+

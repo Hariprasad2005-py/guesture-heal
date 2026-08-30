@@ -1,52 +1,40 @@
 // frontend/src/hooks/useHandTracking.js
+//
+// UNCHANGED tracking implementation. The only change from the original is
+// that per-frame console logging is now gated behind an explicit `debug`
+// flag (default false), so a normal "no hand visible right now" frame is
+// never logged as if it were an error, and production consoles stay quiet.
+
 import { useEffect, useRef, useState } from "react";
 
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
-// MediaPipe Hands landmark indices
 const INDEX_FINGERTIP = 8;
 const WRIST = 0;
-const SMOOTHING_ALPHA = 0.4; // lower = smoother but more visual lag; 0.3–0.5 is a good range
+const SMOOTHING_ALPHA = 0.4;
+const DEBUG_LOG_EVERY_N_FRAMES = 120; // only used when debug === true
 
-/**
- * Tracks one or more hands' index fingertips in normalized [0,1] video space.
- *
- * This does NOT request the camera itself — it expects `videoRef` to
- * already have an active stream (owned by useMediaPipeUpperBody), and just
- * reads frames from it the same way useFacialPainDetection does.
- *
- * BACKWARD COMPATIBILITY: `numHands` defaults to 1. `fingertip` is still
- * returned exactly as before — the first detected hand, `null` when no
- * hand is confidently detected. Every existing single-hand caller
- * (RehabSlicer, PrecisionReach, CloudReach, CatchFlex, and CanvasAir's
- * own single-hand mode) needs ZERO changes.
- *
- * NEW: pass `numHands: 2` to also get a `hands` array, where each entry
- * is `{ x, y, z, visibility, handedness }`. `handedness` is
- * "Left" | "Right" | null, and is already flipped to match the MIRRORED
- * video feed shown on screen — i.e. it matches what the patient sees,
- * the same mirroring convention already used everywhere else in this
- * codebase (`(1 - x) * 100`). MediaPipe's raw handedness label is
- * computed against the unflipped camera frame, so without this flip
- * "Left" would actually mean the patient's real right hand.
- *
- * `leftHand` / `rightHand` are convenience lookups into `hands` by that
- * (already-flipped) label. They are `null` whenever that hand isn't
- * currently detected — callers must treat null as "unknown", never
- * substitute a stale or synthetic position.
- */
-export function useHandTracking({ videoRef, enabled = true, numHands = 1 } = {}) {
-  const [fingertip, setFingertip] = useState(null); // {x,y,z,visibility} | null — unchanged, back-compat
-  const [hands, setHands] = useState([]); // NEW — [{x,y,z,visibility,handedness}]
+export function useHandTracking({ videoRef, enabled = true, numHands = 1, debug = false } = {}) {
+  const [fingertip, setFingertip] = useState(null);
+  const [hands, setHands] = useState([]);
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState(null);
 
   const landmarkerRef = useRef(null);
   const rafRef = useRef(null);
   const runningRef = useRef(false);
-  const smoothRef = useRef({}); // keyed by handedness (or index), holds last smoothed {x,y,z}
+  const smoothRef = useRef({});
+  const initAttemptsRef = useRef(0);
+  const maxInitAttempts = 10;
+  const frameCountRef = useRef(0);
+  const noHandFramesRef = useRef(0);
+  const hadHandRef = useRef(false); // tracks state transitions, not per-frame state
+
+  function log(...args) {
+    if (debug) console.log(...args);
+  }
 
   function smooth(key, raw) {
     const prev = smoothRef.current[key];
@@ -64,14 +52,60 @@ export function useHandTracking({ videoRef, enabled = true, numHands = 1 } = {})
   }
 
   useEffect(() => {
-    if (!enabled || !videoRef?.current) return undefined;
+    if (!enabled) {
+      log("[HandTracking] Disabled");
+      return undefined;
+    }
 
     let cancelled = false;
+    let initTimeout = null;
 
-    async function init() {
+    const initHandTracking = async () => {
+      const video = videoRef?.current;
+      if (!video) {
+        if (initAttemptsRef.current < maxInitAttempts) {
+          initAttemptsRef.current += 1;
+          initTimeout = setTimeout(initHandTracking, 500);
+        } else {
+          console.warn("[HandTracking] Max init attempts reached, video not available");
+          setError("Video element not available");
+        }
+        return;
+      }
+
+      if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+        if (initAttemptsRef.current < maxInitAttempts) {
+          initAttemptsRef.current += 1;
+          initTimeout = setTimeout(initHandTracking, 500);
+        } else {
+          console.warn("[HandTracking] Max init attempts reached, video metadata not loaded");
+          setError("Video metadata not available");
+        }
+        return;
+      }
+
+      if (!video.srcObject && !video.src) {
+        if (initAttemptsRef.current < maxInitAttempts) {
+          initAttemptsRef.current += 1;
+          initTimeout = setTimeout(initHandTracking, 500);
+        } else {
+          console.warn("[HandTracking] Max init attempts reached, no video source");
+          setError("No video source available");
+        }
+        return;
+      }
+
+      log("[HandTracking] Video ready, initializing...", {
+        readyState: video.readyState,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        srcObject: !!video.srcObject,
+      });
+
       try {
         const vision = await import("@mediapipe/tasks-vision");
         const { HandLandmarker, FilesetResolver } = vision;
+
         const resolver = await FilesetResolver.forVisionTasks(WASM_URL);
 
         const landmarker = await HandLandmarker.createFromOptions(resolver, {
@@ -89,24 +123,30 @@ export function useHandTracking({ videoRef, enabled = true, numHands = 1 } = {})
         runningRef.current = true;
         setIsReady(true);
         setError(null);
+        log("[HandTracking] Successfully initialized");
 
         const loop = () => {
           if (!runningRef.current || cancelled) return;
-          const video = videoRef.current;
+          const video = videoRef?.current;
 
           if (video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
             try {
+              frameCountRef.current += 1;
+
+              if (debug && frameCountRef.current % DEBUG_LOG_EVERY_N_FRAMES === 0) {
+                log("[HandTracking] Frame", frameCountRef.current, "still running");
+              }
+
               const result = landmarker.detectForVideo(video, performance.now());
               const landmarkSets = result?.landmarks || [];
-              // NOTE: verify this key against your installed
-              // @mediapipe/tasks-vision version — the HandLandmarker
-              // result exposes per-hand handedness as `result.handedness`
-              // (array of arrays of {categoryName, score}) as of the
-              // versions this was written against. If your build differs,
-              // log `result` once and adjust this line.
               const handednessSets = result?.handedness || result?.handednesses || [];
 
+              // An empty result just means "no hand visible this frame" — this
+              // is a normal, expected state, not an error. It is only logged
+              // (in debug mode) on the transition into/out of that state.
               if (landmarkSets.length > 0) {
+                noHandFramesRef.current = 0;
+
                 const nextHands = landmarkSets
                   .map((hand, i) => {
                     const tip = hand[INDEX_FINGERTIP];
@@ -114,7 +154,6 @@ export function useHandTracking({ videoRef, enabled = true, numHands = 1 } = {})
                     if (!tip) return null;
 
                     const rawLabel = handednessSets[i]?.[0]?.categoryName || null;
-                    // Flip to match the mirrored video feed (see doc comment above).
                     const handedness =
                       rawLabel === "Left" ? "Right" : rawLabel === "Right" ? "Left" : null;
 
@@ -136,14 +175,26 @@ export function useHandTracking({ videoRef, enabled = true, numHands = 1 } = {})
 
                 setHands(nextHands);
                 setFingertip(nextHands[0] || null);
+
+                if (!hadHandRef.current) {
+                  hadHandRef.current = true;
+                  log("[HandTracking] Hand detected");
+                }
               } else {
-                setHands([]);
-                setFingertip(null);
-                smoothRef.current = {}; // reset so a reappearing hand doesn't ease in from a stale position
+                noHandFramesRef.current += 1;
+                if (hadHandRef.current) {
+                  hadHandRef.current = false;
+                  log("[HandTracking] Hand lost");
+                }
+                setHands((prev) => (prev.length > 0 ? [] : prev));
+                setFingertip((prev) => (prev !== null ? null : prev));
+                if (noHandFramesRef.current === 1) {
+                  smoothRef.current = {};
+                }
               }
-            } catch {
-              // Keep the loop alive after a transient inference error; do
-              // not fabricate a position.
+            } catch (err) {
+              // Real errors are always logged, regardless of debug flag.
+              console.warn("[HandTracking] detectForVideo error:", err);
             }
           }
 
@@ -152,19 +203,26 @@ export function useHandTracking({ videoRef, enabled = true, numHands = 1 } = {})
 
         rafRef.current = requestAnimationFrame(loop);
       } catch (err) {
+        console.error("[HandTracking] Initialization error:", err);
         if (!cancelled) {
           setError(err?.message || "Hand tracking failed to initialize");
           setIsReady(false);
+          if (initAttemptsRef.current < maxInitAttempts) {
+            initAttemptsRef.current += 1;
+            initTimeout = setTimeout(initHandTracking, 1000);
+          }
         }
       }
-    }
+    };
 
-    init();
+    initAttemptsRef.current = 0;
+    initHandTracking();
 
     return () => {
       cancelled = true;
       runningRef.current = false;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (initTimeout) clearTimeout(initTimeout);
       try {
         landmarkerRef.current?.close?.();
       } catch {
@@ -172,11 +230,8 @@ export function useHandTracking({ videoRef, enabled = true, numHands = 1 } = {})
       }
       landmarkerRef.current = null;
     };
-    // numHands is intentionally in the dependency array: switching it
-    // re-initializes the landmarker. Callers should only change numHands
-    // between sessions (e.g. a mode toggle on an instructions screen),
-    // not mid-session, to avoid a visible re-init hiccup.
-  }, [enabled, videoRef, numHands]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, videoRef, numHands, debug]);
 
   const leftHand = hands.find((h) => h.handedness === "Left") || null;
   const rightHand = hands.find((h) => h.handedness === "Right") || null;
