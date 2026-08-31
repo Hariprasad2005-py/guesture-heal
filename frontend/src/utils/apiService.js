@@ -4,12 +4,28 @@ const API_BASE = import.meta.env.VITE_API_URL || "https://gestureheal-backend.on
 // FIX #4: Fixed getToken function
 const getToken = () => {
   try {
+    // 1. Look for the direct token
     const directToken = localStorage.getItem("token");
     if (directToken) return directToken;
 
+    // 2. Check the common storage key
     const stored = JSON.parse(localStorage.getItem("gestureheal-storage") || "{}");
-    // Check both state and root level for token
-    return stored?.state?.token || stored?.token || null;
+    const stateToken = stored?.state?.token || stored?.token;
+    if (stateToken) return stateToken;
+
+    // 3. Check other common keys (just in case)
+    const otherTokens = [
+      "adminToken",
+      "therapistToken",
+      "authToken",
+      "access_token"
+    ];
+    for (let key of otherTokens) {
+      const t = localStorage.getItem(key);
+      if (t) return t;
+    }
+
+    return null;
   } catch {
     return null;
   }
