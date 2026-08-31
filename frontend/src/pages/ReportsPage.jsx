@@ -404,57 +404,38 @@ export default function ReportsPage() {
     }
   }
 
-  async function handleDownloadPDF(report) {
-    const rid = report._id || report.reportId || report.id;
-    setDownloadingId(rid);
-    try {
-      // Get the token directly to ensure it's passed
-const token = localStorage.getItem('token') || 
-  JSON.parse(localStorage.getItem('gestureheal-storage') || '{}')?.state?.token;
+ async function handleDownloadPDF(report) {
+  const rid = report._id || report.reportId || report.id;
+  setDownloadingId(rid);
+  try {
+    // Use the full production URL instead of localhost proxy
+    const API_URL = import.meta.env.VITE_API_URL || "https://gestureheal-backend.onrender.com/api";
+    const token = localStorage.getItem('token') || 
+      JSON.parse(localStorage.getItem('gestureheal-storage') || '{}')?.state?.token;
 
-const res = await fetch(`/api/reports/${rid}`, {
-  method: 'GET',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`
-  }
-}).then(r => r.json());
-      let fullReport = res?.report || report;
-
-      const snap = fullReport.patientSnapshot || {};
-      const populated = fullReport.patientId && typeof fullReport.patientId === "object"
-        ? fullReport.patientId
-        : null;
-
-      const snapshotIsEmpty =
-        !snap.name ||
-        snap.name === "Unknown Patient" ||
-        (snap.age == null && snap.gender == null && !snap.condition);
-
-      if (snapshotIsEmpty && populated) {
-        fullReport = {
-          ...fullReport,
-          patientSnapshot: {
-            name: populated.name || snap.name || "Unknown Patient",
-            age: populated.age ?? snap.age ?? null,
-            gender: populated.gender || snap.gender || null,
-            condition: populated.condition || snap.condition || null,
-            surgeryType: populated.surgeryType || snap.surgeryType || null,
-            surgeryDate: populated.surgeryDate || snap.surgeryDate || null,
-            painLevel: populated.painLevel ?? snap.painLevel ?? null,
-            goals: populated.goals || snap.goals || null,
-          },
-        };
+    const res = await fetch(`${API_URL}/reports/${rid}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
       }
+    });
 
-      await generatePDFReport(fullReport);
-      toast.success("PDF downloaded!");
-    } catch (err) {
-      toast.error("PDF generation failed: " + (err.message || "unknown error"));
-    } finally {
-      setDownloadingId(null);
-    }
+    if (!res.ok) throw new Error(`Failed to fetch report: ${res.status}`);
+    const data = await res.json();
+    
+    let fullReport = data?.report || report;
+
+    // ... (Keep your existing patientSnapshot patching logic here)
+    
+    await generatePDFReport(fullReport);
+    toast.success("PDF downloaded!");
+  } catch (err) {
+    toast.error("PDF generation failed: " + (err.message || "unknown error"));
+  } finally {
+    setDownloadingId(null);
   }
+}
 
   function handleViewReport(report) {
     if (!report) {
