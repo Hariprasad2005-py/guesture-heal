@@ -120,15 +120,10 @@ exports.getReport = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Invalid report ID format." });
     }
 
-    // Admins and therapists can fetch any report by ID.
-    // The therapistId filter was previously applied to non-admins, which
-    // broke the PDF download for therapists viewing patients assigned to
-    // other therapists (or self-registered patients whose therapistId on
-    // the Report was null/different).
-    const isAdmin = req.user.role === "admin";
-    const isTherapist = req.user.role === "therapist";
+    // ANY authenticated user (Admin, Therapist, or Patient) can fetch 
+    // the report by ID. Removing the therapistId restriction fixes the 
+    // PDF download for self-registered patients where therapistId is null.
     const filter = { _id: req.params.id };
-    if (!isAdmin && !isTherapist) filter.therapistId = req.user._id;
 
     const report = await Report.findOne(filter)
       .populate(
