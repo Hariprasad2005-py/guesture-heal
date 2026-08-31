@@ -60,11 +60,17 @@ class SessionDB {
 
   async saveSession(sessionData) {
     await this.init();
+    // Guard the keyPath field itself -- if sessionId is missing/undefined
+    // here, store.put() throws synchronously (not via onerror) with
+    // "not a valid key", which previously propagated uncaught and could
+    // abort whatever save pipeline called this.
+    const sessionId = sessionData.sessionId || `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction([SESSION_STORE], 'readwrite');
       const store = transaction.objectStore(SESSION_STORE);
       const request = store.put({
         ...sessionData,
+        sessionId,
         savedAt: new Date().toISOString(),
       });
       

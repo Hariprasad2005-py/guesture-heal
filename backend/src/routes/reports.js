@@ -12,6 +12,8 @@ router.get("/", reportController.getReportsByTherapist);
 router.get("/patient/:patientId", reportController.getReportsByPatient);
 router.get("/:id", reportController.getReport);
 router.post("/generate/:sessionId", reportController.generateReport);
+// Public report generation (no auth required)
+router.post('/public/generate/:sessionId', reportController.generatePublicReport);
 router.put("/:id/notes", reportController.updateTherapistNotes);
 router.delete("/:id", reportController.deleteReport);
 

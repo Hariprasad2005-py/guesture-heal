@@ -1,7 +1,7 @@
 // frontend/src/pages/SessionReportPage.jsx
 import { useEffect, useState, useMemo } from "react";
 import { useLocation, useNavigate, Link } from "react-router-dom";
-import { sessionApi, reportApi } from "../utils/apiService";
+import { sessionApi, reportApi, patientApi, patientPublicApi } from "../utils/apiService";
 import { generatePDFReport } from "../utils/reportGenerator";
 import { useAppStore } from "../store/appStore";
 import { Trophy, Target, Repeat, Clock, Download, Loader2, ArrowRight, Home } from "lucide-react";
@@ -58,10 +58,39 @@ export default function SessionReportPage() {
   const [refreshed, setRefreshed] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [patientDetails, setPatientDetails] = useState(null);
 
-  const patientId =
-    state?.patientId || currentPatient?.patientId || publicPatientId || user?.patientId || null;
   const isTherapist = !!token && user?.role === "therapist";
+
+  // Prioritize publicPatientId or string 'GH-' IDs
+  const resolvedPatientId =
+    publicPatientId ||
+    currentPatient?.patientId ||
+    state?.patientId ||
+    user?.patientId ||
+    null;
+
+  useEffect(() => {
+    if (!resolvedPatientId) return;
+    let cancelled = false;
+    const fetchPatient = async () => {
+      try {
+        // ALWAYS use public route if not a therapist, or if it has the public prefix GH-
+        const usePublicRoute = !isTherapist || String(resolvedPatientId).startsWith("GH-");
+        const res = usePublicRoute
+          ? await patientPublicApi.getById(resolvedPatientId)
+          : await patientApi.getById(resolvedPatientId);
+
+        if (!cancelled && res?.patient) {
+          setPatientDetails(res.patient);
+        }
+      } catch (err) {
+        console.warn("Could not fetch patient details:", err);
+      }
+    };
+    fetchPatient();
+    return () => { cancelled = true; };
+  }, [resolvedPatientId, isTherapist]);
 
   // Immediate, always-available view — built synchronously from whatever
   // navigate() passed in. Never blocks on the network.
@@ -84,9 +113,9 @@ export default function SessionReportPage() {
       try {
         const res = isTherapist
           ? await sessionApi.getById(state.sessionId)
-          : patientId
-          ? await sessionApi.publicGetById(state.sessionId, patientId)
-          : null;
+          : resolvedPatientId
+            ? await sessionApi.publicGetById(state.sessionId, resolvedPatientId)
+            : null;
         const session = res?.session || res;
         if (!cancelled && session) {
           setRefreshed(normalize(session, state.gameId, state.gameName));
@@ -139,19 +168,37 @@ export default function SessionReportPage() {
     );
   }
 
-  async function handleDownload() {
+ async function handleDownload() {
     setDownloading(true);
     try {
-      // generatePDFReport only reads report.performance / report.romAnalysis
-      // / report.patientSnapshot -- it doesn't care whether this is a real
-      // DB-backed Report document, so this works even for public patients
-      // who have no persisted Report yet.
+      // 1. Ensure we actually have the patient data before proceeding
+      let details = patientDetails;
+      
+      if (!details && patientId) {
+        // Force fetch right here if state is empty
+        const isPublic = String(patientId).startsWith("GH-");
+        const res = isPublic 
+          ? await patientPublicApi.getById(patientId) 
+          : await patientApi.getById(patientId);
+        
+        if (res?.patient) {
+          details = res.patient;
+        }
+      }
+
+      // 2. Build the report object
       const reportShaped = {
         reportNumber: state.sessionId ? `Session-${String(state.sessionId).slice(-6)}` : "Session",
         generatedAt: display.completedAt,
         patientSnapshot: {
-          name: currentPatient?.name || user?.name,
-          condition: currentPatient?.condition,
+          name: details?.name || currentPatient?.name || user?.name || "Unknown Patient",
+          age: details?.age,
+          gender: details?.gender,
+          condition: details?.condition || currentPatient?.condition,
+          surgeryType: details?.surgeryType,
+          surgeryDate: details?.surgeryDate,
+          painLevel: details?.painLevel,
+          goals: details?.goals,
         },
         performance: {
           day: display.day,
@@ -172,10 +219,11 @@ export default function SessionReportPage() {
             maxRom: e.maxRom,
             targetRom: e.targetRom || 90,
             percentageAchieved: e.targetRom
-              ? Math.round(((e.maxRom || 0) / e.targetRom) * 100)
+              ? Math.round(((e.averageRom || 0) / e.targetRom) * 100)
               : undefined,
           })),
       };
+      
       await generatePDFReport(reportShaped);
       toast.success("PDF downloaded!");
     } catch (err) {
@@ -185,13 +233,13 @@ export default function SessionReportPage() {
     }
   }
 
-  const reportsLink = isTherapist && patientId
-    ? `/reports/patient/${patientId}`
+  const reportsLink = isTherapist && resolvedPatientId
+    ? `/reports/patient/${resolvedPatientId}`
     : isTherapist
-    ? "/reports"
-    : patientId
-    ? `/patient/dashboard/${patientId}`
-    : "/games";
+      ? "/reports"
+      : resolvedPatientId
+        ? `/patient/dashboard/${resolvedPatientId}`
+        : "/games";
 
   return (
     <div className="max-w-3xl mx-auto p-6 md:p-8">

@@ -252,12 +252,11 @@ exports.getAllReports = async (req, res, next) => {
 
     const [reports, total] = await Promise.all([
       Report.find(filter)
-        .populate("patientId", "name patientId condition")
+        .populate("patientId", "name patientId age gender condition surgeryType surgeryDate goals painLevel therapistId")
         .populate("therapistId", "name email")
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(Number(limit))
-        .select("-patientSnapshot"),
+        .limit(Number(limit)),
       Report.countDocuments(filter),
     ]);
 
@@ -295,7 +294,7 @@ exports.getAllSessions = async (req, res, next) => {
 
     const [sessions, total] = await Promise.all([
       Session.find(filter)
-        .populate("patientId", "name patientId condition")
+        .populate("patientId", "name patientId age gender condition surgeryType surgeryDate goals painLevel therapistId")
         .populate("therapistId", "name email")
         .sort({ createdAt: -1 })
         .skip(skip)

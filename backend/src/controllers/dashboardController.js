@@ -12,7 +12,7 @@ exports.getDashboardStats = async (req, res, next) => {
       Session.find({ therapistId, status: "completed" })
         .sort({ completedAt: -1 })
         .limit(5)
-        .populate("patientId", "name condition"),
+        .populate("patientId", "name patientId age gender condition surgeryType surgeryDate goals painLevel therapistId"),
       Patient.find({ therapistId, isActive: true })
         .sort({ createdAt: -1 })
         .limit(5)

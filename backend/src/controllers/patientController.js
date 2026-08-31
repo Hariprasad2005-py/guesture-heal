@@ -9,7 +9,10 @@ const { generateRehabPlan } = require("../utils/rehabPlanGenerator");
 exports.getAllPatients = async (req, res, next) => {
   try {
     const { search, condition, page = 1, limit = 20 } = req.query;
-    const filter = { therapistId: req.user._id, isActive: true };
+    const isAdmin = req.user.role === "admin";
+    const filter = isAdmin
+      ? { isActive: true }
+      : { therapistId: req.user._id, isActive: true };
 
     if (search) {
       const s = String(search);
@@ -51,7 +54,7 @@ exports.getPatient = async (req, res, next) => {
     } else {
       query._id = req.params.id;
     }
-    
+
     const patient = await Patient.findOne(query);
     if (!patient) {
       return res.status(404).json({ success: false, message: "Patient not found." });
@@ -68,7 +71,7 @@ exports.createPatient = async (req, res, next) => {
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, message: errors.array()[0].msg });
     }
-    
+
     const { contact, ...rest } = req.body;
     const patientData = {
       ...rest,
@@ -76,11 +79,11 @@ exports.createPatient = async (req, res, next) => {
       therapistId: req.user._id,
       isSelfRegistered: false,
     };
-    
+
     const patient = new Patient(patientData);
     patient.rehabPlan = generateRehabPlan(patient.condition, patient.painLevel, patient.affectedSide);
     await patient.save();
-    
+
     res.status(201).json({ success: true, patient });
   } catch (err) {
     next(err);
@@ -177,7 +180,7 @@ exports.getRehabPlan = async (req, res, next) => {
 exports.selfRegister = async (req, res, next) => {
   try {
     const { firstName, lastName, age, gender, phone, email, address, condition, injuryType, emergencyContact } = req.body;
-    
+
     if (!firstName || !lastName || !age || !condition) {
       return res.status(400).json({ success: false, message: "Name, age and condition are required" });
     }
@@ -197,7 +200,7 @@ exports.selfRegister = async (req, res, next) => {
         message: "You're already registered — returning your existing profile.",
       });
     }
-    
+
     // Create patient WITHOUT setting patientId - let the pre-save hook generate it
     const patient = new Patient({
       name: `${firstName} ${lastName}`,
@@ -213,17 +216,17 @@ exports.selfRegister = async (req, res, next) => {
       isSelfRegistered: true,
       isActive: true,
     });
-    
+
     // Generate rehab plan
     patient.rehabPlan = generateRehabPlan(patient.condition, patient.painLevel, "");
-    
+
     // Save - this will trigger the pre-save hook and generate patientId
     await patient.save();
-    
-    res.status(201).json({ 
-      success: true, 
-      patient, 
-      patientId: patient.patientId 
+
+    res.status(201).json({
+      success: true,
+      patient,
+      patientId: patient.patientId
     });
   } catch (err) {
     // Handle duplicate key error
@@ -246,11 +249,11 @@ exports.selfRegister = async (req, res, next) => {
         });
         retryPatient.rehabPlan = generateRehabPlan(retryPatient.condition, retryPatient.painLevel, "");
         await retryPatient.save();
-        
-        return res.status(201).json({ 
-          success: true, 
-          patient: retryPatient, 
-          patientId: retryPatient.patientId 
+
+        return res.status(201).json({
+          success: true,
+          patient: retryPatient,
+          patientId: retryPatient.patientId
         });
       } catch (retryErr) {
         return next(retryErr);

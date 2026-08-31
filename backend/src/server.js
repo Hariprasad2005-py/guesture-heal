@@ -25,6 +25,7 @@ const reportRoutes = require("./routes/reports");
 const exerciseRoutes = require("./routes/exercises");
 const dashboardRoutes = require("./routes/dashboard");
 const adminRoutes = require("./routes/admin");
+const telemetryRoutes = require("./routes/telemetryRoutes");
 
 const app = express();
 
@@ -83,6 +84,7 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/exercises", exerciseRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/telemetry", telemetryRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((req, res) => {

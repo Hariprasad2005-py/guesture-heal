@@ -37,7 +37,7 @@ async function request(endpoint, options = {}) {
     } else {
       data = { message: await response.text() };
     }
-    
+
     if (!response.ok) {
       // Handle token expiry specifically
       if (response.status === 401) {
@@ -75,26 +75,26 @@ function toQueryString(params = {}) {
 // ─── Auth API ────────────────────────────────────────────────────────────────
 export const authApi = {
   // Therapist/Admin Registration
-  register: (payload) => request("/auth/register", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  register: (payload) => request("/auth/register", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Therapist/Admin Login
-  login: (payload) => request("/auth/login", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  login: (payload) => request("/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // ─── NEW: Patient Login with Patient ID ──────────────────────────────────
-  patientLogin: (payload) => request("/auth/patient-login", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  patientLogin: (payload) => request("/auth/patient-login", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Get current user
   me: () => request("/auth/me"),
-  
+
   // Logout
   logout: () => request("/auth/logout", { method: "POST" }),
 };
@@ -103,31 +103,31 @@ export const authApi = {
 export const patientApi = {
   // Get all patients (therapist only)
   getAll: () => request("/patients"),
-  
+
   // Get patient by ID
   getById: (id) => request(`/patients/${id}`),
-  
+
   // Create patient (therapist only)
-  create: (payload) => request("/patients", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  create: (payload) => request("/patients", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Update patient
-  update: (id, payload) => request(`/patients/${id}`, { 
-    method: "PUT", 
-    body: JSON.stringify(payload) 
+  update: (id, payload) => request(`/patients/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Delete patient (soft delete)
   delete: (id) => request(`/patients/${id}`, { method: "DELETE" }),
-  
+
   // Get rehab plan
   getPlan: (id) => request(`/patients/${id}/plan`),
-  
+
   // Regenerate rehab plan
-  regeneratePlan: (id) => request(`/patients/${id}/regenerate-plan`, { 
-    method: "POST" 
+  regeneratePlan: (id) => request(`/patients/${id}/regenerate-plan`, {
+    method: "POST"
   }),
 };
 
@@ -135,76 +135,80 @@ export const patientApi = {
 export const sessionApi = {
   // Get sessions by patient
   getByPatient: (patientId) => request(`/sessions/patient/${patientId}`),
-  
+
   // Get session by ID
   getById: (id) => request(`/sessions/${id}`),
-  
+
   // Start session (therapist)
-  start: (payload) => request("/sessions/start", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  start: (payload) => request("/sessions/start", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Complete session (therapist)
-  complete: (id, payload) => request(`/sessions/${id}/complete`, { 
-    method: "PUT", 
-    body: JSON.stringify(payload) 
+  complete: (id, payload) => request(`/sessions/${id}/complete`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Save rep data
-  saveRep: (id, payload) => request(`/sessions/${id}/rep`, { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  saveRep: (id, payload) => request(`/sessions/${id}/rep`, {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Delete session
   delete: (id) => request(`/sessions/${id}`, { method: "DELETE" }),
-  
+
   // ─── Public Session Endpoints (no auth — patientId only) ────────────────
-  
+
   // Start public session
-  publicStart: (payload) => request("/sessions/public/start", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  publicStart: (payload) => request("/sessions/public/start", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Update public session
-  publicUpdate: (payload) => request("/sessions/public/update", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  publicUpdate: (payload) => request("/sessions/public/update", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Finish public session
-  publicFinish: (payload) => request("/sessions/public/finish", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  publicFinish: (payload) => request("/sessions/public/finish", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
-  
+
   // Get public session by ID
-  publicGetById: (sessionId, patientId) => 
+  publicGetById: (sessionId, patientId) =>
     request(`/sessions/public/${sessionId}?patientId=${encodeURIComponent(patientId)}`),
 };
 
 // ─── Report API ──────────────────────────────────────────────────────────────
 export const reportApi = {
   // Get all reports for the logged-in therapist, optionally filtered by patient
-  getAll: (patientId) => 
+  getAll: (patientId) =>
     request(`/reports${patientId ? `?patientId=${patientId}` : ""}`),
 
   // Get reports by patient
   getByPatient: (patientId) => request(`/reports/patient/${patientId}`),
-  
+
   // Generate report
-  generate: (sessionId) => request(`/reports/generate/${sessionId}`, { 
-    method: "POST" 
+  generate: (sessionId) => request(`/reports/generate/${sessionId}`, {
+    method: "POST"
   }),
-  
+  // In the reportApi object, add:
+  generatePublicReport: (sessionId, patientId) =>
+    request(`/reports/public/generate/${sessionId}?patientId=${encodeURIComponent(patientId)}`, {
+      method: "POST"
+    }),
   // Update therapist notes
-  updateNotes: (id, notes) => request(`/reports/${id}/notes`, { 
-    method: "PUT", 
-    body: JSON.stringify({ therapistNotes: notes }) 
+  updateNotes: (id, notes) => request(`/reports/${id}/notes`, {
+    method: "PUT",
+    body: JSON.stringify({ therapistNotes: notes })
   }),
-  
+
   // Delete report
   delete: (id) => request(`/reports/${id}`, { method: "DELETE" }),
 };
@@ -213,7 +217,7 @@ export const reportApi = {
 export const dashboardApi = {
   // Get dashboard stats
   getStats: () => request("/dashboard"),
-  
+
   // Get patient progress
   getPatientProgress: (patientId) => request(`/dashboard/patient/${patientId}/progress`),
 };
@@ -222,11 +226,11 @@ export const dashboardApi = {
 export const patientPublicApi = {
   // Get patient by public ID
   getById: (id) => request(`/patients/public/${id}`),
-  
+
   // Self-register (no auth required)
-  selfRegister: (payload) => request("/patients/self-register", { 
-    method: "POST", 
-    body: JSON.stringify(payload) 
+  selfRegister: (payload) => request("/patients/self-register", {
+    method: "POST",
+    body: JSON.stringify(payload)
   }),
 };
 
@@ -234,12 +238,12 @@ export const patientPublicApi = {
 export const exerciseApi = {
   // Get all exercises
   getAll: () => request("/exercises"),
-  
+
   // Get exercise by ID
   getById: (id) => request(`/exercises/${id}`),
-  
+
   // Get patient day exercises
-  getPatientDayExercises: (patientId, day) => 
+  getPatientDayExercises: (patientId, day) =>
     request(`/exercises/for-patient/${patientId}/day/${day}`),
 };
 

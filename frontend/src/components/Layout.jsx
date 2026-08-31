@@ -6,7 +6,28 @@ import { Menu, X, LogOut, Users, Home, Activity, FileText, Gamepad2, User, UserR
 
 export default function Layout({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { user, logout, currentPatient, token, publicPatientId } = useAppStore();
+  const { user, logout, currentPatient, token, publicPatientId, setCurrentPatient } = useAppStore();
+
+  // currentPatient is persisted straight to localStorage (see appStore.js)
+  // with no backend validation on load — a stale/deleted/never-actually-
+  // saved patient from a past session renders here forever otherwise,
+  // showing a full sidebar (name, condition, patient ID) for a patient
+  // that doesn't exist in MongoDB. Verify it against the backend once on
+  // mount whenever we're relying on a public (GH-xxxx) id with no token.
+  useEffect(() => {
+    const idToVerify = currentPatient?.patientId || publicPatientId;
+    if (!idToVerify || !idToVerify.startsWith("GH-") || token) return;
+    let cancelled = false;
+    import("../utils/apiService").then(({ patientPublicApi }) => {
+      patientPublicApi.getById(idToVerify).catch((err) => {
+        if (cancelled) return;
+        console.warn("[Layout] Cached currentPatient failed backend verification, clearing:", err);
+        setCurrentPatient(null);
+        useAppStore.getState().setPublicPatientId?.(null);
+      });
+    });
+    return () => { cancelled = true; };
+  }, [currentPatient?.patientId, publicPatientId, token, setCurrentPatient]);
   const navigate = useNavigate();
   const location = useLocation();
 
