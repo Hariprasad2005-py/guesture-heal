@@ -29,6 +29,9 @@ const telemetryRoutes = require("./routes/telemetryRoutes");
 
 const app = express();
 
+// ⚠️ CRITICAL FIX FOR RENDER: Trust the proxy so express-rate-limit works
+app.set('trust proxy', 1);
+
 // ─── Connect Database ─────────────────────────────────────────────────────────
 connectDB();
 
