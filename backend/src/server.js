@@ -1,7 +1,7 @@
 // backend/src/server.js
 require("dotenv").config();
 
-const REQUIRED_ENV = ["MONGODB_URI", "JWT_SECRET", "FRONTEND_URL"];
+const REQUIRED_ENV = ["MONGODB_URI", "JWT_SECRET"];
 const missing = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missing.length > 0) {
   console.error(`Missing required env vars: ${missing.join(", ")}`);
@@ -37,20 +37,13 @@ app.use(helmet());
 
 const allowedOrigins = [
   process.env.FRONTEND_URL,
-  "http://localhost:5173",
-  "https://gesture-heal.vercel.app" // <--- ADD THIS
+  "https://gesture-heal.vercel.app",
+  "https://guesture-heal.vercel.app" // <--- ACTUAL LIVE URL
 ].filter(Boolean);
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === "development") {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
+    origin: true, // Allow all origins for now to unblock production
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -101,7 +94,7 @@ const server = app.listen(PORT, () => {
 // ─── Graceful Shutdown ──────────────────────────────────────────────────────
 async function gracefulShutdown(signal) {
   console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
-  
+
   server.close(async () => {
     console.log("📦 HTTP server closed.");
     try {
