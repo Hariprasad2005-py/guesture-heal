@@ -79,16 +79,65 @@ function getPatientInfo(report) {
   };
 }
 
+function toFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeBoolean(value) {
+  if (typeof value === "boolean") return value;
+
+  if (value === true || value === 1 || value === "1" || value === "true") {
+    return true;
+  }
+
+  if (value === false || value === 0 || value === "0" || value === "false") {
+    return false;
+  }
+
+  return null;
+}
+
 function summarizeRepData(repData) {
   if (!Array.isArray(repData) || repData.length === 0) return null;
-  const withRom = repData.filter((r) => typeof r.rom === "number");
-  const withConfidence = repData.filter((r) => typeof r.confidence === "number");
+
+  const romValues = repData
+    .map((r) => toFiniteNumber(r.rom) ?? toFiniteNumber(r.romDegrees))
+    .filter((value) => value !== null);
+
+  const confidenceValues = repData
+    .map((r) => toFiniteNumber(r.confidence))
+    .filter((value) => value !== null);
+
+  const correctness = repData
+    .map((r) =>
+      normalizeBoolean(r.isCorrect !== undefined ? r.isCorrect : r.success)
+    )
+    .filter((value) => value !== null);
+
+  const correct = correctness.filter((value) => value === true).length;
+  const incorrect = correctness.filter((value) => value === false).length;
+
   return {
     count: repData.length,
-    avgRom: withRom.length ? Math.round(withRom.reduce((s, r) => s + r.rom, 0) / withRom.length) : null,
-    avgConfidence: withConfidence.length ? Math.round((withConfidence.reduce((s, r) => s + r.confidence, 0) / withConfidence.length) * 100) : null,
-    correct: repData.filter((r) => r.isCorrect === true).length,
-    incorrect: repData.filter((r) => r.isCorrect === false).length,
+
+    avgRom: romValues.length
+      ? Math.round(romValues.reduce((sum, v) => sum + v, 0) / romValues.length)
+      : null,
+
+    avgConfidence: confidenceValues.length
+      ? Math.round(
+        (confidenceValues.reduce((sum, v) => sum + v, 0) /
+          confidenceValues.length) *
+        100
+      )
+      : null,
+
+    correct,
+    incorrect,
+
+    correctnessRecorded: correctness.length > 0,
   };
 }
 
@@ -124,6 +173,237 @@ function normalizeLegacyLocalReport(local) {
   };
 }
 
+// ─── SHARED PATIENT RESOLUTION HELPER ─────────────────────────────────────
+function extractPatientLookupId(report) {
+  if (!report) return null;
+
+  if (report.patientIdRef) return String(report.patientIdRef);
+
+  const ref = report.patientId;
+
+  if (typeof ref === "string" && ref.trim()) return ref;
+
+  if (ref && typeof ref === "object") {
+    if (ref.patientId) return String(ref.patientId);
+    if (ref._id) return String(ref._id);
+  }
+
+  return null;
+}
+
+// ─── THERAPIST NAME vs ID DISTINCTION ─────────────────────────────────────
+
+// A 24-character hex string is a MongoDB ObjectId — NOT a therapist name.
+// Covers both ObjectId("...") and any hex string of that exact length.
+function isLikelyObjectId(value) {
+  if (typeof value !== "string") return false;
+  const s = value.trim();
+  if (!/^[a-fA-F0-9]{24}$/.test(s)) return false;
+  return true;
+}
+
+// Returns a usable DISPLAY NAME from a therapist-shaped value, or null.
+// STRICT: a raw string is NEVER accepted as a name — because a raw string
+// might be a therapistId (ObjectId) rather than a display name. Only objects
+// with an explicit .name / .fullName / .displayName / .username field yield
+// a name. This is what prevents "6a4ccd3ce7c2649c265a5f5a" from being shown.
+function extractNameFromTherapistValue(value) {
+  if (!value) return null;
+
+  if (typeof value === "object") {
+    const candidates = [value.name, value.fullName, value.displayName, value.username];
+    for (const c of candidates) {
+      if (typeof c === "string") {
+        const t = c.trim();
+        if (
+          t &&
+          t !== "Not Assigned" &&
+          t !== "[object Object]" &&
+          !isLikelyObjectId(t)
+        ) {
+          return t;
+        }
+      }
+    }
+    return null;
+  }
+
+  // A raw string must NOT automatically be treated as a therapist name,
+  // because it may actually be a therapistId.
+  return null;
+}
+
+// Returns a string ID from a therapist-shaped value ONLY if it is truly an ID.
+// Never returns "[object Object]".
+function extractTherapistIdString(value) {
+  if (!value) return null;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (
+      !trimmed ||
+      trimmed === "[object Object]" ||
+      trimmed === "undefined" ||
+      trimmed === "null" ||
+      trimmed === "Not Assigned"
+    ) {
+      return null;
+    }
+    return trimmed;
+  }
+
+  if (typeof value === "object") {
+    // A populated object without a name still has an _id we could use.
+    if (typeof value._id === "string" && value._id.trim()) {
+      return value._id.trim();
+    }
+    if (typeof value.id === "string" && value.id.trim()) {
+      return value.id.trim();
+    }
+  }
+
+  return null;
+}
+
+// Collect every plausible therapist-bearing field from a single object.
+function pushTherapistFieldsFromObject(obj, out) {
+  if (!obj || typeof obj !== "object") return;
+
+  out.push(obj.therapistName);
+  out.push(obj.therapist);
+  out.push(obj.therapistId);
+
+  // Sometimes therapist info is nested under a "therapist" object that has
+  // its own nested therapistId.
+  if (obj.therapist && typeof obj.therapist === "object") {
+    out.push(obj.therapist.therapistId);
+    out.push(obj.therapist.therapist);
+  }
+}
+
+// Collects every plausible therapist-related value from a report/patient
+// combination, in the priority order required by the spec.
+function collectTherapistCandidates({
+  report,
+  fullReport,
+  livePatient,
+  populatedPatient,
+} = {}) {
+  const out = [];
+
+  // 1. report.therapistName / .therapist / .therapistId
+  pushTherapistFieldsFromObject(report, out);
+
+  // 2. fullReport.therapistName / .therapist / .therapistId
+  if (fullReport && fullReport !== report) {
+    pushTherapistFieldsFromObject(fullReport, out);
+  }
+
+  // 3. report.patientSnapshot.* and fullReport.patientSnapshot.*
+  pushTherapistFieldsFromObject(report?.patientSnapshot, out);
+  pushTherapistFieldsFromObject(fullReport?.patientSnapshot, out);
+
+  // 4. report.patientId.* and fullReport.patientId.* (populated patient)
+  if (report?.patientId && typeof report.patientId === "object") {
+    pushTherapistFieldsFromObject(report.patientId, out);
+  }
+  if (
+    fullReport?.patientId &&
+    typeof fullReport.patientId === "object" &&
+    fullReport.patientId !== report?.patientId
+  ) {
+    pushTherapistFieldsFromObject(fullReport.patientId, out);
+  }
+
+  // 5. populatedPatient.* (explicitly passed in)
+  pushTherapistFieldsFromObject(populatedPatient, out);
+
+  // 6. livePatient.* (fetched from patientPublicApi / patientApi)
+  pushTherapistFieldsFromObject(livePatient, out);
+
+  return out;
+}
+
+// Resolves a therapist DISPLAY NAME from the many shapes the API can return.
+// Priority:
+//   1. report.therapistName         (name only — never a raw ObjectId)
+//   2. fullReport.therapistName
+//   3. fullReport.patientSnapshot?.therapistName
+//   4. populated therapist object's name/fullName
+//   5. populated therapistId object's name/fullName
+//   6. string therapistId → existing fetchTherapistById()
+//   7. existing report therapist information
+//   8. "Not Assigned" only as the final fallback
+//
+// IMPORTANT: A raw string is NEVER accepted as a name. If a string looks like
+// a therapistId (ObjectId) OR simply is not a display name, it is routed
+// through fetchTherapistById so the actual name ("sameer") is resolved.
+async function resolveTherapistName(candidates, fetchTherapistById) {
+  const triedIds = new Set();
+
+  // Pass 1: object-shaped names (c.name, c.fullName, ...).
+  for (const c of candidates) {
+    if (c && typeof c === "object") {
+      const direct = extractNameFromTherapistValue(c);
+      if (direct) return direct;
+    }
+  }
+
+  // Pass 2: nested therapist objects (c.therapist.name, c.therapist.fullName).
+  for (const c of candidates) {
+    if (c && typeof c === "object") {
+      const nested = extractNameFromTherapistValue(c.therapist);
+      if (nested) return nested;
+    }
+  }
+
+  // Pass 3: populated therapistId object's name/fullName.
+  for (const c of candidates) {
+    if (c && typeof c === "object") {
+      const nestedId = extractNameFromTherapistValue(c.therapistId);
+      if (nestedId) return nestedId;
+    }
+  }
+
+  // Pass 4: string IDs (including the raw "6a4ccd..." ObjectId from the
+  // report.therapistName field) → fetch via the existing resolver.
+  // Raw strings are NEVER returned directly as the display name.
+  for (const c of candidates) {
+    const idStr = extractTherapistIdString(c);
+    if (idStr && !triedIds.has(idStr)) {
+      triedIds.add(idStr);
+      try {
+        const resolved = await fetchTherapistById(idStr);
+        if (resolved && resolved !== "Not Assigned") return resolved;
+      } catch {
+        // swallow and continue
+      }
+    }
+  }
+
+  // Pass 5: nested therapist object that itself holds a therapistId string.
+  for (const c of candidates) {
+    if (c && typeof c === "object") {
+      const nestedObj =
+        c.therapist && typeof c.therapist === "object" ? c.therapist : null;
+      if (nestedObj) {
+        const nestedId = extractTherapistIdString(nestedObj.therapistId);
+        if (nestedId && !triedIds.has(nestedId)) {
+          triedIds.add(nestedId);
+          try {
+            const resolved = await fetchTherapistById(nestedId);
+            if (resolved && resolved !== "Not Assigned") return resolved;
+          } catch {
+            // swallow
+          }
+        }
+      }
+    }
+  }
+
+  return "Not Assigned";
+}
+
 export default function ReportsPage() {
   const { patientId: patientIdFromUrl } = useParams();
   const navigate = useNavigate();
@@ -140,7 +420,6 @@ export default function ReportsPage() {
   const [selectedReport, setSelectedReport] = useState(null);
   const [showDetail, setShowDetail] = useState(false);
 
-  // State for therapists cache
   const [therapists, setTherapists] = useState({});
   const [loadingTherapists, setLoadingTherapists] = useState(false);
 
@@ -156,6 +435,16 @@ export default function ReportsPage() {
       return parsed?.state?.user?.role === "admin";
     } catch {
       return false;
+    }
+  }
+
+  function isPublicPatientView() {
+    try {
+      const stored = JSON.parse(localStorage.getItem("gestureheal-storage") || "{}");
+      const hasToken = !!stored?.state?.token;
+      return !hasToken;
+    } catch {
+      return true;
     }
   }
 
@@ -181,21 +470,44 @@ export default function ReportsPage() {
   }
 
   // ─── FETCH SINGLE THERAPIST ─────────────────────────────────────────────
+  // Tries the admin detail endpoint first (when the user is admin), then
+  // falls back to the local therapists cache. Never stringifies an object.
   async function fetchTherapistById(therapistId) {
     if (!therapistId) return "Not Assigned";
-    if (therapists[therapistId]) return therapists[therapistId];
-    if (!isAdminUser()) return "Not Assigned";
+    if (typeof therapistId === "object") {
+      return "Not Assigned";
+    }
+    const idStr = String(therapistId).trim();
+    if (!idStr || isLikelyObjectId(idStr) === false && idStr.length < 6) {
+      // Still allow short non-ObjectId ids through, but reject empties.
+      if (!idStr) return "Not Assigned";
+    }
+    if (therapists[idStr]) return therapists[idStr];
+
+    if (!isAdminUser()) {
+      return "Not Assigned";
+    }
 
     try {
-      const response = await adminApi.getTherapistDetail(therapistId);
+      const response = await adminApi.getTherapistDetail(idStr);
+
       if (response && response.therapist) {
-        const name = response.therapist.name || response.therapist.fullName || "Unknown Therapist";
-        setTherapists(prev => ({ ...prev, [therapistId]: name }));
+        const name =
+          response.therapist.name ||
+          response.therapist.fullName ||
+          "Unknown Therapist";
+
+        setTherapists(prev => ({
+          ...prev,
+          [idStr]: name
+        }));
+
         return name;
       }
+
       return "Unknown Therapist";
     } catch (err) {
-      console.warn(`Failed to fetch therapist ${therapistId}:`, err);
+      console.warn(`Failed to fetch therapist ${idStr}:`, err);
       return "Not Assigned";
     }
   }
@@ -214,6 +526,32 @@ export default function ReportsPage() {
   useEffect(() => {
     loadData();
   }, [patientIdFromUrl, selectedPatientId, filterGame, filterDate]);
+
+  async function lookupLivePatient(patientIdValue) {
+    if (!patientIdValue) return null;
+    const idStr = String(patientIdValue);
+    const isPublicId = idStr.startsWith("GH-");
+
+    try {
+      const patientData = isPublicId
+        ? await patientPublicApi.getById(idStr)
+        : await patientApi.getById(idStr);
+      const patient = patientData?.patient || null;
+      if (patient) return patient;
+    } catch (err) {
+      console.warn(`Patient lookup failed for ${idStr}:`, err);
+    }
+
+    try {
+      const patientData = isPublicId
+        ? await patientApi.getById(idStr)
+        : await patientPublicApi.getById(idStr);
+      return patientData?.patient || null;
+    } catch (err) {
+      console.warn(`Fallback patient lookup failed for ${idStr}:`, err);
+      return null;
+    }
+  }
 
   async function loadData() {
     setLoading(true);
@@ -275,18 +613,7 @@ export default function ReportsPage() {
         if (patientLookupCache.has(patientIdValue)) {
           return patientLookupCache.get(patientIdValue);
         }
-        const lookupPromise = (async () => {
-          try {
-            const isPublicId = String(patientIdValue).startsWith("GH-");
-            const patientData = isPublicId
-              ? await patientPublicApi.getById(patientIdValue)
-              : await patientApi.getById(patientIdValue);
-            return patientData?.patient || null;
-          } catch (err) {
-            console.warn(`Failed to fetch patient ${patientIdValue}:`, err);
-            return null;
-          }
-        })();
+        const lookupPromise = lookupLivePatient(patientIdValue);
         patientLookupCache.set(patientIdValue, lookupPromise);
         return lookupPromise;
       }
@@ -325,39 +652,63 @@ export default function ReportsPage() {
             surgeryDate: livePatient.surgeryDate || snap.surgeryDate,
             painLevel: livePatient.painLevel ?? snap.painLevel,
             goals: livePatient.goals || snap.goals,
+            therapistName:
+              extractNameFromTherapistValue(livePatient.therapist) ||
+              extractNameFromTherapistValue(livePatient.therapistId) ||
+              extractNameFromTherapistValue(livePatient.therapistName) ||
+              snap.therapistName ||
+              null,
           };
         }
 
-        let therapistName = "Not Assigned";
+        // ─── ROBUST THERAPIST RESOLUTION ────────────────────────────────
+        const populatedPatient =
+          rawPatientRef && typeof rawPatientRef === "object" ? rawPatientRef : null;
 
-        if (enriched.therapistName) {
-          therapistName = enriched.therapistName;
-        } else if (enriched.therapistId) {
-          if (therapists[enriched.therapistId]) {
-            therapistName = therapists[enriched.therapistId];
-          } else {
-            const name = await fetchTherapistById(enriched.therapistId);
-            therapistName = name;
-          }
-        } else if (rawPatientRef && typeof rawPatientRef === 'object' && rawPatientRef.therapistId) {
-          const therapistId = rawPatientRef.therapistId;
-          if (therapists[therapistId]) {
-            therapistName = therapists[therapistId];
-          } else {
-            const name = await fetchTherapistById(therapistId);
-            therapistName = name;
-          }
-        } else if (livePatient?.therapistId) {
-          const therapistId = livePatient.therapistId;
-          if (therapists[therapistId]) {
-            therapistName = therapists[therapistId];
-          } else {
-            const name = await fetchTherapistById(therapistId);
-            therapistName = name;
-          }
+        const candidates = collectTherapistCandidates({
+          report: enriched,
+          fullReport: enriched,
+          livePatient,
+          populatedPatient,
+        });
+
+        const resolved = await resolveTherapistName(candidates, fetchTherapistById);
+
+        if (!resolved || resolved === "Not Assigned") {
+          console.log("[THERAPIST DEBUG]", {
+            patientLookupId: lookupId,
+            reportTherapistName: enriched.therapistName,
+            reportTherapist: enriched.therapist,
+            reportTherapistId: enriched.therapistId,
+            patientSnapshot: enriched.patientSnapshot,
+            patientId: enriched.patientId,
+            livePatient: livePatient,
+            livePatientTherapist: livePatient?.therapist,
+            livePatientTherapistId: livePatient?.therapistId,
+            livePatientTherapistName: livePatient?.therapistName,
+            candidateCount: candidates.length,
+            candidates: candidates,
+          });
         }
 
-        enriched.therapistName = therapistName;
+        // Never overwrite an already-good name with "Not Assigned".
+        // Also: never fall back to a raw ObjectId-shaped string.
+        const existingGoodName =
+          extractNameFromTherapistValue(enriched.therapist) ||
+          extractNameFromTherapistValue(enriched.therapistId) ||
+          (typeof enriched.therapistName === "string" &&
+            !isLikelyObjectId(enriched.therapistName) &&
+            enriched.therapistName !== "Not Assigned" &&
+            enriched.therapistName.trim()
+            ? enriched.therapistName.trim()
+            : null);
+
+        const finalName =
+          resolved && resolved !== "Not Assigned"
+            ? resolved
+            : existingGoodName || "Not Assigned";
+
+        enriched.therapistName = finalName;
         return enriched;
       }));
 
@@ -404,15 +755,123 @@ export default function ReportsPage() {
     }
   }
 
+  async function handleRegenerateReport(report) {
+    const sessionRef = report?.sessionId;
+    const sessionId =
+      sessionRef && typeof sessionRef === "object"
+        ? sessionRef._id
+        : sessionRef;
+
+    if (!sessionId) {
+      toast.error("Session ID not found for this report");
+      return;
+    }
+
+    const rid = report._id || report.reportId || report.id;
+    setGeneratingId(rid);
+
+    try {
+      const response = isPublicPatientView()
+        ? await reportApi.regeneratePublic(sessionId, patientIdFromUrl)
+        : await reportApi.regenerate(sessionId);
+
+      if (!response?.success || !response?.report) {
+        throw new Error(response?.message || "Failed to regenerate report");
+      }
+
+      const regeneratedReport = response.report;
+
+      const lookupId = extractPatientLookupId(regeneratedReport);
+      let livePatient = null;
+      if (lookupId) {
+        livePatient = await lookupLivePatient(lookupId);
+      }
+
+      const populatedPatient =
+        regeneratedReport.patientId && typeof regeneratedReport.patientId === "object"
+          ? regeneratedReport.patientId
+          : null;
+
+      const candidates = collectTherapistCandidates({
+        report: regeneratedReport,
+        fullReport: regeneratedReport,
+        livePatient,
+        populatedPatient,
+      });
+      const resolvedTherapistName = await resolveTherapistName(
+        candidates,
+        fetchTherapistById
+      );
+
+      if (!resolvedTherapistName || resolvedTherapistName === "Not Assigned") {
+        console.log("[THERAPIST DEBUG][regenerate]", {
+          lookupId,
+          reportTherapistName: regeneratedReport.therapistName,
+          reportTherapist: regeneratedReport.therapist,
+          reportTherapistId: regeneratedReport.therapistId,
+          patientSnapshot: regeneratedReport.patientSnapshot,
+          patientId: regeneratedReport.patientId,
+          livePatient,
+          candidates,
+        });
+      }
+
+      const existingGoodName =
+        extractNameFromTherapistValue(report.therapist) ||
+        extractNameFromTherapistValue(regeneratedReport.therapist) ||
+        extractNameFromTherapistValue(regeneratedReport.therapistId) ||
+        (typeof report.therapistName === "string" &&
+          !isLikelyObjectId(report.therapistName) &&
+          report.therapistName !== "Not Assigned" &&
+          report.therapistName.trim()
+          ? report.therapistName.trim()
+          : null);
+
+      const finalName =
+        resolvedTherapistName && resolvedTherapistName !== "Not Assigned"
+          ? resolvedTherapistName
+          : existingGoodName || "Not Assigned";
+
+      setSelectedReport({
+        ...regeneratedReport,
+        performance: regeneratedReport.performance || {},
+        romAnalysis: regeneratedReport.romAnalysis || [],
+        repData: regeneratedReport.repData || [],
+        romData: regeneratedReport.romData || null,
+        gameType: regeneratedReport.gameType || null,
+        therapistName: finalName,
+        observations: regeneratedReport.observations || "",
+        recommendations: regeneratedReport.recommendations || "",
+      });
+
+      setReports((prev) =>
+        prev.map((r) =>
+          String(r._id || r.reportId || r.id) === String(rid)
+            ? { ...regeneratedReport, therapistName: finalName }
+            : r
+        )
+      );
+
+      toast.success("Report regenerated successfully");
+    } catch (err) {
+      console.error("Report regeneration failed:", err);
+      toast.error(
+        "Failed to regenerate report: " +
+        (err.message || "Unknown error")
+      );
+    } finally {
+      setGeneratingId(null);
+    }
+  }
+
+  // ─── DOWNLOAD PDF ───────────────────────────────────────────────────────
   async function handleDownloadPDF(report) {
     const rid = report._id || report.reportId || report.id;
     setDownloadingId(rid);
     try {
-      // Use the shared reportApi which correctly injects the token
       const reportRes = await reportApi.getById(rid);
       let fullReport = reportRes?.report || report;
 
-      // If the API call failed or returned nothing, fall back to raw fetch with forced token
       if (!fullReport || fullReport._id !== rid) {
         const API_URL = import.meta.env.VITE_API_URL || "https://gestureheal-backend.onrender.com/api";
         const storage = JSON.parse(localStorage.getItem('gestureheal-storage') || '{}');
@@ -431,32 +890,110 @@ export default function ReportsPage() {
         fullReport = data?.report || report;
       }
 
-      // ─── PATCH PATIENT SNAPSHOT IF MISSING ────────────────────────────────
-      // Ensure the PDF gets the correct patient data even if the backend returns a stale snapshot.
+      // ─── RESOLVE LIVE PATIENT RECORD ──────────────────────────────────
+      const lookupId = extractPatientLookupId(fullReport);
+
+      let livePatient = null;
+      if (lookupId) {
+        livePatient = await lookupLivePatient(lookupId);
+      }
+
+      const populatedPatient =
+        fullReport.patientId && typeof fullReport.patientId === "object"
+          ? fullReport.patientId
+          : null;
+
+      const sourcePatient = livePatient || populatedPatient;
       const snap = fullReport.patientSnapshot || {};
-      const populated = fullReport.patientId && typeof fullReport.patientId === "object"
-        ? fullReport.patientId
-        : null;
 
-      const snapshotIsEmpty = !snap.name || snap.name === "Unknown Patient" || (snap.age == null && snap.gender == null && !snap.condition);
+      const sourceTherapistName =
+        extractNameFromTherapistValue(sourcePatient?.therapist) ||
+        extractNameFromTherapistValue(sourcePatient?.therapistId) ||
+        extractNameFromTherapistValue(sourcePatient?.therapistName) ||
+        null;
 
-      if (snapshotIsEmpty && populated) {
+      if (sourcePatient) {
         fullReport = {
           ...fullReport,
           patientSnapshot: {
-            name: populated.name || snap.name || "Unknown Patient",
-            age: populated.age ?? snap.age ?? null,
-            gender: populated.gender || snap.gender || null,
-            condition: populated.condition || snap.condition || null,
-            surgeryType: populated.surgeryType || snap.surgeryType || null,
-            surgeryDate: populated.surgeryDate || snap.surgeryDate || null,
-            painLevel: populated.painLevel ?? snap.painLevel ?? null,
-            goals: populated.goals || snap.goals || null,
+            ...snap,
+            name:
+              snap.name && snap.name !== "Unknown Patient"
+                ? snap.name
+                : sourcePatient.name || snap.name || "Unknown Patient",
+            age: snap.age ?? sourcePatient.age ?? null,
+            gender: snap.gender ?? sourcePatient.gender ?? null,
+            condition: snap.condition || sourcePatient.condition || null,
+            surgeryType: snap.surgeryType || sourcePatient.surgeryType || null,
+            surgeryDate: snap.surgeryDate || sourcePatient.surgeryDate || null,
+            painLevel: snap.painLevel ?? sourcePatient.painLevel ?? null,
+            goals: snap.goals || sourcePatient.goals || null,
+            therapistName: snap.therapistName || sourceTherapistName || null,
           },
         };
       }
 
-      // Generate the PDF
+      // ─── RESOLVE THERAPIST NAME ROBUSTLY ──────────────────────────────
+      const candidates = collectTherapistCandidates({
+        report,
+        fullReport,
+        livePatient,
+        populatedPatient,
+      });
+
+      const resolvedTherapistName = await resolveTherapistName(
+        candidates,
+        fetchTherapistById
+      );
+
+      if (!resolvedTherapistName || resolvedTherapistName === "Not Assigned") {
+        console.log("[THERAPIST DEBUG][pdf]", {
+          lookupId,
+          reportTherapistName: report?.therapistName,
+          fullReportTherapistName: fullReport?.therapistName,
+          fullReportTherapist: fullReport?.therapist,
+          fullReportTherapistId: fullReport?.therapistId,
+          patientSnapshot: fullReport?.patientSnapshot,
+          patientId: fullReport?.patientId,
+          livePatient,
+          candidates,
+        });
+      }
+
+      // Never fall back to a raw ObjectId-shaped string.
+      const reportTherapistNameIsGood =
+        typeof report?.therapistName === "string" &&
+        !isLikelyObjectId(report.therapistName) &&
+        report.therapistName !== "Not Assigned" &&
+        report.therapistName.trim();
+
+      const fullReportTherapistNameIsGood =
+        typeof fullReport?.therapistName === "string" &&
+        !isLikelyObjectId(fullReport.therapistName) &&
+        fullReport.therapistName !== "Not Assigned" &&
+        fullReport.therapistName.trim();
+
+      const snapTherapistNameIsGood =
+        typeof fullReport?.patientSnapshot?.therapistName === "string" &&
+        !isLikelyObjectId(fullReport.patientSnapshot.therapistName) &&
+        fullReport.patientSnapshot.therapistName !== "Not Assigned" &&
+        fullReport.patientSnapshot.therapistName.trim();
+
+      const finalName =
+        resolvedTherapistName && resolvedTherapistName !== "Not Assigned"
+          ? resolvedTherapistName
+          : (reportTherapistNameIsGood && report.therapistName.trim()) ||
+            (fullReportTherapistNameIsGood && fullReport.therapistName.trim()) ||
+            (snapTherapistNameIsGood && fullReport.patientSnapshot.therapistName.trim()) ||
+            extractNameFromTherapistValue(fullReport?.therapist) ||
+            extractNameFromTherapistValue(fullReport?.therapistId) ||
+            "Not Assigned";
+
+      fullReport = {
+        ...fullReport,
+        therapistName: finalName,
+      };
+
       await generatePDFReport(fullReport);
       toast.success("PDF downloaded!");
     } catch (err) {
@@ -472,6 +1009,45 @@ export default function ReportsPage() {
       return;
     }
 
+    const populatedPatient =
+      report.patientId && typeof report.patientId === "object"
+        ? report.patientId
+        : null;
+
+    // Use the STRICT name extractor so a raw ObjectId in report.therapistName
+    // is never displayed. ObjectId-shaped strings are dropped here.
+    const reportTherapistNameIsGood =
+      typeof report?.therapistName === "string" &&
+      !isLikelyObjectId(report.therapistName) &&
+      report.therapistName !== "Not Assigned" &&
+      report.therapistName.trim();
+
+    const snapTherapistNameIsGood =
+      typeof report?.patientSnapshot?.therapistName === "string" &&
+      !isLikelyObjectId(report.patientSnapshot.therapistName) &&
+      report.patientSnapshot.therapistName !== "Not Assigned" &&
+      report.patientSnapshot.therapistName.trim();
+
+    const resolvedTherapist =
+      (reportTherapistNameIsGood && report.therapistName.trim()) ||
+      (snapTherapistNameIsGood && report.patientSnapshot.therapistName.trim()) ||
+      extractNameFromTherapistValue(report.therapist) ||
+      extractNameFromTherapistValue(report.therapistId) ||
+      extractNameFromTherapistValue(populatedPatient?.therapistName) ||
+      extractNameFromTherapistValue(populatedPatient?.therapist) ||
+      extractNameFromTherapistValue(populatedPatient?.therapistId) ||
+      "Not Assigned";
+
+    if (!resolvedTherapist || resolvedTherapist === "Not Assigned") {
+      console.log("[THERAPIST DEBUG][view]", {
+        reportTherapistName: report?.therapistName,
+        reportTherapist: report?.therapist,
+        reportTherapistId: report?.therapistId,
+        patientSnapshot: report?.patientSnapshot,
+        patientId: report?.patientId,
+      });
+    }
+
     const safeReport = {
       ...report,
       performance: report.performance || {},
@@ -479,7 +1055,7 @@ export default function ReportsPage() {
       repData: report.repData || [],
       romData: report.romData || null,
       gameType: report.gameType || null,
-      therapistName: report.therapistName || "Not Assigned",
+      therapistName: resolvedTherapist,
       observations: report.observations || "",
       recommendations: report.recommendations || "",
     };
@@ -516,8 +1092,37 @@ export default function ReportsPage() {
 
   if (showDetail && selectedReport) {
     const report = selectedReport;
-    const repData = report.repData || [];
+    const rawRepData = Array.isArray(report.repData) ? report.repData : [];
+    console.log("REPORT REP DATA:", rawRepData);
+    console.log("[REPORT DEBUG] report.patientId      =", report.patientId);
+console.log("[REPORT DEBUG] report.patientId type =", typeof report.patientId);
+console.log("[REPORT DEBUG] report.patientId keys =",
+  report.patientId && typeof report.patientId === "object"
+    ? Object.keys(report.patientId)
+    : null
+);
+console.log("[REPORT DEBUG] report.patientIdRef   =", report.patientIdRef);
+console.log("[REPORT DEBUG] report.patientSnapshot =", report.patientSnapshot);
+console.log("[REPORT DEBUG] report (all keys)      =", Object.keys(report));
+    const repData = rawRepData.map((r, index) => {
+      const rom = toFiniteNumber(r.rom) ?? toFiniteNumber(r.romDegrees);
+
+      const isCorrect = normalizeBoolean(
+        r.isCorrect !== undefined ? r.isCorrect : r.success
+      );
+
+      return {
+        ...r,
+        repNumber: r.repNumber ?? r.rep ?? index + 1,
+        rom,
+        isCorrect,
+      };
+    });
+
     const repSummary = summarizeRepData(repData);
+    const hasPerRepRom = repData.some(
+      (rep) => rep.rom != null && Number.isFinite(Number(rep.rom))
+    );
     const gameName = formatGameType(report.gameType);
 
     const info = getPatientInfo(report);
@@ -535,10 +1140,44 @@ export default function ReportsPage() {
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
 
-    const therapistName = report.therapistName ||
-      report.therapist ||
-      (report.therapistId && therapists[report.therapistId]) ||
+    // Resolve therapist display using the STRICT name extractor.
+    const populatedPatientForView =
+      report.patientId && typeof report.patientId === "object"
+        ? report.patientId
+        : null;
+
+    const reportTherapistNameIsGood =
+      typeof report?.therapistName === "string" &&
+      !isLikelyObjectId(report.therapistName) &&
+      report.therapistName !== "Not Assigned" &&
+      report.therapistName.trim();
+
+    const snapTherapistNameIsGood =
+      typeof report?.patientSnapshot?.therapistName === "string" &&
+      !isLikelyObjectId(report.patientSnapshot.therapistName) &&
+      report.patientSnapshot.therapistName !== "Not Assigned" &&
+      report.patientSnapshot.therapistName.trim();
+
+    const therapistName =
+      (reportTherapistNameIsGood && report.therapistName.trim()) ||
+      (snapTherapistNameIsGood && report.patientSnapshot.therapistName.trim()) ||
+      extractNameFromTherapistValue(report.therapist) ||
+      extractNameFromTherapistValue(report.therapistId) ||
+      extractNameFromTherapistValue(populatedPatientForView?.therapistName) ||
+      extractNameFromTherapistValue(populatedPatientForView?.therapist) ||
+      extractNameFromTherapistValue(populatedPatientForView?.therapistId) ||
       "Not Assigned";
+
+    if (!therapistName || therapistName === "Not Assigned") {
+      console.log("[THERAPIST DEBUG][detail-view]", {
+        reportTherapistName: report?.therapistName,
+        reportTherapist: report?.therapist,
+        reportTherapistId: report?.therapistId,
+        patientSnapshot: report?.patientSnapshot,
+        patientId: report?.patientId,
+        populatedPatient: populatedPatientForView,
+      });
+    }
 
     const patientData = {
       fullName: patientName,
@@ -575,7 +1214,20 @@ export default function ReportsPage() {
             <ArrowLeft size={18} />
             Back to Reports
           </button>
-          <div className="flex gap-2">
+
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => handleRegenerateReport(report)}
+              disabled={generatingId === (report._id || report.reportId || report.id)}
+              className="flex items-center gap-2 bg-violet-600 text-white px-4 py-2 rounded-lg hover:bg-violet-700 font-medium disabled:opacity-60"
+            >
+              {generatingId === (report._id || report.reportId || report.id) ? (
+                <><Loader2 size={16} className="animate-spin" /> Regenerating...</>
+              ) : (
+                <><Activity size={16} /> Regenerate Report</>
+              )}
+            </button>
+
             <button
               onClick={() => window.print()}
               className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-200 font-medium"
@@ -583,12 +1235,13 @@ export default function ReportsPage() {
               <Printer size={16} />
               Print
             </button>
+
             <button
               onClick={() => handleDownloadPDF(report)}
-              disabled={downloadingId === (report._id || report.reportId)}
+              disabled={downloadingId === (report._id || report.reportId || report.id)}
               className="flex items-center gap-2 bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 font-medium disabled:opacity-60"
             >
-              {downloadingId === (report._id || report.reportId) ? (
+              {downloadingId === (report._id || report.reportId || report.id) ? (
                 <><Loader2 size={16} className="animate-spin" /> Downloading...</>
               ) : (
                 <><Download size={16} /> Download PDF</>
@@ -762,10 +1415,28 @@ export default function ReportsPage() {
           {repData.length > 0 && (
             <div className="p-6 md:p-8 border-b border-slate-200">
               <h3 className="text-sm font-semibold text-slate-700 mb-1">Range of Motion per Repetition</h3>
-              <p className="text-xs text-slate-400 mb-3">Per-rep ROM in degrees, recorded during the session ({repData.length} reps).</p>
-              <div className="bg-slate-50 rounded-xl p-4">
-                <MetricsChart data={repData} xKey="repNumber" yKey="rom" label="ROM (°)" color="#0ea5e9" height={250} />
-              </div>
+              {hasPerRepRom ? (
+                <>
+                  <p className="text-xs text-slate-400 mb-3">Per-rep ROM in degrees, recorded during the session ({repData.length} reps).</p>
+                  <div className="bg-slate-50 rounded-xl p-4">
+                    <MetricsChart
+                      data={repData}
+                      xKey="repNumber"
+                      yKey="rom"
+                      label="ROM (°)"
+                      color="#0ea5e9"
+                      height={250}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="bg-slate-50 rounded-xl p-4 border border-slate-200">
+                  <p className="text-sm text-slate-500 flex items-center gap-2">
+                    <Info size={14} className="text-slate-400 flex-shrink-0" />
+                    Per-repetition ROM data was not recorded for this session.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -791,7 +1462,11 @@ export default function ReportsPage() {
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
                   <p className="text-[10px] uppercase tracking-wider text-slate-500">Correct / Incorrect</p>
-                  <p className="text-lg font-bold text-slate-900">{repSummary.correct} / {repSummary.incorrect}</p>
+                  <p className="text-lg font-bold text-slate-900">
+                    {repSummary.correctnessRecorded
+                      ? `${repSummary.correct} / ${repSummary.incorrect}`
+                      : "Not recorded"}
+                  </p>
                 </div>
               </div>
             </div>
@@ -807,19 +1482,19 @@ export default function ReportsPage() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
                   <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Shoulder</p>
-                  <p className="text-sm text-slate-900">Flexion: <span className="font-semibold">{report.romData.shoulder?.flexion ?? 0}°</span></p>
-                  <p className="text-sm text-slate-900">Extension: <span className="font-semibold">{report.romData.shoulder?.extension ?? 0}°</span></p>
+                  <p className="text-sm text-slate-900">Flexion: <span className="font-semibold">{report.romData.shoulder?.flexion != null ? `${report.romData.shoulder.flexion}°` : 'Not recorded'}</span></p>
+                  <p className="text-sm text-slate-900">Extension: <span className="font-semibold">{report.romData.shoulder?.extension != null ? `${report.romData.shoulder.extension}°` : 'Not recorded'}</span></p>
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
                   <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Elbow</p>
-                  <p className="text-sm text-slate-900">Flexion: <span className="font-semibold">{report.romData.elbow?.flexion ?? 0}°</span></p>
-                  <p className="text-sm text-slate-900">Extension: <span className="font-semibold">{report.romData.elbow?.extension ?? 0}°</span></p>
+                  <p className="text-sm text-slate-900">Flexion: <span className="font-semibold">{report.romData.elbow?.flexion != null ? `${report.romData.elbow.flexion}°` : 'Not recorded'}</span></p>
+                  <p className="text-sm text-slate-900">Extension: <span className="font-semibold">{report.romData.elbow?.extension != null ? `${report.romData.elbow.extension}°` : 'Not recorded'}</span></p>
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
                   <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Wrist</p>
-                  <p className="text-sm text-slate-900">Flexion: <span className="font-semibold">{report.romData.wrist?.flexion ?? 0}°</span></p>
-                  <p className="text-sm text-slate-900">Extension: <span className="font-semibold">{report.romData.wrist?.extension ?? 0}°</span></p>
-                  <p className="text-sm text-slate-900">Rotation: <span className="font-semibold">{report.romData.wrist?.rotation ?? 0}°</span></p>
+                  <p className="text-sm text-slate-900">Flexion: <span className="font-semibold">{report.romData.wrist?.flexion != null ? `${report.romData.wrist.flexion}°` : 'Not recorded'}</span></p>
+                  <p className="text-sm text-slate-900">Extension: <span className="font-semibold">{report.romData.wrist?.extension != null ? `${report.romData.wrist.extension}°` : 'Not recorded'}</span></p>
+                  <p className="text-sm text-slate-900">Rotation: <span className="font-semibold">{report.romData.wrist?.rotation != null ? `${report.romData.wrist.rotation}°` : 'Not recorded'}</span></p>
                 </div>
               </div>
             </div>
@@ -847,10 +1522,10 @@ export default function ReportsPage() {
                     {report.romAnalysis.map((ex, i) => (
                       <tr key={i}>
                         <td className="py-2 px-3 font-medium text-slate-900 border border-slate-200">{ex.exerciseName || 'Unknown'}</td>
-                        <td className="py-2 px-3 text-slate-700 border border-slate-200">{ex.averageRom ?? 0}°</td>
-                        <td className="py-2 px-3 text-slate-700 border border-slate-200">{ex.maxRom ?? 0}°</td>
-                        <td className="py-2 px-3 text-slate-700 border border-slate-200">{ex.targetRom ?? 0}°</td>
-                        <td className="py-2 px-3 text-slate-700 border border-slate-200">{ex.percentageAchieved ?? 0}%</td>
+                        <td className="py-2 px-3 text-slate-700 border border-slate-200">{ex.averageRom != null ? `${ex.averageRom}°` : 'Not recorded'}</td>
+                        <td className="py-2 px-3 text-slate-700 border border-slate-200">{ex.maxRom != null ? `${ex.maxRom}°` : 'Not recorded'}</td>
+                        <td className="py-2 px-3 text-slate-700 border border-slate-200">{ex.targetRom != null ? `${ex.targetRom}°` : 'Not recorded'}</td>
+                        <td className="py-2 px-3 text-slate-700 border border-slate-200">{ex.percentageAchieved != null ? `${ex.percentageAchieved}%` : 'Not recorded'}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1103,10 +1778,15 @@ export default function ReportsPage() {
               const accuracy = report.performance?.accuracy ?? 0;
               const accuracyColor = accuracy >= 75 ? "text-emerald-600 bg-emerald-50" : accuracy >= 50 ? "text-amber-600 bg-amber-50" : "text-red-600 bg-red-50";
 
+              const listTherapistNameIsGood =
+                typeof report?.therapistName === "string" &&
+                !isLikelyObjectId(report.therapistName) &&
+                report.therapistName !== "Not Assigned" &&
+                report.therapistName.trim();
+
               return (
                 <div key={rid} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 hover:shadow-md transition-shadow duration-200 cursor-pointer group" onClick={() => handleViewReport(report)}>
                   <div className="flex flex-wrap items-start justify-between gap-4">
-                    {/* Left: game + patient + stats */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2.5 flex-wrap mb-2">
                         <span className="px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 text-xs font-semibold border border-blue-100">
@@ -1125,11 +1805,10 @@ export default function ReportsPage() {
                         <span className={`font-semibold rounded px-1.5 py-0.5 text-xs ${accuracyColor}`}>{accuracy}% accuracy</span>
                         <span className="text-slate-600 font-medium">Reps: <span className="font-semibold text-slate-900">{report.performance?.totalReps ?? 0}</span></span>
                         {averageRomDegrees(report.romAnalysis) > 0 && (<span className="text-slate-600 font-medium">ROM: <span className="font-semibold text-slate-900">{averageRomDegrees(report.romAnalysis)}°</span></span>)}
-                        {report.therapistName && report.therapistName !== "Not Assigned" && (<span className="text-slate-400 text-xs">Therapist: {report.therapistName}</span>)}
+                        {listTherapistNameIsGood && (<span className="text-slate-400 text-xs">Therapist: {report.therapistName.trim()}</span>)}
                       </div>
                     </div>
 
-                    {/* Right: action buttons */}
                     <div className="flex gap-2 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
                       <button onClick={() => handleViewReport(report)} className="text-sm font-semibold px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 bg-white hover:bg-slate-50 transition">View</button>
                       <button onClick={() => handleDownloadPDF(report)} disabled={isDownloading} className="flex items-center gap-1.5 bg-blue-600 text-white px-5 py-2.5 rounded-xl hover:bg-blue-700 font-bold disabled:opacity-60 text-sm transition shadow-md shadow-blue-200">
@@ -1145,4 +1824,4 @@ export default function ReportsPage() {
       </div>
     </div>
   );
-}
+} 

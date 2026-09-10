@@ -178,15 +178,15 @@ const EXERCISE_LIBRARY = {
 };
 
 const CONDITION_EXERCISES = {
-  "rotator cuff":    ["sh_pendulum", "sh_er", "sh_flexion", "sh_abduction", "el_flexion"],
-  "shoulder":        ["sh_pendulum", "sh_flexion", "sh_abduction", "sh_er", "el_flexion"],
-  "acl":             ["kn_extension", "kn_slr", "kn_squat", "hip_abduction", "hip_bridge"],
-  "knee":            ["kn_extension", "kn_flexion", "kn_slr", "kn_squat", "hip_bridge"],
-  "hip":             ["hip_abduction", "hip_flexion", "hip_bridge", "kn_slr", "balance_stand"],
-  "elbow":           ["el_flexion", "el_extension", "wr_flexion_ext", "sh_flexion"],
-  "wrist":           ["wr_flexion_ext", "el_flexion", "el_extension"],
-  "balance":         ["balance_stand", "hip_abduction", "kn_squat", "trunk_rotation"],
-  "default":         ["sh_flexion", "kn_extension", "hip_bridge", "el_flexion", "trunk_rotation"],
+  "rotator cuff": ["sh_pendulum", "sh_er", "sh_flexion", "sh_abduction", "el_flexion"],
+  "shoulder": ["sh_pendulum", "sh_flexion", "sh_abduction", "sh_er", "el_flexion"],
+  "acl": ["kn_extension", "kn_slr", "kn_squat", "hip_abduction", "hip_bridge"],
+  "knee": ["kn_extension", "kn_flexion", "kn_slr", "kn_squat", "hip_bridge"],
+  "hip": ["hip_abduction", "hip_flexion", "hip_bridge", "kn_slr", "balance_stand"],
+  "elbow": ["el_flexion", "el_extension", "wr_flexion_ext", "sh_flexion"],
+  "wrist": ["wr_flexion_ext", "el_flexion", "el_extension"],
+  "balance": ["balance_stand", "hip_abduction", "kn_squat", "trunk_rotation"],
+  "default": ["sh_flexion", "kn_extension", "hip_bridge", "el_flexion", "trunk_rotation"],
 };
 
 // Kept for the standalone /api/exercises browsing route (exerciseController.js).
@@ -232,17 +232,42 @@ const GAMES_LIBRARY = {
     description: "Swipe through falling objects to build wrist/forearm mobility and coordination.",
   },
 };
+// Clinical ROM targets for game-based rehab entries, keyed by the exact
+// session.gameType string each game records (NOT GAMES_LIBRARY's hyphenated
+// id used for frontend routing -- sessions record underscores, e.g.
+// "precision_reach"). Keyed second by a lowercased condition substring,
+// matched the same way getExercisesForCondition() matches CONDITION_EXERCISES.
+//
+// Intentionally empty until a clinician supplies a real, validated value.
+// Do NOT populate with gameplay constants (e.g. Precision Reach's
+// LAUNCH_ANGLE of 145) or values copied from EXERCISE_LIBRARY.
+const GAME_CLINICAL_TARGETS = {
+  "precision_reach": {
+    // "shoulder": <clinician-approved degrees>,
+  },
+};
 
+function getGameTargetRom(gameType, condition = "") {
+  const table = GAME_CLINICAL_TARGETS[gameType];
+  if (!table) return null;
+  const lower = (condition || "").toLowerCase();
+  for (const [key, value] of Object.entries(table)) {
+    if (lower.includes(key) && typeof value === "number" && value > 0) {
+      return value;
+    }
+  }
+  return null;
+}
 // Condition -> recommended games (per current clinical mapping).
 const CONDITION_GAMES = {
-  "hand surgery recovery":       ["precision-reach", "canvas-air", "catch-flex"],
-  "stroke rehabilitation":       ["precision-reach", "cloud-reach", "catch-flex"],
-  "fracture recovery":           ["precision-reach", "cloud-reach", "canvas-air"],
+  "hand surgery recovery": ["precision-reach", "canvas-air", "catch-flex"],
+  "stroke rehabilitation": ["precision-reach", "cloud-reach", "catch-flex"],
+  "fracture recovery": ["precision-reach", "cloud-reach", "canvas-air"],
   "nerve injury rehabilitation": ["canvas-air", "catch-flex", "precision-reach"],
-  "wrist rehabilitation":        ["rehab-slicer", "canvas-air", "catch-flex"],
-  "parkinson's":                 ["catch-flex", "canvas-air", "cloud-reach"],
-  "rotator cuff":                ["cloud-reach", "precision-reach", "rehab-slicer"],
-  "default":                     ["precision-reach", "canvas-air", "catch-flex"],
+  "wrist rehabilitation": ["rehab-slicer", "canvas-air", "catch-flex"],
+  "parkinson's": ["catch-flex", "canvas-air", "cloud-reach"],
+  "rotator cuff": ["cloud-reach", "precision-reach", "rehab-slicer"],
+  "default": ["precision-reach", "canvas-air", "catch-flex"],
 };
 
 function getGamesForCondition(condition = "") {
@@ -289,6 +314,25 @@ function generateRehabPlan(condition = "", painLevel = 3, affectedSide = "n/a") 
       videoUrl: ex.videoUrl || "",
     }));
 
+    // Game-based entry for Precision Reach. Scope limited to this one game
+    // per the current task -- other games' actual session.gameType strings
+    // haven't been confirmed against GAMES_LIBRARY's hyphenated ids, so
+    // they are not added here yet. targetRom is included only if a real
+    // clinical value exists in GAME_CLINICAL_TARGETS; otherwise the field
+    // is omitted entirely (never defaulted, never fabricated).
+    const precisionReachTargetRom = getGameTargetRom("precision_reach", condition);
+    dayExercises.push({
+      exerciseId: "precision_reach",
+      name: "Precision Reach",
+      gameType: "precision_reach",
+      sets: 3,
+      reps: 10,
+      holdSeconds: 0,
+      ...(precisionReachTargetRom != null ? { targetRom: precisionReachTargetRom } : {}),
+      description: "In-app gesture game.",
+      videoUrl: "",
+    });
+
     plan.push({
       day,
       exercises: dayExercises,
@@ -299,7 +343,6 @@ function generateRehabPlan(condition = "", painLevel = 3, affectedSide = "n/a") 
 
   return plan;
 }
-
 module.exports = {
   EXERCISE_LIBRARY,
   CONDITION_EXERCISES,
@@ -307,5 +350,7 @@ module.exports = {
   GAMES_LIBRARY,
   CONDITION_GAMES,
   getGamesForCondition,
+  GAME_CLINICAL_TARGETS,
+  getGameTargetRom,
   generateRehabPlan,
 };

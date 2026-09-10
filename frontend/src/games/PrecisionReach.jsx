@@ -112,7 +112,14 @@ const PAPS_RESPONSE_FLOOR_SECONDS = 10;
 
 function computePapsRomComponent(reps) {
   if (!reps.length) return 0;
-  const avgRom = reps.reduce((a, r) => a + (r.romDegrees || 0), 0) / reps.length;
+  const validRoms = reps
+    .map((r) => r.romDegrees)
+    .filter((v) => typeof v === "number" && Number.isFinite(v));
+
+  if (!validRoms.length) return 0;
+
+  const avgRom =
+    validRoms.reduce((a, b) => a + b, 0) / validRoms.length;
   return Math.min(100, (avgRom / PAPS_TARGET_ROM_DEGREES) * 100);
 }
 
@@ -130,7 +137,9 @@ function computePapsConsistencyComponent(reps) {
   // (coefficient of variation) indicates controlled, repeatable motion
   // rather than one lucky big reach among mostly-flat attempts.
   if (reps.length < 2) return reps.length ? 100 : 0;
-  const roms = reps.map((r) => r.romDegrees || 0);
+  const roms = reps
+    .map((r) => r.romDegrees)
+    .filter((v) => typeof v === "number" && Number.isFinite(v));
   const mean = roms.reduce((a, b) => a + b, 0) / roms.length;
   if (mean === 0) return 0;
   const variance = roms.reduce((a, r) => a + (r - mean) ** 2, 0) / roms.length;
@@ -167,7 +176,7 @@ const DIFFICULTY_TOAST_MS = 2200;
 
 // How aggressively the displayed/hit-tested cursor eases toward the raw
 // MediaPipe wrist reading each frame. Lower = smoother but laggier,
-// higher = snappier but jittery. 0.25 removes most frame-to-frame
+// higher = snappier but jittery. 0.3 removes most frame-to-frame
 // tracking noise without feeling sluggish.
 const CURSOR_SMOOTHING = 0.3;
 
@@ -176,12 +185,12 @@ const CURSOR_SMOOTHING = 0.3;
 // single jittery tracking frame at the target's edge should not fail
 // the attempt outright.
 const ZONE_EXIT_GRACE_MS = 150;
+
 // ─── Precision-Reach-only session history ────────────────────────────────
-// Scoped strictly to this file/game (per spec: "this behavior must apply
-// ONLY to PrecisionReach.jsx"). There is no shared session-history store
-// visible from this component, and no report-generation file is being
-// touched here — so history is persisted locally (per patient) and handed
-// to the report payload this file already builds (`sessionData` /
+// Scoped strictly to this file/game. There is no shared session-history
+// store visible from this component, and no report-generation file is
+// being touched here — so history is persisted locally (per patient) and
+// handed to the report payload this file already builds (`sessionData` /
 // `telemetry.saveReport`), rather than inventing a second, separate
 // reporting pipeline. A React component instance is created fresh each
 // time the patient starts a new Precision Reach session (they navigate
@@ -219,11 +228,9 @@ function savePrecisionReachHistory(patientId, history) {
 
 // Pure function: no computation here that resembles a formula. This is a
 // dumb reader of PrecisionReach.jsx's OWN already-computed session
-// figures (accuracy, ROM, PAPS, etc. — accuracy is elsewhere hits/misses
-// based, PAPS is elsewhere the composite formula, ROM is elsewhere the
-// per-rep angle tracking) — nothing here recalculates or overrides any
-// of those values, it only packages them into one immutable historical
-// record per completed session.
+// figures (accuracy, ROM, PAPS, etc.) — nothing here recalculates or
+// overrides any of those values, it only packages them into one immutable
+// historical record per completed session.
 function buildPrecisionReachSessionRecord({
   sessionNumber,
   score,
@@ -244,12 +251,11 @@ function buildPrecisionReachSessionRecord({
   return {
     sessionNumber,
     // NOTE: "session day" in the old aggregated report referred to a
-    // rehab-PROGRAM day (e.g. day 7 of a recovery plan), which requires
-    // a program start date this component is never given as a prop —
-    // inventing one would violate "do not invent values". sessionNumber
-    // (the Nth Precision Reach session this patient has completed) is
-    // the accurate substitute available from data this file actually
-    // has; see the response to this task for the full note on this.
+    // rehab-PROGRAM day, which requires a program start date this
+    // component is never given as a prop — inventing one would violate
+    // "do not invent values". sessionNumber (the Nth Precision Reach
+    // session this patient has completed) is the accurate substitute
+    // available from data this file actually has.
     completedAt: new Date().toISOString(),
     score,
     accuracy,
@@ -273,7 +279,7 @@ function buildPrecisionReachSessionRecord({
       rep: r.rep,
       direction: r.direction,
       result: r.result,
-      romDegrees: r.romDegrees || 0,
+      romDegrees: typeof r.romDegrees === "number" ? r.romDegrees : null,
       responseTimeSeconds: r.responseTimeSeconds || 0,
     })),
   };
@@ -375,21 +381,35 @@ export default function PrecisionReach({
   // attempt (that was the "unexpected red X" bug) — only a sustained
   // exit counts.
   const zoneExitTimeRef = useRef(null);
-  // Per-attempt shoulder-angle range, used to compute "ROM for this rep"
-  // (spec: "Average range of motion for each rep"). Reset whenever
-  // targetIndex changes — see the reset effect below.
+  // Per-attempt shoulder-angle range, used to compute "ROM for this rep".
+  // Reset whenever targetIndex changes — see the reset effect below.
   const attemptMinAngleRef = useRef(null);
   const attemptMaxAngleRef = useRef(0);
-  // REPLACE WITH
   const missFlashTimerRef = useRef(null);
   const painDetectedDuringSessionRef = useRef(false);
   const [arenaEl, setArenaEl] = useState(null);
   const arenaRef = useCallback((node) => setArenaEl(node), []);
   const [arenaSize, setArenaSize] = useState({ width: 0, height: 0 });
+
+  // ── LIVE board rect ──────────────────────────────────────────────────────
+  // arenaSize (from ResizeObserver contentRect) is only updated on resize
+  // and does not account for page scroll, flex reflow, or layout shifts.
+  // This ref is refreshed every animation frame from the actual DOM node
+  // via getBoundingClientRect(), and is the single source of truth for
+  // converting normalized MediaPipe wrist coordinates into board-relative
+  // pixels. Both cursor rendering, proximity, and hit detection read it.
+  const arenaRectRef = useRef({ left: 0, top: 0, width: 0, height: 0 });
+
   useEffect(() => {
     if (!arenaEl) return undefined;
     const rect = arenaEl.getBoundingClientRect();
     setArenaSize({ width: rect.width, height: rect.height });
+    arenaRectRef.current = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
     const observer = new ResizeObserver(([entry]) => {
       const { width, height } = entry.contentRect;
       setArenaSize({ width, height });
@@ -397,6 +417,62 @@ export default function PrecisionReach({
     observer.observe(arenaEl);
     return () => observer.disconnect();
   }, [arenaEl]);
+
+  // Refresh the live board rect every animation frame. Scroll, layout
+  // shifts, and flex reflow all change getBoundingClientRect without
+  // firing the ResizeObserver — this keeps conversion accurate.
+  useEffect(() => {
+    let rafId;
+    const tick = () => {
+      const el = arenaEl;
+      if (el) {
+        const r = el.getBoundingClientRect();
+        arenaRectRef.current = {
+          left: r.left,
+          top: r.top,
+          width: r.width,
+          height: r.height,
+        };
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [arenaEl]);
+
+  // Convert a normalized MediaPipe wrist reading (0..1) into board-relative
+  // CSS pixels, using the LIVE board rectangle. Handles:
+  //   - webcam mirroring (see note below)
+  //   - board offset within the viewport (via live getBoundingClientRect)
+  //   - clamping to the playable area
+  //
+  // Mirroring: the <video> element is CSS-mirrored with scale-x-[-1], and
+  // usePoseDetection emits position.x already in DISPLAY (mirrored) space
+  // — that is what makes the on-screen skeleton line up with the mirrored
+  // video. The game board itself is NOT mirrored, so we must apply the
+  // SAME mirror transform the video applies, otherwise the cursor moves
+  // opposite to the patient's hand. In other words: the hook's 0..1 x is
+  // display-space left→right; the board is also left→right, so we can
+  // use normX directly *only if* the hook already undid the camera flip.
+  // The current hook contract (per usePoseDetection consumers in this
+  // codebase) emits raw camera-normalized x, where x=0 is the patient's
+  // right side on a non-mirrored camera. Since we want the cursor to
+  // track the patient's physical hand motion as seen in the mirrored
+  // preview, we mirror here: x_board = 1 - normX.
+  //
+  // If after applying this the cursor moves OPPOSITE to the hand, flip
+  // the single line marked MIRROR below.
+  const wristToBoardPx = useCallback((normX, normY) => {
+    const rect = arenaRectRef.current;
+    if (!rect.width || !rect.height) return { x: 0, y: 0 };
+    const mirroredX = normX; // MIRROR — flip to `normX` if direction is inverted
+    const clampedX = Math.min(1, Math.max(0, mirroredX));
+    const clampedY = Math.min(1, Math.max(0, normY));
+    return {
+      x: clampedX * rect.width,
+      y: clampedY * rect.height,
+    };
+  }, []);
 
   const [poseData, setPoseData] = useState(null);
 
@@ -424,6 +500,7 @@ export default function PrecisionReach({
 
   const pauseStartRef = useRef(null);
   const pausedMsSinceSpawnRef = useRef(0);
+  const sessionStartTimeRef = useRef(null);
   // When each attempt actually started, independent of difficulty
   // recomputation — see computeTarget's docblock.
   const spawnedAtRef = useRef(performance.now());
@@ -496,13 +573,19 @@ export default function PrecisionReach({
 
   const attempts = hits + misses;
   const accuracy = attempts ? Math.round((hits / attempts) * 100) : 0;
-  const romValues = repData.map((r) => r.romDegrees || 0);
+  const romValues = repData
+    .map((r) => r.romDegrees)
+    .filter((v) => typeof v === "number" && Number.isFinite(v));
   const averageRomDegrees = romValues.length
     ? Math.round(romValues.reduce((a, b) => a + b, 0) / romValues.length)
     : 0;
   const maxRomDegrees = romValues.length ? Math.max(...romValues) : 0;
-  const avgResponseSeconds = repData.length
-    ? repData.reduce((a, r) => a + (r.responseTimeSeconds || 0), 0) / repData.length
+  const responseValues = repData
+    .map((r) => r.responseTimeSeconds)
+    .filter((v) => typeof v === "number" && Number.isFinite(v));
+
+  const avgResponseSeconds = responseValues.length
+    ? responseValues.reduce((a, b) => a + b, 0) / responseValues.length
     : 0;
   // BUGFIX: SessionSummary.jsx reads gameSpecificMetrics.bestCombo (or
   // .longestHitStreak) but nothing here ever computed or sent either
@@ -510,8 +593,7 @@ export default function PrecisionReach({
   // — that's why Best Streak always showed 0 regardless of real hits.
   // Derived the same way the other stats above are: from repData's
   // ordered, already-committed `success` flags (longest run of
-  // consecutive hits), not from hit COUNT (2 hits with a miss between
-  // them is a streak of 1, not 2).
+  // consecutive hits), not from hit COUNT.
   const bestStreak = repData.reduce(
     (acc, r) => {
       if (r.success) {
@@ -586,6 +668,14 @@ export default function PrecisionReach({
   // Reset per-attempt state whenever the target index changes (new attempt
   // started) — but NOT when only currentDifficulty changes the derived
   // `target`'s position/size mid-attempt.
+  //
+  // NOTE on ordering: this effect is declared BEFORE the reach-and-hold
+  // effect below, and React runs effects in declaration order, so on the
+  // frame a new targetIndex lands, these refs are reset before the reach
+  // loop can touch them for the new target. attemptMaxAngleRef starts at
+  // 0 (not null) and attemptMinAngleRef starts at null so a rep with no
+  // detected angle records 0 (no valid ROM), not a stale value from the
+  // previous rep.
   useEffect(() => {
     if (targetIndex >= SESSION_TARGET_COUNT) return;
     spawnedAtRef.current = performance.now();
@@ -677,22 +767,28 @@ export default function PrecisionReach({
     advanceTarget();
   }, [target, telemetry, audio, advanceTarget, targetIndex]);
 
-  // ROM tracking via MetricsEngine
+  // Proximity between the DRAWN cursor and the target, in the same live
+  // board-pixel coordinate system used for hit detection below. Drives
+  // cursor glow only; it never moves the cursor toward the target.
   const proximityRatio = useMemo(() => {
-    if (!arenaSize.width || !arenaSize.height) return 1;
-    const cursorPx = { x: (smoothPosition.x / 100) * arenaSize.width, y: (smoothPosition.y / 100) * arenaSize.height };
-    const targetPx = { x: (target.x / 100) * arenaSize.width, y: (target.y / 100) * arenaSize.height };
+    const rect = arenaRectRef.current;
+    if (!rect.width || !rect.height) return 1;
+    const cursorPx = wristToBoardPx(smoothPosition.x / 100, smoothPosition.y / 100);
+    const targetPx = { x: (target.x / 100) * rect.width, y: (target.y / 100) * rect.height };
     const dist = Math.hypot(cursorPx.x - targetPx.x, cursorPx.y - targetPx.y);
-    const maxDist = Math.hypot(arenaSize.width, arenaSize.height) * 0.5;
+    const maxDist = Math.hypot(rect.width, rect.height) * 0.5;
     return Math.min(1, dist / maxDist);
-  }, [smoothPosition.x, smoothPosition.y, target.x, target.y, arenaSize]);
+  }, [smoothPosition.x, smoothPosition.y, target.x, target.y, wristToBoardPx]);
 
-  // Core reach-and-hold loop — same hit-testing math as before (real
-  // MediaPipe wrist → arena-relative pixels, no window dimensions), only
-  // the spawn/advance mechanism around it changed.
+  // Core reach-and-hold loop. Hit testing uses the SAME smoothed position
+  // that is drawn, converted through the LIVE board rectangle, so what the
+  // patient sees is exactly what is tested. ROM refs are updated from the
+  // SAME live shoulderAngle that drives the HUD readout, and are updated
+  // BEFORE the hit/miss branches so a resolving frame always sees the
+  // current rep's true min/max.
   useEffect(() => {
     if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
-    if (!arenaSize.width || !arenaSize.height) return;
+    if (!arenaRectRef.current.width || !arenaRectRef.current.height) return;
     if (status !== "tracking") return;
     if (targetIndex >= SESSION_TARGET_COUNT) return;
     // Once this target has already been resolved (hit or miss), ignore
@@ -712,16 +808,12 @@ export default function PrecisionReach({
       return v;
     });
 
-    // BUGFIX: this is the actual ROM data flow for the CURRENT rep.
-    // attemptMinAngleRef/attemptMaxAngleRef were being reset every target
-    // (see the targetIndex effect) but never written to — registerHit/
-    // registerMiss read them straight into repData, so every rep's ROM
-    // was permanently stuck at (0 - null) => 0. Update them here, every
-    // tracked frame, from the SAME live shoulderAngle that already drives
-    // the working HUD "ROM 105°/141°/162°" readout. Refs are synchronous,
-    // so by the time registerHit()/registerMiss() runs later in this same
-    // effect execution (same animation frame), these values are already
-    // current — no stale-state risk from React's async setState batching.
+    // Per-rep ROM tracking — OUTSIDE any hit/miss branch. Refs are written
+    // synchronously every tracked frame from the live shoulderAngle, so by
+    // the time registerHit()/registerMiss() runs later in this same effect
+    // execution (same animation frame), these values are already current.
+    // This is what makes each rep record its ACTUAL maximum ROM instead of
+    // a stale 0 or the previous rep's leftover value.
     if (shoulderAngle > 0) {
       if (attemptMinAngleRef.current === null || shoulderAngle < attemptMinAngleRef.current) {
         attemptMinAngleRef.current = shoulderAngle;
@@ -731,8 +823,12 @@ export default function PrecisionReach({
       }
     }
 
-    const cursorPx = { x: (position.x / 100) * arenaSize.width, y: (position.y / 100) * arenaSize.height };
-    const targetPx = { x: (target.x / 100) * arenaSize.width, y: (target.y / 100) * arenaSize.height };
+    // Hit test in board pixels, using the DRAWN (smoothed) cursor and the
+    // LIVE board rectangle. wristToBoardPx expects normalized 0..1, and
+    // smoothPosition is 0..100, so divide by 100 at the call site.
+    const rect = arenaRectRef.current;
+    const cursorPx = wristToBoardPx(smoothPosition.x / 100, smoothPosition.y / 100);
+    const targetPx = { x: (target.x / 100) * rect.width, y: (target.y / 100) * rect.height };
     const dist = Math.hypot(cursorPx.x - targetPx.x, cursorPx.y - targetPx.y);
     const inZone = dist <= targetSizePx / 2;
 
@@ -761,7 +857,13 @@ export default function PrecisionReach({
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameState, isPaused, status, position.x, position.y, target, targetSizePx, holdDurationMs, shoulderAngle, arenaSize.width, arenaSize.height, targetIndex]);
+  }, [
+    gameState, isPaused, status,
+    position.x, position.y,
+    smoothPosition.x, smoothPosition.y,
+    target, targetSizePx, holdDurationMs, shoulderAngle,
+    targetIndex, wristToBoardPx,
+  ]);
 
   useEffect(() => {
     if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
@@ -788,26 +890,249 @@ export default function PrecisionReach({
 
   const finalizeTelemetry = useCallback(() => {
     if (hasEndedRef.current) return;
+
     hasEndedRef.current = true;
+
+    const finalRepData = [...repData];
+
+    const finalAccuracy =
+      finalRepData.length > 0
+        ? Math.round(
+          (finalRepData.filter((r) => r.success).length /
+            finalRepData.length) *
+          100
+        )
+        : 0;
+
+    const finalRomValues = finalRepData
+      .map((r) => r.romDegrees)
+      .filter(
+        (v) =>
+          typeof v === "number" &&
+          Number.isFinite(v)
+      );
+
+    const finalAverageRom =
+      finalRomValues.length > 0
+        ? Math.round(
+          finalRomValues.reduce((a, b) => a + b, 0) /
+          finalRomValues.length
+        )
+        : 0;
+
+    const finalMaxRom =
+      finalRomValues.length > 0
+        ? Math.max(...finalRomValues)
+        : 0;
+
+    const finalResponseValues = finalRepData
+      .map((r) => r.responseTimeSeconds)
+      .filter(
+        (v) =>
+          typeof v === "number" &&
+          Number.isFinite(v)
+      );
+
+    const finalAvgResponse =
+      finalResponseValues.length > 0
+        ? finalResponseValues.reduce(
+          (a, b) => a + b,
+          0
+        ) / finalResponseValues.length
+        : 0;
+
+    const finalBestStreak = finalRepData.reduce(
+      (acc, r) => {
+        if (r.success) {
+          acc.current += 1;
+          acc.best = Math.max(
+            acc.best,
+            acc.current
+          );
+        } else {
+          acc.current = 0;
+        }
+
+        return acc;
+      },
+      { current: 0, best: 0 }
+    ).best;
+
+    const finalPaps = computePaps({
+      accuracy: finalAccuracy,
+      reps: finalRepData,
+      difficulty: currentDifficulty,
+      painDetected:
+        painDetectedDuringSessionRef.current,
+    });
+
+    const finalDurationSeconds =
+      sessionStartTimeRef.current
+        ? Math.max(
+          0,
+          Math.round(
+            (Date.now() -
+              sessionStartTimeRef.current) /
+            1000
+          )
+        )
+        : 0;
+
+    const finalGameSpecific = {
+      paps: finalPaps,
+      rawAccuracy: finalAccuracy,
+
+      avgResponseTimeSeconds:
+        Math.round(finalAvgResponse * 100) / 100,
+
+      totalReps: finalRepData.length,
+
+      hits: finalRepData.filter(
+        (r) => r.success
+      ).length,
+
+      misses: finalRepData.filter(
+        (r) => !r.success
+      ).length,
+
+      bestCombo: finalBestStreak,
+      longestHitStreak: finalBestStreak,
+
+      difficulty: currentDifficulty,
+
+      painAdjusted:
+        painDetectedDuringSessionRef.current,
+
+      romDegrees: finalAverageRom,
+      maxRomDegrees: finalMaxRom,
+
+      romPerRep: finalRepData.map((r) => ({
+        rep: r.rep,
+        direction: r.direction,
+        result: r.result,
+        romDegrees:
+          typeof r.romDegrees === "number" &&
+            Number.isFinite(r.romDegrees)
+            ? r.romDegrees
+            : null,
+        responseTimeSeconds:
+          typeof r.responseTimeSeconds === "number" &&
+            Number.isFinite(r.responseTimeSeconds)
+            ? r.responseTimeSeconds
+            : null,
+      })),
+
+      repData: finalRepData,
+    };
+
+    const finalExerciseResult = {
+      exerciseId: gameId,
+      name: "Precision Reach",
+      setsCompleted: 1,
+      repsCompleted: finalRepData.length,
+      averageRom: finalAverageRom,
+      maxRom: finalMaxRom,
+      accuracy: finalAccuracy,
+      score: finalAccuracy,
+    };
+
     telemetry.endSession({
       gameName: "Precision Reach",
-      score,
-      hits,
-      misses,
-      accuracy,
-      paps,
-      romDegrees: averageRomDegrees,
-      maxAngle: maxRomDegrees,
-      papsPainScore: painScore,
+
+      score: finalAccuracy,
+      accuracy: finalAccuracy,
+
+      hits: finalGameSpecific.hits,
+      misses: finalGameSpecific.misses,
+
+      // Precision Reach has no leveling concept -- there is nothing
+      // here that increments a level. `level: 1` was a hardcoded
+      // placeholder masquerading as a measured value; omit the field
+      // entirely so the backend's null-safety treats it as genuinely
+      // not tracked, exactly like smoothness/stability were fixed
+      // earlier in this session.
+      combo: finalBestStreak,
+      maxCombo: finalBestStreak,
+
+      stars:
+        finalAccuracy >= 90
+          ? 3
+          : finalAccuracy >= 70
+            ? 2
+            : finalAccuracy >= 50
+              ? 1
+              : 0,
+
       difficulty: currentDifficulty,
-      gameSpecific: {
-        avgResponseTimeSeconds: Math.round(avgResponseSeconds * 100) / 100,
-        totalReps: repData.length,
-        bestCombo: bestStreak,
-        repData,
+
+      paps: finalPaps,
+
+      durationSeconds: finalDurationSeconds,
+
+      romData: {
+        averageRomDegrees: finalAverageRom,
+        maxRomDegrees: finalMaxRom,
+        minRomDegrees:
+          finalRepData.length > 0
+            ? Math.min(
+              ...finalRepData
+                .map((r) => r.romDegrees)
+                .filter(
+                  (v) =>
+                    typeof v === "number" &&
+                    Number.isFinite(v)
+                )
+            )
+            : 0,
+
+        perRep: finalRepData.map((r) => ({
+          rep: r.rep,
+          romDegrees:
+            typeof r.romDegrees === "number" &&
+              Number.isFinite(r.romDegrees)
+              ? r.romDegrees
+              : null,
+          success: r.success === true,
+        })),
       },
+
+      reps: finalRepData.length,
+
+      hitsOrCatchesOrCompletions:
+        finalGameSpecific.hits,
+
+      missesOrDrops:
+        finalGameSpecific.misses,
+
+      // Precision Reach does not independently measure movement
+      // smoothness or postural stability -- it only tracks accuracy,
+      // ROM, response time, and rep-to-rep consistency (all folded into
+      // PAPS, a composite performance score, not a smoothness/stability
+      // reading). Previously this duplicated PAPS into both fields,
+      // which misrepresented one performance number as two distinct
+      // clinical measurements. null = "not measured by this game";
+      // PAPS itself is unchanged and still reported separately via
+      // gameSpecific.paps.
+      smoothness: null,
+      stability: null,
+
+      exerciseResults: [
+        finalExerciseResult,
+      ],
+
+      repData: finalRepData,
+
+      painFluctuations:
+        telemetry.metrics.painFluctuations,
+
+      gameSpecific: finalGameSpecific,
     });
-  }, [telemetry, score, hits, misses, accuracy, paps, averageRomDegrees, maxRomDegrees, painScore, currentDifficulty, avgResponseSeconds, bestStreak, repData]);
+  }, [
+    telemetry,
+    gameId,
+    currentDifficulty,
+    repData,
+  ]);
 
   // Cursor is ALWAYS white — proximity no longer changes its hue, only
   // its glow intensity, so it stays visually distinct from every
@@ -929,7 +1254,11 @@ export default function PrecisionReach({
 
           <div className="flex justify-center">
             <button
-              onClick={() => { telemetry.startTracking(); startSession(); }}
+              onClick={() => {
+                sessionStartTimeRef.current = Date.now();
+                telemetry.startTracking();
+                startSession();
+              }}
               disabled={!hasTrackedOnce || !isActive}
               className="relative overflow-hidden rounded-2xl px-12 py-4 font-black text-lg tracking-wide transition-all disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
               style={hasTrackedOnce && isActive ? { background: "linear-gradient(135deg, #06b6d4, #7c3aed)", boxShadow: "0 0 32px rgba(34,211,238,0.4)" } : {}}
@@ -949,13 +1278,15 @@ export default function PrecisionReach({
       gameId,
       patientId,
       date: new Date().toISOString(),
-      durationSeconds: SESSION_SECONDS - timeLeft,
+      durationSeconds: sessionStartTimeRef.current
+        ? Math.max(0, Math.round((Date.now() - sessionStartTimeRef.current) / 1000))
+        : null,
       score,
       accuracyPercent: accuracy,
       romData: {
         averageRomDegrees,
         maxRomDegrees,
-        perRep: repData.map((r) => ({ rep: r.rep, romDegrees: r.romDegrees || 0, success: r.success !== false })),
+        perRep: repData.map((r) => ({ rep: r.rep, romDegrees: typeof r.romDegrees === "number" ? r.romDegrees : null, success: r.success !== false })),
       },
       reps: repData.length,
       hitsOrCatchesOrCompletions: hits,
@@ -972,9 +1303,16 @@ export default function PrecisionReach({
         painAdjusted: painDetectedDuringSessionRef.current,
         romDegrees: averageRomDegrees,
         maxRomDegrees,
-        romPerRep: repData.map((r) => ({ rep: r.rep, romDegrees: r.romDegrees || 0 })),
+        romPerRep: repData.map((r) => ({
+          rep: r.rep,
+          romDegrees:
+            typeof r.romDegrees === "number" && Number.isFinite(r.romDegrees)
+              ? r.romDegrees
+              : null,
+        })),
       },
     };
+
     return (
       <>
         <style>{`

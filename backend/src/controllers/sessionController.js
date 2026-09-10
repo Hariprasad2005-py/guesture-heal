@@ -6,6 +6,45 @@ const Patient = require("../models/Patient");
 const reportController = require("./reportController");
 
 // ─────────────────────────────────────────────────────────────
+// REP CORRECTNESS NORMALIZATION
+// ─────────────────────────────────────────────────────────────
+// Session.js's repDataSchema declares `isCorrect: { type: Boolean,
+// default: true }`. Exercise-based games (RehabSlicer, CatchFlex) send
+// `isCorrect` explicitly, so the default never applies to them. Target-
+// based games (Precision Reach) never send `isCorrect` at all -- they
+// send `success` -- so on every save Mongoose backfills isCorrect: true
+// for every one of their reps regardless of the real outcome: schema
+// defaults apply to any declared field missing from the input, whether
+// or not the schema is `strict: false`. Every downstream consumer
+// (reportController.extractRepData, reportGenerator.js, ReportsPage.jsx)
+// falls back to `success` only when `isCorrect` is `undefined`, but a
+// saved/reloaded document's isCorrect is never actually undefined --
+// masking every real failure as a success (this is why a session with
+// 40% accuracy could still show 5/0 correct-incorrect per rep).
+//
+// This runs on the incoming payload BEFORE it's assigned to the Mongoose
+// document path, so an explicit `isCorrect: false` here overrides the
+// schema default (defaults only apply when the field is entirely absent
+// from the input). Reps that already specify `isCorrect` -- every other
+// game -- pass through completely untouched. A rep with neither field
+// is also left untouched; nothing here fabricates a value that was
+// never actually sent.
+function normalizeRepCorrectness(repData) {
+  if (!Array.isArray(repData)) return repData;
+  return repData.map((rep) => {
+    if (
+      rep &&
+      typeof rep === "object" &&
+      rep.isCorrect === undefined &&
+      typeof rep.success === "boolean"
+    ) {
+      return { ...rep, isCorrect: rep.success };
+    }
+    return rep;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
 // THERAPIST SESSION ENDPOINTS
 // ─────────────────────────────────────────────────────────────
 
@@ -16,12 +55,10 @@ exports.getSessionsByPatient = async (req, res, next) => {
     const isAdmin = req.user.role === "admin";
     const isTherapist = req.user.role === "therapist";
 
-    // Build the patient-lookup query. Admins and therapists can look up any
-    // patient by ID; other roles are restricted to their own assigned patients.
-    // Previously therapists had { therapistId: req.user._id } applied here,
-    // which caused findOne() to return null (and a 404) for self-registered
-    // patients whose therapistId field is null or set to a different therapist.
-    const query = (isAdmin || isTherapist) ? {} : { therapistId: req.user._id };
+    const query =
+      isAdmin || isTherapist
+        ? {}
+        : { therapistId: req.user._id };
 
     if (patientId.startsWith("GH-")) {
       query.patientId = patientId;
@@ -45,7 +82,9 @@ exports.getSessionsByPatient = async (req, res, next) => {
       });
     }
 
-    const sessions = await Session.find({ patientId: patient._id })
+    const sessions = await Session.find({
+      patientId: patient._id,
+    })
       .sort({ createdAt: -1 })
       .populate("reportId", "reportNumber");
 
@@ -68,7 +107,10 @@ exports.getSession = async (req, res, next) => {
     }
 
     const session = await Session.findById(req.params.id)
-      .populate("patientId", "name patientId age gender condition surgeryType surgeryDate goals painLevel therapistId")
+      .populate(
+        "patientId",
+        "name patientId age gender condition surgeryType surgeryDate goals painLevel therapistId rehabPlan"
+      )
       .populate("reportId");
 
     if (
@@ -81,42 +123,77 @@ exports.getSession = async (req, res, next) => {
       });
     }
 
-    // If repData is nested in gameSpecific, extract it to root level
-    let formattedSession = session.toObject();
+    const formattedSession = session.toObject();
 
-    // Extract repData from gameSpecific if it exists and root repData is empty
-    if (
-      formattedSession.gameSpecific?.fullMetrics?.repData &&
-      (!formattedSession.repData || formattedSession.repData.length === 0)
-    ) {
-      formattedSession.repData = formattedSession.gameSpecific.fullMetrics.repData;
-    }
+    const fullMetrics =
+      formattedSession.gameSpecific?.fullMetrics || null;
 
-    // Also extract other metrics if needed
-    if (formattedSession.gameSpecific?.fullMetrics) {
-      const metrics = formattedSession.gameSpecific.fullMetrics;
-
-      // Populate missing fields from gameSpecific metrics
-      if (!formattedSession.smoothness && metrics.smoothness) {
-        formattedSession.smoothness = metrics.smoothness;
-      }
-      if (!formattedSession.accuracy && metrics.accuracy) {
-        formattedSession.accuracy = metrics.accuracy;
-      }
-      if (!formattedSession.score && metrics.total) {
-        formattedSession.score = metrics.total;
+    // Only fill values that are genuinely missing.
+    // Never replace a valid 0 with another value.
+    if (fullMetrics) {
+      if (
+        (!Array.isArray(formattedSession.repData) ||
+          formattedSession.repData.length === 0) &&
+        Array.isArray(fullMetrics.repData)
+      ) {
+        formattedSession.repData = fullMetrics.repData;
       }
 
-      // Add ROM data if available
-      if (metrics.maximumReachDistance && !formattedSession.romData) {
-        formattedSession.romData = {
-          shoulder: {
-            flexion: metrics.maximumReachDistance || 0,
-            extension: 0
-          },
-          elbow: { flexion: 0, extension: 0 },
-          wrist: { flexion: 0, extension: 0, rotation: 0 }
-        };
+      if (
+        formattedSession.smoothness == null &&
+        typeof fullMetrics.smoothness === "number"
+      ) {
+        formattedSession.smoothness = fullMetrics.smoothness;
+      }
+
+      if (
+        formattedSession.stability == null &&
+        typeof fullMetrics.stability === "number"
+      ) {
+        formattedSession.stability = fullMetrics.stability;
+      }
+
+      if (
+        formattedSession.accuracy == null &&
+        typeof fullMetrics.accuracy === "number"
+      ) {
+        formattedSession.accuracy = fullMetrics.accuracy;
+      }
+
+      if (
+        formattedSession.score == null &&
+        typeof fullMetrics.total === "number"
+      ) {
+        formattedSession.score = fullMetrics.total;
+      }
+
+      if (
+        formattedSession.maxCombo == null &&
+        typeof fullMetrics.maxCombo === "number"
+      ) {
+        formattedSession.maxCombo = fullMetrics.maxCombo;
+      }
+
+      if (
+        formattedSession.combo == null &&
+        typeof fullMetrics.combo === "number"
+      ) {
+        formattedSession.combo = fullMetrics.combo;
+      }
+
+      if (
+        formattedSession.level == null &&
+        typeof fullMetrics.level === "number"
+      ) {
+        formattedSession.level = fullMetrics.level;
+      }
+
+      if (
+        formattedSession.durationSeconds == null &&
+        typeof fullMetrics.durationSeconds === "number"
+      ) {
+        formattedSession.durationSeconds =
+          fullMetrics.durationSeconds;
       }
     }
 
@@ -173,8 +250,12 @@ exports.startSession = async (req, res, next) => {
       patientId: patient._id,
       patientIdRef: patient.patientId,
       therapistId: req.user._id,
-      day: day || patient.currentDay || 1,
-      gameType: gameType || "rehab_slicer",
+      day:
+        typeof day === "number"
+          ? day
+          : patient.currentDay || 1,
+      gameType:
+        gameType || "rehab_slicer",
       status: "in_progress",
       startedAt: new Date(),
     });
@@ -213,6 +294,8 @@ exports.completeSession = async (req, res, next) => {
       stability,
       missedActions,
       painFluctuations,
+      repData,
+      gameSpecific,
     } = req.body;
 
     const session = await Session.findById(req.params.id);
@@ -234,62 +317,155 @@ exports.completeSession = async (req, res, next) => {
       });
     }
 
-    session.score = score || 0;
-    session.level = level || 1;
-    session.accuracy = accuracy || 0;
-    session.combo = combo || 0;
-    session.maxCombo = maxCombo || combo || 0;
-    session.stars = stars || 0;
-    session.exerciseResults = exerciseResults || [];
-    session.durationSeconds = durationSeconds || 0;
-    session.notes = notes || "";
-    session.gameType =
-      gameType || session.gameType || "rehab_slicer";
+    /*
+     * IMPORTANT:
+     * Do not use `value || fallback`.
+     * That converts legitimate values such as 0 into defaults.
+     */
 
-    // Ensure repData is saved even when nested in gameSpecific
-    if (req.body.gameSpecific?.fullMetrics?.repData) {
-      session.repData = req.body.gameSpecific.fullMetrics.repData;
-    } else if (req.body.gameSpecific?.repData) {
-      session.repData = req.body.gameSpecific.repData;
-    } else if (req.body.repData) {
-      session.repData = req.body.repData;
+    if (typeof score === "number") {
+      session.score = score;
+    }
+
+    if (typeof level === "number") {
+      session.level = level;
+    }
+
+    if (typeof accuracy === "number") {
+      session.accuracy = accuracy;
+    }
+
+    if (typeof combo === "number") {
+      session.combo = combo;
+    }
+
+    if (typeof maxCombo === "number") {
+      session.maxCombo = maxCombo;
+    } else if (typeof combo === "number") {
+      session.maxCombo = combo;
+    }
+
+    if (typeof stars === "number") {
+      session.stars = Math.max(0, Math.min(3, stars));
+    }
+
+    if (Array.isArray(exerciseResults)) {
+      session.exerciseResults = exerciseResults;
+    }
+
+    if (typeof durationSeconds === "number") {
+      session.durationSeconds = durationSeconds;
+    }
+
+    if (typeof notes === "string") {
+      session.notes = notes;
+    }
+
+    if (gameType) {
+      session.gameType = gameType;
+    }
+
+    /*
+     * Save repData from the actual payload.
+     */
+    const suppliedRepData =
+      Array.isArray(repData)
+        ? repData
+        : Array.isArray(gameSpecific?.fullMetrics?.repData)
+          ? gameSpecific.fullMetrics.repData
+          : Array.isArray(gameSpecific?.repData)
+            ? gameSpecific.repData
+            : null;
+
+    if (suppliedRepData) {
+      session.repData = normalizeRepCorrectness(suppliedRepData);
+    }
+
+    /*
+     * Save actual clinical metrics only when supplied.
+     */
+    if (romData && typeof romData === "object") {
+      session.romData = romData;
+    }
+
+    if (typeof smoothness === "number") {
+      session.smoothness = smoothness;
+    }
+
+    if (typeof stability === "number") {
+      session.stability = stability;
+    }
+
+    if (typeof missedActions === "number") {
+      session.missedActions = missedActions;
+    }
+
+    if (Array.isArray(painFluctuations)) {
+      session.painFluctuations = painFluctuations;
+    }
+
+    // gameSpecific was previously read (for the repData fallback above)
+    // but never assigned to the session document -- every game's
+    // gameSpecific payload (e.g. Precision Reach's PAPS score,
+    // bestCombo, longestHitStreak) was silently discarded on save.
+    if (gameSpecific && typeof gameSpecific === "object") {
+      session.gameSpecific = gameSpecific;
     }
 
     session.status = "completed";
     session.completedAt = new Date();
 
-    if (romData) session.romData = romData;
-    if (smoothness !== undefined) session.smoothness = smoothness;
-    if (stability !== undefined) session.stability = stability;
-    if (missedActions !== undefined) {
-      session.missedActions = missedActions;
-    }
-    if (painFluctuations) {
-      session.painFluctuations = painFluctuations;
-    }
-
     await session.save();
 
-    const patient = await Patient.findById(session.patientId);
+    /*
+     * Re-read the saved session so the report is generated
+     * from exactly what MongoDB contains.
+     */
+    const savedSession = await Session.findById(session._id);
+
+    const patient = await Patient.findById(
+      savedSession.patientId
+    );
 
     if (patient) {
+      const actualScore =
+        typeof savedSession.score === "number"
+          ? savedSession.score
+          : 0;
+
+      const actualAccuracy =
+        typeof savedSession.accuracy === "number"
+          ? savedSession.accuracy
+          : null;
+
+      const actualLevel =
+        typeof savedSession.level === "number"
+          ? savedSession.level
+          : null;
+
       patient.totalSessions += 1;
-      patient.totalScore += score || 0;
+      patient.totalScore += actualScore;
 
       const prevTotal = patient.totalSessions - 1;
 
-      patient.averageAccuracy = Math.round(
-        ((patient.averageAccuracy * prevTotal) +
-          (accuracy || 0)) /
-        patient.totalSessions
-      );
-
-      if (level > patient.currentLevel) {
-        patient.currentLevel = level;
+      if (actualAccuracy != null) {
+        patient.averageAccuracy = Math.round(
+          (
+            patient.averageAccuracy * prevTotal +
+            actualAccuracy
+          ) / patient.totalSessions
+        );
       }
 
-      const dayPlan = patient.rehabPlan.find(
-        (d) => d.day === session.day
+      if (
+        actualLevel != null &&
+        actualLevel > patient.currentLevel
+      ) {
+        patient.currentLevel = actualLevel;
+      }
+
+      const dayPlan = patient.rehabPlan?.find(
+        (d) => d.day === savedSession.day
       );
 
       if (dayPlan) {
@@ -298,7 +474,7 @@ exports.completeSession = async (req, res, next) => {
       }
 
       if (
-        session.day === patient.currentDay &&
+        savedSession.day === patient.currentDay &&
         patient.currentDay < 7
       ) {
         patient.currentDay += 1;
@@ -306,10 +482,13 @@ exports.completeSession = async (req, res, next) => {
 
       await patient.save();
 
-      // Automatically generate report
+      /*
+       * Generate/update the report AFTER the session has
+       * been completely saved and reloaded.
+       */
       try {
         await reportController.buildReportForSession(
-          session,
+          savedSession,
           patient,
           req.user._id
         );
@@ -321,14 +500,21 @@ exports.completeSession = async (req, res, next) => {
       }
     }
 
+    /*
+     * Return the actual saved session.
+     */
     res.json({
       success: true,
-      session,
+      session: savedSession,
     });
   } catch (err) {
     next(err);
   }
 };
+
+// ─────────────────────────────────────────────────────────────
+// REP DATA
+// ─────────────────────────────────────────────────────────────
 
 exports.saveRepData = async (req, res, next) => {
   try {
@@ -390,7 +576,6 @@ exports.saveRepData = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────
 // PUBLIC SESSION ENDPOINTS
-// No authentication — patientId (GH-XXXX) is used
 // ─────────────────────────────────────────────────────────────
 
 exports.startPublicSession = async (req, res, next) => {
@@ -420,7 +605,6 @@ exports.startPublicSession = async (req, res, next) => {
       });
     }
 
-    // Abandon any previous public session still in progress
     await Session.updateMany(
       {
         patientId: patient._id,
@@ -527,6 +711,13 @@ exports.updatePublicSession = async (req, res, next) => {
         session.level = metrics.level;
       }
 
+      if (typeof metrics.stars === "number") {
+        session.stars = Math.max(
+          0,
+          Math.min(3, metrics.stars)
+        );
+      }
+
       if (typeof metrics.durationSeconds === "number") {
         session.durationSeconds =
           metrics.durationSeconds;
@@ -535,6 +726,32 @@ exports.updatePublicSession = async (req, res, next) => {
       if (typeof metrics.missedActions === "number") {
         session.missedActions =
           metrics.missedActions;
+      }
+
+      if (typeof metrics.smoothness === "number") {
+        session.smoothness = metrics.smoothness;
+      }
+
+      if (typeof metrics.stability === "number") {
+        session.stability = metrics.stability;
+      }
+
+      if (
+        Array.isArray(metrics.exerciseResults)
+      ) {
+        session.exerciseResults =
+          metrics.exerciseResults;
+      }
+
+      if (
+        metrics.romData &&
+        typeof metrics.romData === "object"
+      ) {
+        session.romData = metrics.romData;
+      }
+
+      if (Array.isArray(metrics.repData)) {
+        session.repData = metrics.repData;
       }
     }
 
@@ -569,6 +786,8 @@ exports.finishPublicSession = async (req, res, next) => {
       stability,
       missedActions,
       painFluctuations,
+      repData,
+      gameSpecific,
     } = req.body;
 
     if (
@@ -617,76 +836,138 @@ exports.finishPublicSession = async (req, res, next) => {
       });
     }
 
-    // Save session metrics
-    session.score = score || 0;
-    session.level = level || 1;
-    session.accuracy = accuracy || 0;
-    session.combo = combo || 0;
-    session.maxCombo = maxCombo || combo || 0;
-    session.stars = stars || 0;
-    session.exerciseResults = exerciseResults || [];
-    session.durationSeconds = durationSeconds || 0;
-    session.notes = notes || "";
-    session.gameType =
-      gameType || session.gameType || "rehab_slicer";
-
-    // Ensure repData is saved even when nested in gameSpecific
-    if (req.body.gameSpecific?.fullMetrics?.repData) {
-      session.repData = req.body.gameSpecific.fullMetrics.repData;
-    } else if (req.body.gameSpecific?.repData) {
-      session.repData = req.body.gameSpecific.repData;
-    } else if (req.body.repData) {
-      session.repData = req.body.repData;
+    if (typeof score === "number") {
+      session.score = score;
     }
-    session.status = "completed";
-    session.completedAt = new Date();
 
-    if (romData) {
+    if (typeof level === "number") {
+      session.level = level;
+    }
+
+    if (typeof accuracy === "number") {
+      session.accuracy = accuracy;
+    }
+
+    if (typeof combo === "number") {
+      session.combo = combo;
+    }
+
+    if (typeof maxCombo === "number") {
+      session.maxCombo = maxCombo;
+    } else if (typeof combo === "number") {
+      session.maxCombo = combo;
+    }
+
+    if (typeof stars === "number") {
+      session.stars = Math.max(0, Math.min(3, stars));
+    }
+
+    if (Array.isArray(exerciseResults)) {
+      session.exerciseResults = exerciseResults;
+    }
+
+    if (typeof durationSeconds === "number") {
+      session.durationSeconds = durationSeconds;
+    }
+
+    if (typeof notes === "string") {
+      session.notes = notes;
+    }
+
+    if (gameType) {
+      session.gameType = gameType;
+    }
+
+    const suppliedRepData =
+      Array.isArray(repData)
+        ? repData
+        : Array.isArray(gameSpecific?.fullMetrics?.repData)
+          ? gameSpecific.fullMetrics.repData
+          : Array.isArray(gameSpecific?.repData)
+            ? gameSpecific.repData
+            : null;
+
+    if (suppliedRepData) {
+      session.repData = normalizeRepCorrectness(suppliedRepData);
+    }
+
+    if (romData && typeof romData === "object") {
       session.romData = romData;
     }
 
-    if (smoothness !== undefined) {
+    if (typeof smoothness === "number") {
       session.smoothness = smoothness;
     }
 
-    if (stability !== undefined) {
+    if (typeof stability === "number") {
       session.stability = stability;
     }
 
-    if (missedActions !== undefined) {
+    if (typeof missedActions === "number") {
       session.missedActions = missedActions;
     }
 
-    if (painFluctuations) {
+    if (Array.isArray(painFluctuations)) {
       session.painFluctuations = painFluctuations;
     }
 
+    // Same missing assignment as completeSession above -- gameSpecific
+    // was read for the repData fallback but never persisted.
+    if (gameSpecific && typeof gameSpecific === "object") {
+      session.gameSpecific = gameSpecific;
+    }
+
+    session.status = "completed";
+    session.completedAt = new Date();
+
     await session.save();
 
-    // Update patient statistics
+    const savedSession = await Session.findById(session._id);
+
     const patient = await Patient.findOne({
       patientId: String(patientId),
     });
 
     if (patient) {
+      const actualScore =
+        typeof savedSession.score === "number"
+          ? savedSession.score
+          : 0;
+
+      const actualAccuracy =
+        typeof savedSession.accuracy === "number"
+          ? savedSession.accuracy
+          : null;
+
+      const actualLevel =
+        typeof savedSession.level === "number"
+          ? savedSession.level
+          : null;
+
       patient.totalSessions += 1;
-      patient.totalScore += score || 0;
+      patient.totalScore += actualScore;
 
       const prevTotal =
         patient.totalSessions - 1;
 
-      patient.averageAccuracy = Math.round(
-        ((patient.averageAccuracy * prevTotal) +
-          (accuracy || 0)) /
-        patient.totalSessions
-      );
-
-      if (level > patient.currentLevel) {
-        patient.currentLevel = level;
+      if (actualAccuracy != null) {
+        patient.averageAccuracy = Math.round(
+          (
+            patient.averageAccuracy * prevTotal +
+            actualAccuracy
+          ) / patient.totalSessions
+        );
       }
 
-      const dayPlan = patient.rehabPlan.find(
-        (d) => d.day === session.day
+      if (
+        actualLevel != null &&
+        actualLevel > patient.currentLevel
+      ) {
+        patient.currentLevel = actualLevel;
+      }
+
+      const dayPlan = patient.rehabPlan?.find(
+        (d) => d.day === savedSession.day
       );
 
       if (dayPlan) {
@@ -695,7 +976,7 @@ exports.finishPublicSession = async (req, res, next) => {
       }
 
       if (
-        session.day === patient.currentDay &&
+        savedSession.day === patient.currentDay &&
         patient.currentDay < 7
       ) {
         patient.currentDay += 1;
@@ -703,10 +984,9 @@ exports.finishPublicSession = async (req, res, next) => {
 
       await patient.save();
 
-      // Automatically generate report
       try {
         await reportController.buildReportForSession(
-          session,
+          savedSession,
           patient,
           patient.therapistId || null
         );
@@ -715,15 +995,12 @@ exports.finishPublicSession = async (req, res, next) => {
           "[finishPublicSession] Failed to auto-generate report:",
           reportErr
         );
-
-        // Do not fail the completed session if report
-        // generation itself fails.
       }
     }
 
     res.json({
       success: true,
-      session,
+      session: savedSession,
     });
   } catch (err) {
     next(err);

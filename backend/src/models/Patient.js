@@ -77,10 +77,11 @@ const patientSchema = new mongoose.Schema(
       {
         day: { type: Number, required: true },
         exercises: [
-          {
-            exerciseId: { type: String, required: true },
-            name: { type: String, required: true },
-            sets: { type: Number, default: 3 },
+  {
+    exerciseId: { type: String, required: true },
+    name: { type: String, required: true },
+    gameType: { type: String },
+    sets: { type: Number, default: 3 },
             reps: { type: Number, default: 10 },
             holdSeconds: { type: Number, default: 0 },
             targetRom: { type: Number },

@@ -12,6 +12,16 @@ const NEVER_TRACKED_STATUS = "never_tracked";
 const SIDE_SWITCH_HEIGHT_DELTA = 0.08; // 8% of frame height difference required
 const SIDE_SWITCH_SUSTAIN_FRAMES = 4; // must hold for this many consecutive frames
 
+// Primary signal for "which arm is actively reaching" when BOTH wrists are
+// visible. Degrees of shoulder-angle separation required before we treat
+// one side as the reaching arm over the other. This replaces wrist-height
+// as the primary signal because height alone can pick the resting arm
+// while the OTHER arm is the one actually extended (e.g. resting arm
+// happens to sit slightly higher in frame than a reaching arm at a
+// downward angle) — angle is what the HUD's ROM readout is built from, so
+// using it here keeps cursor-side and ROM-side identical by construction.
+const SIDE_SWITCH_ANGLE_DELTA = 10; // degrees
+
 // Throttle debug logging — matches useMediaPipeUpperBody's rate so the
 // two checkpoints can be compared frame-for-frame in the console.
 const LOG_EVERY_N_FRAMES = 15;
@@ -73,25 +83,85 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
 
   // Decides which wrist should drive the cursor this frame, only actually
   // switching once the height gap has been sustained for several frames.
-  const resolveActiveSide = useCallback((raw, leftVisible, rightVisible) => {
+  const resolveActiveSide = useCallback((raw, leftVisible, rightVisible, leftAngle, rightAngle) => {
+    // BUGFIX: cursor stranding at the idle arm during a max reach.
+    // shoulderAngle is computed from shoulder→elbow only, so it keeps
+    // reading correctly even when the wrist landmark's visibility drops
+    // (common right at full extension, when the wrist nears/exits the
+    // webcam's frame edge). Previously, the moment that happened, these
+    // two branches switched the ACTIVE side instantly and unconditionally
+    // to whichever wrist was still visible — usually the idle, resting
+    // arm — so the cursor jumped away from the reaching arm to the
+    // resting one and stuck there, even though the angle readout still
+    // showed the true (high) reach. Reconfirming the side that's ALREADY
+    // active stays instant (no regression for the normal case). Only a
+    // genuine switch AWAY from the currently active side now needs the
+    // same SIDE_SWITCH_SUSTAIN_FRAMES hysteresis the height-based switch
+    // below already uses, so a couple of low-visibility frames at the
+    // extreme of a reach don't yank the cursor to the other arm.
     if (leftVisible && !rightVisible) {
-      switchCandidateRef.current = { side: null, frames: 0 };
-      activeSideRef.current = "left";
-      return "left";
+      if (activeSideRef.current === "left") {
+        switchCandidateRef.current = { side: null, frames: 0 };
+        return "left";
+      }
+      if (switchCandidateRef.current.side === "left") {
+        switchCandidateRef.current.frames += 1;
+      } else {
+        switchCandidateRef.current = { side: "left", frames: 1 };
+      }
+      if (switchCandidateRef.current.frames >= SIDE_SWITCH_SUSTAIN_FRAMES) {
+        activeSideRef.current = "left";
+        switchCandidateRef.current = { side: null, frames: 0 };
+      }
+      return activeSideRef.current;
     }
     if (!leftVisible && rightVisible) {
-      switchCandidateRef.current = { side: null, frames: 0 };
-      activeSideRef.current = "right";
-      return "right";
-    }
-
-    const diff = raw.leftWrist.y - raw.rightWrist.y; // negative => left is higher
-    if (Math.abs(diff) < SIDE_SWITCH_HEIGHT_DELTA) {
-      switchCandidateRef.current = { side: null, frames: 0 };
+      if (activeSideRef.current === "right") {
+        switchCandidateRef.current = { side: null, frames: 0 };
+        return "right";
+      }
+      if (switchCandidateRef.current.side === "right") {
+        switchCandidateRef.current.frames += 1;
+      } else {
+        switchCandidateRef.current = { side: "right", frames: 1 };
+      }
+      if (switchCandidateRef.current.frames >= SIDE_SWITCH_SUSTAIN_FRAMES) {
+        activeSideRef.current = "right";
+        switchCandidateRef.current = { side: null, frames: 0 };
+      }
       return activeSideRef.current;
     }
 
-    const candidateSide = diff < 0 ? "left" : "right";
+    // BUGFIX: cursor following the wrong arm despite correct ROM readout.
+    // This branch used to compare raw wrist Y-height (`raw.leftWrist.y` vs
+    // `raw.rightWrist.y`) to pick the reaching side. That's a DIFFERENT
+    // signal than the shoulder-angle math that drives the HUD's ROM
+    // number (poseData.leftShoulderAngle/rightShoulderAngle), so the two
+    // could — and did — disagree: HUD shows ~170° for the true reaching
+    // arm while the cursor stays locked on the idle arm because its wrist
+    // happened to sit marginally higher in frame. Angle is now the
+    // primary signal, with wrist-height kept only as a fallback for the
+    // rare case per-side angles aren't available yet (e.g. first frames
+    // before enough landmarks have been seen).
+    const hasLeftAngle = typeof leftAngle === "number" && Number.isFinite(leftAngle);
+    const hasRightAngle = typeof rightAngle === "number" && Number.isFinite(rightAngle);
+
+    let candidateSide;
+    if (hasLeftAngle && hasRightAngle) {
+      const angleDiff = leftAngle - rightAngle; // positive => left is reaching further
+      if (Math.abs(angleDiff) < SIDE_SWITCH_ANGLE_DELTA) {
+        switchCandidateRef.current = { side: null, frames: 0 };
+        return activeSideRef.current;
+      }
+      candidateSide = angleDiff > 0 ? "left" : "right";
+    } else {
+      const diff = raw.leftWrist.y - raw.rightWrist.y; // negative => left is higher
+      if (Math.abs(diff) < SIDE_SWITCH_HEIGHT_DELTA) {
+        switchCandidateRef.current = { side: null, frames: 0 };
+        return activeSideRef.current;
+      }
+      candidateSide = diff < 0 ? "left" : "right";
+    }
     if (candidateSide === activeSideRef.current) {
       switchCandidateRef.current = { side: null, frames: 0 };
       return activeSideRef.current;
@@ -201,7 +271,13 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
       return;
     }
 
-    const side = resolveActiveSide(raw, leftVisible, rightVisible);
+    const side = resolveActiveSide(
+      raw,
+      leftVisible,
+      rightVisible,
+      poseData.leftShoulderAngle,
+      poseData.rightShoulderAngle
+    );
     const wrist = side === "left" ? raw.leftWrist : raw.rightWrist;
     const clampedWrist = { x: clamp01(wrist.x), y: clamp01(wrist.y) };
 
@@ -250,7 +326,20 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
     setActiveSide(side);
     setStatus("tracking");
 
-    const angle = poseData.maxShoulderAngle || 0;
+    // BUGFIX: this used to read poseData.maxShoulderAngle, which is just
+    // Math.max(left, right) — it has no idea which side `side` (above)
+    // actually selected. That's how the HUD could show ~170° (the true
+    // reaching arm's angle) while `position`/the white cursor was built
+    // from the OTHER wrist's x/y. Reading the angle for the SAME `side`
+    // the cursor is using guarantees ROM and cursor can never disagree
+    // about which arm is active. Falls back to maxShoulderAngle only if
+    // the per-side value isn't available (shouldn't normally happen once
+    // useMediaPipeUpperBody has emitted per-side angles).
+    const sideAngle = side === "left" ? poseData.leftShoulderAngle : poseData.rightShoulderAngle;
+    const angle =
+      typeof sideAngle === "number" && Number.isFinite(sideAngle)
+        ? sideAngle
+        : poseData.maxShoulderAngle || 0;
     setRawAngle(angle);
 
     angleHistoryRef.current = [...angleHistoryRef.current, angle].slice(-5);

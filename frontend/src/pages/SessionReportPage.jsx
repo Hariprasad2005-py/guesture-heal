@@ -16,37 +16,78 @@ import toast from "react-hot-toast";
 // (report.performance.*), so the same session looks the same everywhere.
 function normalize(raw, gameId, gameName) {
   if (!raw) return null;
-  const exerciseResults = raw.exerciseResults || [];
-  const totalReps =
-    exerciseResults.reduce((sum, e) => sum + (e.repsCompleted || 0), 0) ||
-    raw.reps ||
-    raw.successes ||
-    0;
-  const accuracy =
-    raw.accuracy ??
-    (raw.reps ? Math.round(((raw.successes || 0) / raw.reps) * 100) : 0);
+
+  const exerciseResults = Array.isArray(raw.exerciseResults)
+    ? raw.exerciseResults
+    : [];
+
+  let totalReps = null;
+
+  const repCounts = exerciseResults
+    .map((e) => (typeof e.repsCompleted === "number" ? e.repsCompleted : null))
+    .filter((v) => v != null);
+
+  if (repCounts.length > 0) {
+    totalReps = repCounts.reduce((sum, v) => sum + v, 0);
+  } else if (typeof raw.reps === "number") {
+    totalReps = raw.reps;
+  } else if (typeof raw.successes === "number") {
+    totalReps = raw.successes;
+  }
+
+  let accuracy = null;
+
+  if (typeof raw.accuracy === "number") {
+    accuracy = raw.accuracy;
+  } else if (
+    typeof raw.reps === "number" &&
+    raw.reps > 0 &&
+    typeof raw.successes === "number"
+  ) {
+    accuracy = Math.round((raw.successes / raw.reps) * 100);
+  }
 
   return {
     gameId: raw.gameType || gameId,
     gameName,
-    day: raw.day,
-    score: raw.score ?? 0,
-    level: raw.level ?? 1,
+    day: typeof raw.day === "number" ? raw.day : null,
+    score: typeof raw.score === "number" ? raw.score : null,
+    level: typeof raw.level === "number" ? raw.level : null,
     accuracy,
-    combo: raw.combo ?? 0,
-    maxCombo: raw.maxCombo ?? raw.combo ?? 0,
-    stars: raw.stars ?? 0,
-    durationSeconds: raw.durationSeconds,
+    combo: typeof raw.combo === "number" ? raw.combo : null,
+    maxCombo:
+      typeof raw.maxCombo === "number"
+        ? raw.maxCombo
+        : typeof raw.combo === "number"
+          ? raw.combo
+          : null,
+    stars: typeof raw.stars === "number" ? raw.stars : null,
+    durationSeconds:
+      typeof raw.durationSeconds === "number"
+        ? raw.durationSeconds
+        : null,
     totalReps,
-    misses: raw.misses ?? raw.missedActions ?? 0,
-    maxReach: raw.maxReach,
+    misses:
+      typeof raw.misses === "number"
+        ? raw.misses
+        : typeof raw.missedActions === "number"
+          ? raw.missedActions
+          : null,
+    maxReach:
+      typeof raw.maxReach === "number"
+        ? raw.maxReach
+        : null,
     exerciseResults,
-    completedAt: raw.completedAt || new Date().toISOString(),
+    completedAt: raw.completedAt || null,
   };
 }
 
-function starString(stars = 0) {
-  return "★".repeat(stars) + "☆".repeat(Math.max(0, 3 - stars));
+function starString(stars) {
+  if (typeof stars !== "number" || stars < 1) return "—";
+
+  const safeStars = Math.max(0, Math.min(3, Math.floor(stars)));
+
+  return `${"*".repeat(safeStars)}${".".repeat(3 - safeStars)}`;
 }
 
 export default function SessionReportPage() {
@@ -59,6 +100,7 @@ export default function SessionReportPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [patientDetails, setPatientDetails] = useState(null);
+const [canonicalSession, setCanonicalSession] = useState(null);
 
   const isTherapist = !!token && user?.role === "therapist";
 
@@ -118,6 +160,7 @@ export default function SessionReportPage() {
             : null;
         const session = res?.session || res;
         if (!cancelled && session) {
+          setCanonicalSession(session);
           setRefreshed(normalize(session, state.gameId, state.gameName));
         }
       } catch (err) {
@@ -173,21 +216,42 @@ export default function SessionReportPage() {
     try {
       // 1. Ensure we actually have the patient data before proceeding
       let details = patientDetails;
-      
-      if (!details && patientId) {
+
+      if (!details && resolvedPatientId) {
         // Force fetch right here if state is empty
-        const isPublic = String(patientId).startsWith("GH-");
-        const res = isPublic 
-          ? await patientPublicApi.getById(patientId) 
-          : await patientApi.getById(patientId);
-        
+        const isPublic = String(resolvedPatientId).startsWith("GH-");
+        const res = isPublic
+          ? await patientPublicApi.getById(resolvedPatientId)
+          : await patientApi.getById(resolvedPatientId);
+
         if (res?.patient) {
           details = res.patient;
         }
       }
 
+      // 1b. Resolve the EXACT completed Session for this report.
+      // If it's already been fetched (canonicalSession, set once the
+      // background sync in the effect above resolves), use that directly.
+      // Otherwise fetch it now by state.sessionId -- never substitute the
+      // latest/most-recent session.
+      let sessionForReport = canonicalSession;
+      if (!sessionForReport && state.sessionId) {
+        try {
+          const res = isTherapist
+            ? await sessionApi.getById(state.sessionId)
+            : resolvedPatientId
+              ? await sessionApi.publicGetById(state.sessionId, resolvedPatientId)
+              : null;
+          sessionForReport = res?.session || res || null;
+        } catch (err) {
+          console.warn("[SessionReportPage] Could not fetch exact session for report:", err);
+          sessionForReport = null;
+        }
+      }
+
       // 2. Build the report object
       const reportShaped = {
+        sessionId: state.sessionId,
         reportNumber: state.sessionId ? `Session-${String(state.sessionId).slice(-6)}` : "Session",
         generatedAt: display.completedAt,
         patientSnapshot: {
@@ -212,19 +276,20 @@ export default function SessionReportPage() {
           totalReps: display.totalReps,
         },
         romAnalysis: display.exerciseResults
-          .filter((e) => e.averageRom || e.maxRom)
+          .filter((e) => e.averageRom != null || e.maxRom != null)
           .map((e) => ({
             exerciseName: e.name,
-            averageRom: e.averageRom,
-            maxRom: e.maxRom,
-            targetRom: e.targetRom || 90,
-            percentageAchieved: e.targetRom
-              ? Math.round(((e.averageRom || 0) / e.targetRom) * 100)
-              : undefined,
+            averageRom: e.averageRom ?? null,
+            maxRom: e.maxRom ?? null,
+            targetRom: e.targetRom ?? null,
+            percentageAchieved:
+              e.targetRom != null && e.averageRom != null
+                ? Math.round((e.averageRom / e.targetRom) * 100)
+                : undefined,
           })),
       };
-      
-      await generatePDFReport(reportShaped);
+
+      await generatePDFReport(reportShaped, details, sessionForReport);
       toast.success("PDF downloaded!");
     } catch (err) {
       toast.error("PDF generation failed: " + (err.message || "unknown error"));
@@ -260,7 +325,7 @@ export default function SessionReportPage() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         <StatCard icon={Trophy} label="Score" value={display.score?.toLocaleString?.() ?? display.score} color="amber" />
-        <StatCard icon={Target} label="Accuracy" value={`${display.accuracy}%`} color="teal" />
+        <StatCard icon={Target} label="Accuracy" value={display.accuracy != null ? `${display.accuracy}%` : "—"} color="teal" />
         <StatCard icon={Repeat} label="Reps" value={display.totalReps} color="blue" />
         <StatCard
           icon={Clock}
@@ -274,9 +339,11 @@ export default function SessionReportPage() {
         />
       </div>
 
-      {display.stars > 0 && (
+      {display.stars != null && display.stars > 0 && (
         <div className="text-center mb-8">
-          <span className="text-3xl text-amber-400">{starString(display.stars)}</span>
+          <span className="text-3xl text-amber-400">
+  {starString(display.stars)}
+</span>
         </div>
       )}
 
@@ -288,8 +355,10 @@ export default function SessionReportPage() {
               <div key={i} className="flex justify-between items-center text-sm border-b border-slate-100 pb-2 last:border-0">
                 <span className="font-medium text-slate-800">{e.name}</span>
                 <span className="text-slate-500">
-                  {e.repsCompleted ?? 0} reps · {e.accuracy ?? 0}% accuracy
-                </span>
+  {e.repsCompleted != null ? `${e.repsCompleted} reps` : "Reps not recorded"}
+  {" · "}
+  {e.accuracy != null ? `${e.accuracy}% accuracy` : "Accuracy not recorded"}
+</span>
               </div>
             ))}
           </div>

@@ -6,13 +6,13 @@ import { useAppStore } from "../store/appStore";
 import toast from "react-hot-toast";
 import LoadingSpinner from "../components/ui/LoadingSpinner";
 import StatCard from "../components/ui/StatCard";
-import { 
-  Zap, 
-  Activity, 
-  Calendar, 
-  Award, 
-  PlayCircle, 
-  User, 
+import {
+  Zap,
+  Activity,
+  Calendar,
+  Award,
+  PlayCircle,
+  User,
   TrendingUp
 } from "lucide-react";
 
@@ -22,35 +22,29 @@ export default function PatientPublicDashboard() {
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
   const navigate = useNavigate();
-  const { setCurrentPatient, setPublicPatientId, publicPatientId } = useAppStore();
+  const { setCurrentPatient, setPublicPatientId } = useAppStore();
 
   useEffect(() => {
-    const storedId = publicPatientId || useAppStore.getState().currentPatient?.patientId
-    
-    if (id && storedId && id === storedId && useAppStore.getState().currentPatient) {
-      setPatient(useAppStore.getState().currentPatient)
-      setLoading(false)
-      return
+    if (id) {
+      loadPatient()
     }
-    
-    loadPatient()
-  }, [id, publicPatientId])
+  }, [id])
 
   async function loadPatient() {
     try {
       const data = await patientPublicApi.getById(id);
       const patientData = data.patient;
-      
+
       if (!patientData) {
         toast.error("Patient not found");
         navigate("/patient");
         return;
       }
-      
+
       setPatient(patientData);
       setCurrentPatient(patientData);
       setPublicPatientId(patientData.patientId);
-      
+
       if (patientData?._id) {
         try {
           const sessionData = await sessionApi.getByPatient(patientData._id);
@@ -90,7 +84,7 @@ export default function PatientPublicDashboard() {
             <h1 className="text-3xl md:text-4xl font-black mb-2">Hello, {patient.name?.split(' ')[0] || 'Patient'}! 👋</h1>
             <p className="text-teal-100 opacity-90">Ready for today's recovery session? You're doing great.</p>
           </div>
-          <button 
+          <button
             onClick={handleStartSession}
             className="bg-white text-teal-700 px-8 py-4 rounded-2xl font-bold text-lg flex items-center gap-2 shadow-lg hover:scale-105 transition-transform"
           >
@@ -135,26 +129,24 @@ export default function PatientPublicDashboard() {
             <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
               <Calendar className="text-teal-600" /> Your 7-Day Rehab Plan
             </h2>
-            
+
             <div className="grid gap-4">
               {patient.rehabPlan?.map((day) => (
-                <div 
+                <div
                   key={day.day}
-                  className={`p-6 rounded-2xl border-2 transition-all ${
-                    day.day === patient.currentDay 
-                    ? 'bg-white border-teal-500 shadow-md ring-4 ring-teal-500/10' 
+                  className={`p-6 rounded-2xl border-2 transition-all ${day.day === patient.currentDay
+                    ? 'bg-white border-teal-500 shadow-md ring-4 ring-teal-500/10'
                     : day.isCompleted
-                    ? 'bg-emerald-50 border-emerald-200'
-                    : 'bg-slate-50 border-slate-200 opacity-70'
-                  }`}
+                      ? 'bg-emerald-50 border-emerald-200'
+                      : 'bg-slate-50 border-slate-200 opacity-70'
+                    }`}
                 >
                   <div className="flex justify-between items-start mb-4">
                     <div>
-                      <span className={`text-xs font-bold uppercase tracking-widest px-2 py-1 rounded-md mb-2 inline-block ${
-                        day.day === patient.currentDay ? 'bg-teal-100 text-teal-700' : 
+                      <span className={`text-xs font-bold uppercase tracking-widest px-2 py-1 rounded-md mb-2 inline-block ${day.day === patient.currentDay ? 'bg-teal-100 text-teal-700' :
                         day.isCompleted ? 'bg-emerald-100 text-emerald-700' :
-                        'bg-slate-200 text-slate-500'
-                      }`}>
+                          'bg-slate-200 text-slate-500'
+                        }`}>
                         Day {day.day}
                       </span>
                       <h3 className="text-lg font-bold text-slate-900">
@@ -168,7 +160,7 @@ export default function PatientPublicDashboard() {
                       <span className="bg-teal-100 text-teal-700 px-3 py-1 rounded-full text-xs font-bold">📌 TODAY</span>
                     )}
                   </div>
-                  
+
                   <div className="flex flex-wrap gap-2">
                     {day.exercises.map(ex => (
                       <span key={ex.exerciseId} className="px-3 py-1 bg-white border border-slate-200 rounded-lg text-sm text-slate-600">
@@ -215,7 +207,7 @@ export default function PatientPublicDashboard() {
                       <span>{Math.round((completedDays / totalDays) * 100)}%</span>
                     </div>
                     <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-                      <div 
+                      <div
                         className="h-full bg-teal-500 rounded-full transition-all duration-500"
                         style={{ width: `${(completedDays / totalDays) * 100}%` }}
                       />

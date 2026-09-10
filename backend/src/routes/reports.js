@@ -6,6 +6,7 @@ const { protect } = require("../middleware/auth");
 // ─── Public (no-token) routes ──────────────────────────────────────────
 router.get("/public/:patientId", reportController.getPublicReportsByPatient);
 router.post('/public/generate/:sessionId', reportController.generatePublicReport);
+router.post('/public/regenerate-report/:sessionId', reportController.regeneratePublicReport);
 
 // ─── PUBLIC ROUTE FOR PATIENTS (NO AUTH) ──────────────────────────────
 // MUST be placed before router.use(protect)!
@@ -17,6 +18,10 @@ router.use(protect);
 router.get("/", reportController.getReportsByTherapist);
 router.get("/patient/:patientId", reportController.getReportsByPatient);
 router.post("/generate/:sessionId", reportController.generateReport);
+router.post(
+  "/regenerate-report/:sessionId",
+  reportController.regenerateReport
+);
 router.put("/:id/notes", reportController.updateTherapistNotes);
 router.delete("/:id", reportController.deleteReport);
 

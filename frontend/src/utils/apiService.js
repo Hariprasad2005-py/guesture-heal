@@ -273,15 +273,45 @@ export const patientPublicApi = {
 export const reportApi = {
   getAll: (patientId) =>
     request(`/reports${patientId ? `?patientId=${patientId}` : ""}`),
-  getByPatient: (patientId) => request(`/reports/patient/${patientId}`),
-  getByPublicPatient: (patientId) => request(`/reports/public/${patientId}`),
-  getById: (id) => request(`/reports/${id}`),
-  generate: (sessionId) => request(`/reports/generate/${sessionId}`, { method: "POST" }),
-  updateNotes: (id, notes) => request(`/reports/${id}/notes`, {
-    method: "PUT",
-    body: JSON.stringify({ therapistNotes: notes })
-  }),
-  delete: (id) => request(`/reports/${id}`, { method: "DELETE" }),
+
+  getByPatient: (patientId) =>
+    request(`/reports/patient/${patientId}`),
+
+  getByPublicPatient: (patientId) =>
+    request(`/reports/public/${patientId}`),
+
+  getById: (id) =>
+    request(`/reports/${id}`),
+
+  generate: (sessionId) =>
+    request(`/reports/generate/${sessionId}`, {
+      method: "POST",
+    }),
+  
+  regenerate: (sessionId) =>
+    request(`/reports/regenerate-report/${sessionId}`, {
+      method: "POST",
+      timeoutMs: 45000,
+    }),
+
+  regeneratePublic: (sessionId, patientId) =>
+    request(`/reports/public/regenerate-report/${sessionId}?patientId=${encodeURIComponent(patientId)}`, {
+      method: "POST",
+      timeoutMs: 45000,
+    }),
+
+  updateNotes: (id, notes) =>
+    request(`/reports/${id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({
+        therapistNotes: notes,
+      }),
+    }),
+
+  delete: (id) =>
+    request(`/reports/${id}`, {
+      method: "DELETE",
+    }),
 
   // ─── LOCAL STORAGE METHODS (IndexedDB) ──────────────────────────────────
   // These use the sessionStore for offline persistence

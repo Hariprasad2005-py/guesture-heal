@@ -6,15 +6,22 @@ const mongoose = require("mongoose");
 // must be updated to match.
 const repDataSchema = new mongoose.Schema(
   {
-    exerciseId: { type: String, required: true },
+    exerciseId: { type: String },
     exerciseName: { type: String },
     repNumber: { type: Number },
     rom: { type: Number },
     confidence: { type: Number },
     isCorrect: { type: Boolean, default: true },
     timestamp: { type: Date, default: Date.now },
+    // Precision Reach rep fields (target-based, not exercise-based)
+    rep: { type: Number },
+    direction: { type: String },
+    result: { type: String },
+    romDegrees: { type: Number },
+    responseTimeSeconds: { type: Number },
+    success: { type: Boolean },
   },
-  { _id: false }
+  { _id: false, strict: false }
 );
 
 // Mirrors Session's inline romData shape (shoulder/elbow/wrist

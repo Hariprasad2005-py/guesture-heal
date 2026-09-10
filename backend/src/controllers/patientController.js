@@ -81,7 +81,27 @@ exports.createPatient = async (req, res, next) => {
     };
 
     const patient = new Patient(patientData);
-    patient.rehabPlan = generateRehabPlan(patient.condition, patient.painLevel, patient.affectedSide);
+    // Regenerate exercise content from scratch, then merge each day's
+    // existing completion state back in by day number. This intentionally
+    // takes ALL exercise content (exerciseId, name, gameType, targetRom,
+    // sets, reps, etc.) from the freshly generated plan -- never from the
+    // old plan -- so stale exercise data is never preserved. Only
+    // isCompleted/completedAt carry over, and only when a day with that
+    // number already existed in the patient's current plan.
+    const newPlan = generateRehabPlan(patient.condition, patient.painLevel, patient.affectedSide);
+    const existingByDay = new Map(
+      (patient.rehabPlan || []).map((d) => [Number(d.day), d])
+    );
+    const mergedPlan = newPlan.map((day) => {
+      const existingDay = existingByDay.get(Number(day.day));
+      return {
+        ...day,
+        isCompleted: existingDay ? existingDay.isCompleted : day.isCompleted,
+        completedAt: existingDay ? existingDay.completedAt : day.completedAt,
+      };
+    });
+
+    patient.rehabPlan = mergedPlan;
     await patient.save();
 
     res.status(201).json({ success: true, patient });
@@ -145,7 +165,7 @@ exports.regeneratePlan = async (req, res, next) => {
     }
 
     patient.rehabPlan = generateRehabPlan(patient.condition, patient.painLevel, patient.affectedSide);
-    patient.currentDay = 1;
+
     await patient.save();
 
     res.json({ success: true, rehabPlan: patient.rehabPlan });
@@ -265,8 +285,9 @@ exports.selfRegister = async (req, res, next) => {
 
 exports.getPublicPatient = async (req, res, next) => {
   try {
-    const patient = await Patient.findOne({ patientId: req.params.id, isActive: true })
-      .select("-therapistId -__v");
+  const patient = await Patient.findOne({ patientId: req.params.id, isActive: true })
+  .populate("therapistId", "name")
+  .select("-__v");
     if (!patient) {
       return res.status(404).json({ success: false, message: "Patient not found" });
     }

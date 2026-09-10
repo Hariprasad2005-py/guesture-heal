@@ -18,64 +18,101 @@ function extractRepData(session) {
   return [];
 }
 
-// Helper to extract metrics from gameSpecific
+// Helper to extract metrics from gameSpecific.
+// IMPORTANT: every field here uses `typeof x === "number"` checks, never
+// `?? 0` / `|| 0`. A missing metric must resolve to `null`, not 0 -- 0 is a
+// real, distinct clinical value. Downstream code relies on `typeof === "number"`
+// to distinguish "recorded" from "not recorded", so a stray `?? 0` here would
+// silently defeat every null-safety check that consumes this object.
 function extractGameMetrics(session) {
   const metrics = session.gameSpecific?.fullMetrics || {};
   const repData = extractRepData(session);
 
-  // Calculate smoothness from repData if not available
-  let smoothness = metrics.smoothness ?? session.smoothness ?? 0;
-  if (smoothness === 0 && repData.length > 0) {
-    // Try multiple possible field names for smoothness
+  // Smoothness: prefer explicit numeric fields, then derive from repData.
+  let smoothness = null;
+  if (typeof metrics.smoothness === "number") {
+    smoothness = metrics.smoothness;
+  } else if (typeof session.smoothness === "number") {
+    smoothness = session.smoothness;
+  }
+  if (smoothness == null && repData.length > 0) {
     const smoothnessValues = repData
-      .map(r => r.smoothness || r.movementQuality || r.quality || 0)
-      .filter(v => typeof v === 'number' && v > 0);
+      .map((r) => {
+        if (typeof r.smoothness === "number") return r.smoothness;
+        if (typeof r.movementQuality === "number") return r.movementQuality;
+        if (typeof r.quality === "number") return r.quality;
+        return null;
+      })
+      .filter((v) => v != null && v > 0);
     if (smoothnessValues.length > 0) {
       smoothness = Math.round(smoothnessValues.reduce((a, b) => a + b, 0) / smoothnessValues.length);
     }
   }
 
-  // Calculate movement quality from repData
-  let movementQuality = metrics.movementQuality || 0;
-  if (movementQuality === 0 && repData.length > 0) {
+  // Movement quality: same pattern.
+  let movementQuality = typeof metrics.movementQuality === "number" ? metrics.movementQuality : null;
+  if (movementQuality == null && repData.length > 0) {
     const qualityValues = repData
-      .map(r => r.movementQuality || r.smoothness || r.quality || 0)
-      .filter(v => typeof v === 'number' && v > 0);
+      .map((r) => {
+        if (typeof r.movementQuality === "number") return r.movementQuality;
+        if (typeof r.smoothness === "number") return r.smoothness;
+        if (typeof r.quality === "number") return r.quality;
+        return null;
+      })
+      .filter((v) => v != null && v > 0);
     if (qualityValues.length > 0) {
       movementQuality = Math.round(qualityValues.reduce((a, b) => a + b, 0) / qualityValues.length);
     }
   }
 
-  // Calculate stability from consistency or smoothness variation
-  let stability = metrics.stability || session.stability || 0;
-  if (stability === 0 && repData.length > 1) {
-    // Stability is inverse of variation in smoothness
+  // Stability: prefer explicit numeric fields, then derive from variance
+  // in per-rep smoothness as a proxy for consistency.
+  let stability = null;
+  if (typeof metrics.stability === "number") {
+    stability = metrics.stability;
+  } else if (typeof session.stability === "number") {
+    stability = session.stability;
+  }
+  if (stability == null && repData.length > 1) {
     const smoothnessVals = repData
-      .map(r => r.smoothness || r.movementQuality || 0)
-      .filter(v => typeof v === 'number' && v > 0);
+      .map((r) => {
+        if (typeof r.smoothness === "number") return r.smoothness;
+        if (typeof r.movementQuality === "number") return r.movementQuality;
+        return null;
+      })
+      .filter((v) => v != null && v > 0);
     if (smoothnessVals.length > 1) {
       const mean = smoothnessVals.reduce((a, b) => a + b, 0) / smoothnessVals.length;
       const variance = smoothnessVals.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / smoothnessVals.length;
       const stdDev = Math.sqrt(variance);
-      // Convert to 0-100 scale (higher stdDev = lower stability)
       stability = Math.round(Math.max(0, 100 - stdDev * 2));
     }
   }
 
   return {
-    accuracy: metrics.accuracy ?? session.accuracy ?? 0,
-    smoothness: smoothness,
-    movementQuality: movementQuality,
-    stability: stability,
-    score: metrics.total ?? session.score ?? 0,
-    maxReach: metrics.maximumReachDistance ?? 0,
-    avgReach: metrics.averageReachDistance ?? 0,
-    successfulReps: metrics.successfulReps ?? session.hitsOrCatchesOrCompletions ?? 0,
-    totalReps: metrics.attemptedReps ?? session.reps ?? 0,
-    bestStreak: metrics.bestStreak ?? session.maxCombo ?? 0,
-    maxRom: metrics.maximumReachDistance ?? 0,
-    avgRom: metrics.averageReachDistance ?? 0,
-    consistency: metrics.consistency ?? 0,
+    accuracy: typeof metrics.accuracy === "number"
+      ? metrics.accuracy
+      : (typeof session.accuracy === "number" ? session.accuracy : null),
+    smoothness,
+    movementQuality,
+    stability,
+    score: typeof metrics.total === "number"
+      ? metrics.total
+      : (typeof session.score === "number" ? session.score : null),
+    maxReach: typeof metrics.maximumReachDistance === "number" ? metrics.maximumReachDistance : null,
+    avgReach: typeof metrics.averageReachDistance === "number" ? metrics.averageReachDistance : null,
+    successfulReps: typeof metrics.successfulReps === "number"
+      ? metrics.successfulReps
+      : (typeof session.hitsOrCatchesOrCompletions === "number" ? session.hitsOrCatchesOrCompletions : null),
+    totalReps: typeof metrics.attemptedReps === "number"
+      ? metrics.attemptedReps
+      : (typeof session.reps === "number" ? session.reps : null),
+    bestStreak: typeof metrics.bestStreak === "number"
+      ? metrics.bestStreak
+      : (typeof session.maxCombo === "number" ? session.maxCombo : null),
+    maxRom: typeof metrics.maximumReachDistance === "number" ? metrics.maximumReachDistance : null,
+    avgRom: typeof metrics.averageReachDistance === "number" ? metrics.averageReachDistance : null,
+    consistency: typeof metrics.consistency === "number" ? metrics.consistency : null,
   };
 }
 
@@ -120,8 +157,8 @@ exports.getReport = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Invalid report ID format." });
     }
 
-    // ANY authenticated user (Admin, Therapist, or Patient) can fetch 
-    // the report by ID. Removing the therapistId restriction fixes the 
+    // ANY authenticated user (Admin, Therapist, or Patient) can fetch
+    // the report by ID. Removing the therapistId restriction fixes the
     // PDF download for self-registered patients where therapistId is null.
     const filter = { _id: req.params.id };
 
@@ -140,23 +177,32 @@ exports.getReport = async (req, res, next) => {
 
     const reportObj = report.toObject();
 
-    // Direct Patient lookup — more reliable than .populate() because
-    // populate only returns fields that physically exist on the MongoDB
-    // document. A direct findById returns a full Mongoose document with
-    // schema defaults applied, guaranteeing we get every field.
+    // Direct Patient lookup so we can attach a *current* patient object for
+    // display fields (e.g. contact info) that should reflect the live
+    // record. This must NOT be used to overwrite `patientSnapshot`: that
+    // snapshot was captured at report-generation time and is the
+    // historical clinical record for this report. Replacing it with live
+    // patient data would silently rewrite history (e.g. a patient's age,
+    // condition, or pain level as of *today* attached to a report from
+    // weeks ago). Only synthesize a snapshot as a fallback if the report
+    // genuinely has none stored.
     const livePatient = await Patient.findById(report.patientId);
     if (livePatient) {
-      reportObj.patientSnapshot = {
-        name: livePatient.name || "Unknown Patient",
-        age: typeof livePatient.age === "number" ? livePatient.age : null,
-        gender: livePatient.gender || null,
-        condition: livePatient.condition || null,
-        surgeryType: livePatient.surgeryType || null,
-        surgeryDate: livePatient.surgeryDate || null,
-        painLevel: typeof livePatient.painLevel === "number" ? livePatient.painLevel : null,
-        goals: livePatient.goals || null,
-      };
-      // Also attach the populated patient object for the frontend
+      if (!reportObj.patientSnapshot) {
+        reportObj.patientSnapshot = {
+          name: livePatient.name || "Unknown Patient",
+          age: typeof livePatient.age === "number" ? livePatient.age : null,
+          gender: livePatient.gender || null,
+          condition: livePatient.condition || null,
+          surgeryType: livePatient.surgeryType || null,
+          surgeryDate: livePatient.surgeryDate || null,
+          painLevel: typeof livePatient.painLevel === "number" ? livePatient.painLevel : null,
+          goals: livePatient.goals || null,
+        };
+      }
+      // Attach the live patient object separately (e.g. for contact info,
+      // navigation to the current chart) without touching the historical
+      // clinical snapshot above.
       reportObj.patientId = livePatient.toObject();
     }
 
@@ -175,33 +221,18 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
   const repData = extractRepData(session);
   const gameMetrics = extractGameMetrics(session);
 
-  // ===== TEMPORARY DEBUG - REMOVE AFTER TESTING =====
-  console.log('[Report] Session ID:', session._id);
-  console.log('[Report] repData from extractRepData:', repData.length, 'items');
-  if (repData.length > 0) {
-    console.log('[Report] First rep keys:', Object.keys(repData[0]));
-    console.log('[Report] First rep sample:', JSON.stringify(repData[0], null, 2));
-  }
-  console.log('[Report] gameMetrics:', JSON.stringify(gameMetrics, null, 2));
-  // ==================================================
-
   /*
    * ---------------------------------------------------------------
-   * PATIENT DATA
+   * PATIENT DATA - ALWAYS USE FRESH DATA FROM PATIENT OBJECT
    * ---------------------------------------------------------------
    */
-  /*
- * ---------------------------------------------------------------
- * PATIENT DATA - ALWAYS USE FRESH DATA FROM PATIENT OBJECT
- * ---------------------------------------------------------------
- */
   // Force refresh patient data - use the patient object passed in.
   // If it's an unresolved ObjectId, fetch the full document.
   let fullPatient = patient;
   if (!fullPatient.name) {
     // patient might just be an objectID or unpopulated ref
     try {
-      fullPatient = await Patient.findById(session.patientId || patient._id || patient) || patient;
+      fullPatient = (await Patient.findById(session.patientId || patient._id || patient)) || patient;
     } catch {
       // fallback
     }
@@ -218,9 +249,6 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
     painLevel: typeof fullPatient.painLevel === "number" ? fullPatient.painLevel : null,
   };
 
-  // DEBUG: Log what we're actually getting
-  console.log('[PATIENT DATA]', JSON.stringify(patientSnapshot, null, 2));
-
   /*
    * ---------------------------------------------------------------
    * ROM ANALYSIS
@@ -228,17 +256,28 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
    */
   let romAnalysis = [];
 
-  // If we have game metrics, create a ROM analysis entry from them
-  if (gameMetrics.maxReach > 0 || gameMetrics.avgReach > 0) {
-    const targetRom = 90;
-    const maxRom = gameMetrics.maxReach || 0;
-    const avgRom = gameMetrics.avgReach || 0;
+  // If we have game metrics for reach distance, create a ROM analysis
+  // entry from them. targetRom must come from this patient's actual
+  // rehab plan for this session's day -- never a hardcoded clinical
+  // number, and never fall back to 0/90 when it's genuinely absent.
+  if (typeof gameMetrics.maxReach === "number" || typeof gameMetrics.avgReach === "number") {
+    const dayPlan = patient.rehabPlan?.find((d) => Number(d.day) === Number(session.day));
+    const planEx = dayPlan?.exercises?.find(
+      (e) => e.exerciseId === session.gameType || e.gameType === session.gameType
+    );
+    const targetRom = typeof planEx?.targetRom === "number" && planEx.targetRom > 0 ? planEx.targetRom : null;
+    const maxRom = typeof gameMetrics.maxReach === "number" ? gameMetrics.maxReach : null;
+    const avgRom = typeof gameMetrics.avgReach === "number" ? gameMetrics.avgReach : null;
 
-    const percentageAchieved = targetRom > 0 ? Math.round((avgRom / targetRom) * 100) : 0;
+    const percentageAchieved =
+      targetRom != null && avgRom != null ? Math.round((avgRom / targetRom) * 100) : null;
 
-    let clinicalStatus = "Within target parameters";
-    if (percentageAchieved < 90) clinicalStatus = "Below target parameters";
-    else if (percentageAchieved > 110) clinicalStatus = "Above target parameters";
+    let clinicalStatus = null;
+    if (percentageAchieved != null) {
+      clinicalStatus = "Within target parameters";
+      if (percentageAchieved < 90) clinicalStatus = "Below target parameters";
+      else if (percentageAchieved > 110) clinicalStatus = "Above target parameters";
+    }
 
     romAnalysis.push({
       exerciseName: session.gameType === "cloud_reach" ? "Cloud Reach" : "Exercise",
@@ -255,14 +294,18 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
     const existingResults = session.exerciseResults.map((ex) => {
       const dayPlan = patient.rehabPlan?.find((d) => Number(d.day) === Number(session.day));
       const planEx = dayPlan?.exercises?.find((e) => e.exerciseId === ex.exerciseId);
-      const targetRom = typeof planEx?.targetRom === "number" && planEx.targetRom > 0 ? planEx.targetRom : 90;
-      const averageRom = typeof ex.averageRom === "number" ? ex.averageRom : 0;
+      const targetRom = typeof planEx?.targetRom === "number" && planEx.targetRom > 0 ? planEx.targetRom : null;
+      const averageRom = typeof ex.averageRom === "number" ? ex.averageRom : null;
       const maxRom = typeof ex.maxRom === "number" ? ex.maxRom : averageRom;
-      const percentageAchieved = targetRom > 0 && averageRom >= 0 ? Math.round((averageRom / targetRom) * 100) : 0;
+      const percentageAchieved =
+        targetRom != null && averageRom != null ? Math.round((averageRom / targetRom) * 100) : null;
 
-      let clinicalStatus = "Within target parameters";
-      if (percentageAchieved < 90) clinicalStatus = "Below target parameters";
-      else if (percentageAchieved > 110) clinicalStatus = "Above target parameters";
+      let clinicalStatus = null;
+      if (percentageAchieved != null) {
+        clinicalStatus = "Within target parameters";
+        if (percentageAchieved < 90) clinicalStatus = "Below target parameters";
+        else if (percentageAchieved > 110) clinicalStatus = "Above target parameters";
+      }
 
       return {
         exerciseName: ex.name || ex.exerciseName || ex.exerciseId || "Exercise",
@@ -288,81 +331,70 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
    * SESSION PERFORMANCE
    * ---------------------------------------------------------------
    */
-  const accuracy = gameMetrics.accuracy || (typeof session.accuracy === "number" ? session.accuracy : 0);
-  const score = gameMetrics.score || (typeof session.score === "number" ? session.score : 0);
-  const maxCombo = gameMetrics.bestStreak || (typeof session.maxCombo === "number" ? session.maxCombo : 0);
-  const smoothness = gameMetrics.smoothness || (typeof session.smoothness === "number" ? session.smoothness : 0);
+  const accuracy =
+    typeof session.accuracy === "number"
+      ? session.accuracy
+      : (typeof gameMetrics.accuracy === "number" ? gameMetrics.accuracy : null);
+  const score =
+    typeof session.score === "number"
+      ? session.score
+      : (typeof gameMetrics.score === "number" ? gameMetrics.score : null);
+  const maxCombo =
+    typeof session.maxCombo === "number"
+      ? session.maxCombo
+      : (typeof gameMetrics.bestStreak === "number" ? gameMetrics.bestStreak : null);
 
-  const level = typeof session.level === "number" ? session.level : 1;
-  const combo = typeof session.combo === "number" ? session.combo : 0;
-  const stars = typeof session.stars === "number" ? session.stars : 0;
-  const durationSeconds = typeof session.durationSeconds === "number" ? session.durationSeconds : 0;
+  const level = typeof session.level === "number" ? session.level : null;
+  const combo = typeof session.combo === "number" ? session.combo : null;
+  const stars = typeof session.stars === "number" ? session.stars : null;
+  const durationSeconds = typeof session.durationSeconds === "number" ? session.durationSeconds : null;
 
-  let totalReps = 0;
-  if (gameMetrics.totalReps > 0) {
+  // totalReps: check every legitimate source in priority order. A source
+  // is only used if it actually holds a number -- an empty/absent source
+  // must never collapse to 0.
+  let totalReps = null;
+  if (typeof gameMetrics.totalReps === "number") {
     totalReps = gameMetrics.totalReps;
-  } else if (session.reps && typeof session.reps === "number") {
+  } else if (typeof session.reps === "number") {
     totalReps = session.reps;
-  } else if (Array.isArray(session.exerciseResults)) {
-    totalReps = session.exerciseResults.reduce(
-      (sum, exercise) => sum + (typeof exercise.repsCompleted === "number" ? exercise.repsCompleted : 0),
-      0
-    );
+  } else if (Array.isArray(session.exerciseResults) && session.exerciseResults.length > 0) {
+    const repCounts = session.exerciseResults
+      .map((exercise) => (typeof exercise.repsCompleted === "number" ? exercise.repsCompleted : null))
+      .filter((v) => v != null);
+    if (repCounts.length > 0) {
+      totalReps = repCounts.reduce((sum, v) => sum + v, 0);
+    }
   } else if (repData.length > 0) {
     totalReps = repData.length;
   }
 
   /*
    * ---------------------------------------------------------------
-   * SMOOTHNESS & STABILITY - GUARANTEED VALUES
+   * SMOOTHNESS & STABILITY
    * ---------------------------------------------------------------
+   * extractGameMetrics() already derives these from every legitimate
+   * source (explicit session/metric fields, then repData) with proper
+   * null-safety -- do not recompute them a second time here. Prefer an
+   * explicit session-level field first, then the derived gameMetrics
+   * value. null = "not recorded", never a stand-in clinical number.
+   * Only clamp a value that actually exists.
    */
-  let smoothnessValue = 75; // Default
-  let stabilityValue = 85;  // Default
-
-  // Try to get from session first
-  if (typeof session.smoothness === 'number' && session.smoothness > 0) {
+  let smoothnessValue = null;
+  if (typeof session.smoothness === "number") {
     smoothnessValue = session.smoothness;
-  } else if (typeof gameMetrics.smoothness === 'number' && gameMetrics.smoothness > 0) {
+  } else if (typeof gameMetrics.smoothness === "number") {
     smoothnessValue = gameMetrics.smoothness;
-  } else if (repData.length > 0) {
-    // Calculate from repData
-    let smoothVals = [];
-    let accVals = [];
-
-    for (const r of repData) {
-      // Try all possible field names
-      if (typeof r.smoothness === 'number' && r.smoothness > 0) smoothVals.push(r.smoothness);
-      if (typeof r.movementQuality === 'number' && r.movementQuality > 0) smoothVals.push(r.movementQuality);
-      if (typeof r.quality === 'number' && r.quality > 0) smoothVals.push(r.quality);
-      if (typeof r.accuracy === 'number' && r.accuracy > 0) accVals.push(r.accuracy);
-    }
-
-    if (smoothVals.length > 0) {
-      smoothnessValue = Math.round(smoothVals.reduce((a, b) => a + b, 0) / smoothVals.length);
-    } else if (accVals.length > 0) {
-      smoothnessValue = Math.round(accVals.reduce((a, b) => a + b, 0) / accVals.length);
-    }
-
-    // Calculate stability from consistency
-    if (accVals.length > 1) {
-      const mean = accVals.reduce((a, b) => a + b, 0) / accVals.length;
-      const variance = accVals.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / accVals.length;
-      const stdDev = Math.sqrt(variance);
-      stabilityValue = Math.round(Math.max(0, 100 - stdDev * 1.5));
-    } else if (smoothVals.length > 1) {
-      const mean = smoothVals.reduce((a, b) => a + b, 0) / smoothVals.length;
-      const variance = smoothVals.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / smoothVals.length;
-      const stdDev = Math.sqrt(variance);
-      stabilityValue = Math.round(Math.max(0, 100 - stdDev * 1.5));
-    }
   }
 
-  // Ensure values are in 0-100 range
-  smoothnessValue = Math.max(0, Math.min(100, smoothnessValue));
-  stabilityValue = Math.max(0, Math.min(100, stabilityValue));
+  let stabilityValue = null;
+  if (typeof session.stability === "number") {
+    stabilityValue = session.stability;
+  } else if (typeof gameMetrics.stability === "number") {
+    stabilityValue = gameMetrics.stability;
+  }
 
-  console.log(`[Report] FINAL - Smoothness: ${smoothnessValue}, Stability: ${stabilityValue}`);
+  if (smoothnessValue != null) smoothnessValue = Math.max(0, Math.min(100, smoothnessValue));
+  if (stabilityValue != null) stabilityValue = Math.max(0, Math.min(100, stabilityValue));
 
   /*
    * ---------------------------------------------------------------
@@ -370,7 +402,7 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
    * ---------------------------------------------------------------
    */
   const observations = buildObservations(accuracy, score, romAnalysis);
-  const recommendations = buildRecommendations(accuracy, patientSnapshot.painLevel, session.day);
+  const recommendations = buildRecommendations(accuracy, patientSnapshot.painLevel, session.day, patient.rehabPlan);
 
   /*
    * ---------------------------------------------------------------
@@ -385,7 +417,7 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
     gameType: session.gameType,
     patientSnapshot: patientSnapshot,
     performance: {
-      day: typeof session.day === "number" ? session.day : 1,
+      day: typeof session.day === "number" ? session.day : null,
       score: score,
       level: level,
       accuracy: accuracy,
@@ -400,34 +432,40 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
     },
     romAnalysis: romAnalysis,
     repData: repData,
-    romData: session.romData || {
-      shoulder: {
-        flexion: gameMetrics.maxReach || 0,
-        extension: 0
-      },
-      elbow: {
-        flexion: 0,
-        extension: 0
-      },
-      wrist: {
-        flexion: 0,
-        extension: 0,
-        rotation: 0
-      },
-    },
+    // Use the session's own recorded romData when it exists. Never
+    // fabricate joint-specific ROM (e.g. mapping generic reach distance
+    // onto "shoulder flexion") -- that is a clinical claim the session
+    // never actually made. When nothing was recorded, this is null, and
+    // the UI/PDF must render "Not recorded" per joint rather than 0deg.
+    romData: session.romData && typeof session.romData === "object" ? session.romData : null,
+    // No hardcoded target (90) and no fabricated 0s. targetRom comes only
+    // from the patient's actual rehab plan for this session's day/exercise.
     romDataRaw: (() => {
-      const avgRom = gameMetrics.avgReach || 0;
-      const pct = gameMetrics.maxReach > 0 ? Math.round((avgRom / 90) * 100) : 0;
-      let status = "Within target parameters";
-      if (pct < 90) status = "Below target parameters";
-      else if (pct > 110) status = "Above target parameters";
+      const avgRom = typeof gameMetrics.avgReach === "number" ? gameMetrics.avgReach : null;
+      const maxRom = typeof gameMetrics.maxReach === "number" ? gameMetrics.maxReach : null;
+
+      const dayPlan = patient.rehabPlan?.find((d) => Number(d.day) === Number(session.day));
+      const planEx = dayPlan?.exercises?.find(
+        (e) => e.exerciseId === session.gameType || e.gameType === session.gameType
+      );
+      const targetRom = typeof planEx?.targetRom === "number" && planEx.targetRom > 0 ? planEx.targetRom : null;
+
+      const percentageAchieved =
+        targetRom != null && avgRom != null ? Math.round((avgRom / targetRom) * 100) : null;
+
+      let clinicalStatus = null;
+      if (percentageAchieved != null) {
+        clinicalStatus = "Within target parameters";
+        if (percentageAchieved < 90) clinicalStatus = "Below target parameters";
+        else if (percentageAchieved > 110) clinicalStatus = "Above target parameters";
+      }
 
       return {
         averageRom: avgRom,
-        maxRom: gameMetrics.maxReach || 0,
-        targetRom: 90,
-        percentageAchieved: pct,
-        clinicalStatus: status,
+        maxRom: maxRom,
+        targetRom: targetRom,
+        percentageAchieved: percentageAchieved,
+        clinicalStatus: clinicalStatus,
       };
     })(),
     smoothness: smoothnessValue,
@@ -440,6 +478,12 @@ exports.buildReportForSession = async (session, patient, therapistId = null) => 
    * ---------------------------------------------------------------
    * UPSERT
    * ---------------------------------------------------------------
+   * This always recomputes reportData from the *current* canonical
+   * session/patient data and writes it, whether the report already
+   * existed or not -- so a re-generated report never preserves stale
+   * values from a previous run. `alreadyExisted` is only used to choose
+   * the right response message/status (see generateReport below), never
+   * to skip recomputation.
    */
   const existingReport = await Report.findOne({
     sessionId: session._id,
@@ -487,11 +531,15 @@ exports.generateReport = async (req, res, next) => {
     const patient = session.patientId;
     const { report, alreadyExisted } = await exports.buildReportForSession(session, patient, req.user._id);
 
-    if (alreadyExisted) {
-      return res.json({ success: true, report, message: "Report already exists." });
-    }
-
-    res.status(201).json({ success: true, report });
+    // buildReportForSession() always recomputes and overwrites the report
+    // from the current session data -- an existing report is *updated*,
+    // not left untouched -- so the response must say so instead of
+    // implying nothing happened.
+    return res.status(alreadyExisted ? 200 : 201).json({
+      success: true,
+      report,
+      message: alreadyExisted ? "Report updated with the latest session data." : "Report created.",
+    });
   } catch (err) {
     next(err);
   }
@@ -605,7 +653,7 @@ exports.deleteReport = async (req, res, next) => {
     next(err);
   }
 };
-// Add this function to reportController.js
+
 exports.generatePublicReport = async (req, res, next) => {
   try {
     const { sessionId } = req.params;
@@ -632,19 +680,161 @@ exports.generatePublicReport = async (req, res, next) => {
     const patient = session.patientId;
     const { report, alreadyExisted } = await exports.buildReportForSession(session, patient, null);
 
-    if (alreadyExisted) {
-      return res.json({ success: true, report, message: "Report already exists." });
-    }
-
-    res.status(201).json({ success: true, report });
+    return res.status(alreadyExisted ? 200 : 201).json({
+      success: true,
+      report,
+      message: alreadyExisted ? "Report updated with the latest session data." : "Report created.",
+    });
   } catch (err) {
     next(err);
   }
 };
 
+// Regenerate an existing report from the current session data, for a
+// public (patient, no-login) caller. Mirrors generatePublicReport's
+// ownership check via session.patientIdRef -- there is no req.user here,
+// so this must never assume admin/therapist access like the authenticated
+// regenerateReport below does.
+exports.regeneratePublicReport = async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+    const { patientId } = req.query;
+
+    if (!mongoose.Types.ObjectId.isValid(sessionId)) {
+      return res.status(400).json({ success: false, message: "Invalid session ID format." });
+    }
+
+    const session = await Session.findById(sessionId).populate("patientId");
+    if (!session) {
+      return res.status(404).json({ success: false, message: "Session not found." });
+    }
+
+    // Verify the session belongs to this patient
+    if (session.patientIdRef !== patientId) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+
+    if (session.status !== "completed") {
+      return res.status(400).json({ success: false, message: "Cannot regenerate report for incomplete session." });
+    }
+
+    const patient = session.patientId;
+    if (!patient) {
+      return res.status(404).json({ success: false, message: "Patient not found for this session." });
+    }
+
+    const therapistId = session.therapistId || patient.therapistId || null;
+
+    const { report } = await exports.buildReportForSession(session, patient, therapistId);
+
+    return res.status(200).json({
+      success: true,
+      report,
+      message: "Report regenerated successfully from the latest session data.",
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Regenerate an existing report from the current session data.
+// This overwrites the existing report instead of creating a duplicate.
+exports.regenerateReport = async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(sessionId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid session ID format.",
+      });
+    }
+
+    const session = await Session.findById(sessionId).populate("patientId");
+
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: "Session not found.",
+      });
+    }
+
+    if (session.status !== "completed") {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot regenerate report for incomplete session.",
+      });
+    }
+
+    const isAdmin = req.user?.role === "admin";
+    const isTherapist = req.user?.role === "therapist";
+
+    // Admins can regenerate any report.
+    // Therapists can regenerate sessions belonging to them,
+    // or sessions for patients assigned to them.
+    if (!isAdmin && !isTherapist) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+      });
+    }
+
+    if (
+      isTherapist &&
+      session.therapistId &&
+      String(session.therapistId) !== String(req.user._id)
+    ) {
+      const patient = await Patient.findById(session.patientId);
+
+      if (
+        !patient ||
+        !patient.therapistId ||
+        String(patient.therapistId) !== String(req.user._id)
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "You are not authorized to regenerate this report.",
+        });
+      }
+    }
+
+    const patient = session.patientId;
+
+    if (!patient) {
+      return res.status(404).json({
+        success: false,
+        message: "Patient not found for this session.",
+      });
+    }
+
+    const therapistId =
+      isTherapist
+        ? req.user._id
+        : session.therapistId || patient.therapistId || null;
+
+    const { report } = await exports.buildReportForSession(
+      session,
+      patient,
+      therapistId
+    );
+
+    return res.status(200).json({
+      success: true,
+      report,
+      message: "Report regenerated successfully from the latest session data.",
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+// accuracy/romAnalysis may legitimately be missing -- null is a valid input,
+// not an error case, and must never be treated as "poor performance".
 function buildObservations(accuracy, score, romAnalysis) {
   const lines = [];
-  if (accuracy >= 85) {
+
+  if (typeof accuracy !== "number") {
+    lines.push("Movement accuracy was not recorded for this session.");
+  } else if (accuracy >= 85) {
     lines.push("Patient demonstrated excellent form and consistency throughout the session.");
   } else if (accuracy >= 65) {
     lines.push("Patient showed satisfactory performance with some inconsistency in form.");
@@ -652,39 +842,55 @@ function buildObservations(accuracy, score, romAnalysis) {
     lines.push("Patient required guidance and showed difficulty maintaining proper form.");
   }
 
-  const avgRomPct = romAnalysis.length
-    ? romAnalysis.reduce((s, r) => s + r.percentageAchieved, 0) / romAnalysis.length
-    : 0;
-
-  if (avgRomPct >= 90) {
-    lines.push("Range of motion is approaching or exceeding target thresholds.");
-  } else if (avgRomPct >= 70) {
-    lines.push("Range of motion is progressing well but has not yet reached target values.");
+  // Only evaluate ROM against target if at least one exercise actually has
+  // a calculated percentageAchieved -- i.e. both a real target and a real
+  // measured value existed. Never treat "no target" as "below target".
+  const validRom = romAnalysis.filter((r) => typeof r.percentageAchieved === "number");
+  if (validRom.length > 0) {
+    const avgRomPct = validRom.reduce((s, r) => s + r.percentageAchieved, 0) / validRom.length;
+    if (avgRomPct >= 90) {
+      lines.push("Range of motion is approaching or exceeding target thresholds.");
+    } else if (avgRomPct >= 70) {
+      lines.push("Range of motion is progressing well but has not yet reached target values.");
+    } else {
+      lines.push("Range of motion remains below target; continued focused rehabilitation is recommended.");
+    }
   } else {
-    lines.push("Range of motion remains below target; continued focused rehabilitation is recommended.");
+    lines.push("No target range of motion was on record for this session, so range-of-motion progress could not be evaluated against a target.");
   }
 
   return lines.join(" ");
 }
 
-function buildRecommendations(accuracy, painLevel, day) {
+// painLevel here is the patient's baseline/profile value, not a live
+// session measurement -- it must be labeled as such and must never be
+// asserted as clinically "well-controlled" on that basis alone.
+// rehabPlan is the patient's actual plan; plan length must never be
+// assumed to be a fixed number of days.
+function buildRecommendations(accuracy, painLevel, day, rehabPlan) {
   const lines = [];
-  if (accuracy < 65) {
+
+  if (typeof accuracy !== "number") {
+    lines.push("Movement accuracy was not recorded for this session, so a progression recommendation could not be based on accuracy.");
+  } else if (accuracy < 65) {
     lines.push("Consider revisiting current day exercises before progressing.");
   } else {
     lines.push("Patient may progress to the next session as scheduled.");
   }
 
-  if (painLevel >= 7) {
-    lines.push("Pain levels are high; consult physician before advancing exercise intensity.");
+  if (typeof painLevel !== "number") {
+    lines.push("No pain level is on record for this patient.");
+  } else if (painLevel >= 7) {
+    lines.push("Pain level recorded in the patient record is high; consult physician before advancing exercise intensity.");
   } else if (painLevel >= 4) {
-    lines.push("Monitor pain levels closely and adjust exercise intensity as needed.");
+    lines.push("Pain level recorded in the patient record; monitor closely and adjust exercise intensity as needed.");
   } else {
-    lines.push("Pain levels are well-controlled; continue current rehabilitation protocol.");
+    lines.push("Pain level recorded in the patient record; no live session pain measurement was captured.");
   }
 
-  if (day >= 5) {
-    lines.push("Patient is in the final phase of the 7-day plan; evaluate for extended program.");
+  const planLength = Array.isArray(rehabPlan) ? rehabPlan.length : null;
+  if (typeof day === "number" && planLength != null && planLength > 0 && day >= planLength) {
+    lines.push(`Patient is in the final phase of the ${planLength}-day plan; evaluate for extended program.`);
   }
 
   return lines.join(" ");
