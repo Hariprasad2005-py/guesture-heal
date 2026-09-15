@@ -15,8 +15,12 @@ const patientSchema = new mongoose.Schema(
     patientId: {
       type: String,
       unique: true,
-      index: true,
       // Remove 'required: true' - it will be auto-generated
+      // NOTE: `unique: true` already creates an index on this field.
+      // Do not also add `index: true` here or a separate
+      // patientSchema.index({ patientId: 1 }) below -- either one
+      // duplicates this same index and triggers Mongoose's
+      // "Duplicate schema index" warning at startup.
     },
     name: {
       type: String,
@@ -87,6 +91,7 @@ const patientSchema = new mongoose.Schema(
             targetRom: { type: Number },
             description: { type: String },
             videoUrl: { type: String, default: "" },
+            isCompleted: { type: Boolean, default: false },
           },
         ],
         isCompleted: { type: Boolean, default: false },
@@ -111,7 +116,8 @@ const patientSchema = new mongoose.Schema(
       type: String,
       enum: ["active", "inactive", "at-risk", "discharged"],
       default: "active",
-      index: true,
+      // Indexed below in the INDEXES section (patientSchema.index({ status: 1 })) --
+      // not here too, to avoid a duplicate index on the same field.
     },
     registrationMethod: {
       type: String,
@@ -177,9 +183,11 @@ patientSchema.pre("save", async function (next) {
 });
 
 // ─── INDEXES ──────────────────────────────────────────────────────────────────
+// patientId is already indexed via `unique: true` on the field itself above --
+// intentionally not repeated here (that was the source of the duplicate-index
+// warning).
 patientSchema.index({ therapistId: 1, createdAt: -1 });
 patientSchema.index({ isActive: 1 });
-patientSchema.index({ patientId: 1 }, { unique: true });
 patientSchema.index({ status: 1 });
 patientSchema.index({ riskScore: -1 });
 

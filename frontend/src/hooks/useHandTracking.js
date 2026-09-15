@@ -16,7 +16,25 @@ const WRIST = 0;
 const SMOOTHING_ALPHA = 0.4;
 const DEBUG_LOG_EVERY_N_FRAMES = 120; // only used when debug === true
 
-export function useHandTracking({ videoRef, enabled = true, numHands = 1, debug = false } = {}) {
+// MediaPipe's own defaults (0.5 each) are tuned for well-lit, front-and-
+// center hands. In this app the hand is frequently near the frame edge,
+// at an angle, or briefly fast-moving mid-trace — all of which are
+// normal here, not actually low-confidence gestures — so the defaults
+// drop frames that should still count as "hand visible." Lowering these
+// trades a little false-positive risk for far fewer real dropouts.
+const DEFAULT_MIN_HAND_DETECTION_CONFIDENCE = 0.3;
+const DEFAULT_MIN_HAND_PRESENCE_CONFIDENCE = 0.3;
+const DEFAULT_MIN_TRACKING_CONFIDENCE = 0.3;
+
+export function useHandTracking({
+  videoRef,
+  enabled = true,
+  numHands = 1,
+  debug = false,
+  minHandDetectionConfidence = DEFAULT_MIN_HAND_DETECTION_CONFIDENCE,
+  minHandPresenceConfidence = DEFAULT_MIN_HAND_PRESENCE_CONFIDENCE,
+  minTrackingConfidence = DEFAULT_MIN_TRACKING_CONFIDENCE,
+} = {}) {
   const [fingertip, setFingertip] = useState(null);
   const [hands, setHands] = useState([]);
   const [isReady, setIsReady] = useState(false);
@@ -112,6 +130,9 @@ export function useHandTracking({ videoRef, enabled = true, numHands = 1, debug 
           baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
           runningMode: "VIDEO",
           numHands,
+          minHandDetectionConfidence,
+          minHandPresenceConfidence,
+          minTrackingConfidence,
         });
 
         if (cancelled) {
@@ -231,7 +252,15 @@ export function useHandTracking({ videoRef, enabled = true, numHands = 1, debug 
       landmarkerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, videoRef, numHands, debug]);
+  }, [
+    enabled,
+    videoRef,
+    numHands,
+    debug,
+    minHandDetectionConfidence,
+    minHandPresenceConfidence,
+    minTrackingConfidence,
+  ]);
 
   const leftHand = hands.find((h) => h.handedness === "Left") || null;
   const rightHand = hands.find((h) => h.handedness === "Right") || null;

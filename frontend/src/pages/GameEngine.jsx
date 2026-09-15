@@ -100,8 +100,7 @@ const GameEngine = () => {
   }
 
   return (
-    <div className="fixed inset-0 bg-slate-950 flex flex-col">
-      <div className="flex-shrink-0 bg-slate-900/95 border-b border-slate-800 px-4 py-3 flex items-center gap-4 z-50">
+    <div className="h-screen bg-slate-950 flex flex-col">      <div className="flex-shrink-0 bg-slate-900/95 border-b border-slate-800 px-4 py-3 flex items-center gap-4 z-50">
         <button
           onClick={() => navigate('/games')}
           className="p-2 hover:bg-slate-800 rounded-lg transition-colors text-slate-400 hover:text-white"
@@ -126,8 +125,7 @@ const GameEngine = () => {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 relative overflow-hidden">
-        <GameComponent
+      <div className="flex-1 min-h-0 relative overflow-hidden">        <GameComponent
           onSessionEnd={handleSessionEnd}
           onBack={() => navigate('/games')}
           patientId={patientId || 'guest'}

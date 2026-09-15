@@ -1,7 +1,7 @@
 // frontend/src/pages/PatientPublicDashboard.jsx
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { patientPublicApi, sessionApi } from "../utils/apiService";
+import { patientPublicApi } from "../utils/apiService";
 import { useAppStore } from "../store/appStore";
 import toast from "react-hot-toast";
 import LoadingSpinner from "../components/ui/LoadingSpinner";
@@ -20,7 +20,6 @@ export default function PatientPublicDashboard() {
   const { id } = useParams();
   const [patient, setPatient] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [sessions, setSessions] = useState([]);
   const navigate = useNavigate();
   const { setCurrentPatient, setPublicPatientId } = useAppStore();
 
@@ -44,15 +43,6 @@ export default function PatientPublicDashboard() {
       setPatient(patientData);
       setCurrentPatient(patientData);
       setPublicPatientId(patientData.patientId);
-
-      if (patientData?._id) {
-        try {
-          const sessionData = await sessionApi.getByPatient(patientData._id);
-          setSessions(sessionData?.sessions || []);
-        } catch (err) {
-          console.error("Failed to load sessions:", err);
-        }
-      }
     } catch (err) {
       toast.error("Invalid Patient ID or session expired");
       navigate("/patient");

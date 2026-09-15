@@ -6,9 +6,33 @@ import {
   Target, Sword, ShoppingBasket, Palette, Cloud, Play, ChevronRight, 
   Settings, Zap, Heart, Activity, Move, Brain, Clock, Hand, Waves,
   TrendingUp, Shield, Eye, Star,
-  Flame, CheckCircle2
+  Flame, CheckCircle2, X, PartyPopper, Trophy
 } from 'lucide-react';
-import { GAME_IDS, GAME_DISPLAY_NAMES, GAME_DESCRIPTIONS, GAME_COLORS } from '../constants/games';
+import { useEffect, useState } from 'react';
+import { GAME_IDS, GAME_TYPE_MAP, GAME_DISPLAY_NAMES, GAME_DESCRIPTIONS, GAME_COLORS } from '../constants/games';
+import { patientPublicApi } from '../utils/apiService';
+
+// Normalizes an exerciseId/name from rehabPlan (hyphenated, underscored, or
+// display-name form) to the canonical GAME_IDS value used by this page.
+// Normalizes an exerciseId from rehabPlan to the canonical GAME_IDS value.
+// Backend stores underscored form (e.g. 'cloud_reach'); this also tolerates
+// hyphenated or display-name variants if that ever changes upstream.
+function normalizeToGameId(raw) {
+  if (!raw) return null;
+  const val = String(raw).trim();
+
+  const byType = Object.entries(GAME_TYPE_MAP).find(([, type]) => type === val);
+  if (byType) return byType[0];
+
+  if (Object.values(GAME_IDS).includes(val)) return val;
+
+  const byName = Object.entries(GAME_DISPLAY_NAMES).find(
+    ([, name]) => name.toLowerCase() === val.toLowerCase()
+  );
+  if (byName) return byName[0];
+
+  return null;
+}
 
 const GAME_ICON_MAP = {
   [GAME_IDS.PRECISION_REACH]: Target,
@@ -100,7 +124,64 @@ const FadeInStyles = () => (
 
 export default function GameSelectPage() {
   const navigate = useNavigate();
-  const { currentPatient, token } = useAppStore();
+  const { currentPatient, publicPatientId, token, setCurrentPatient } = useAppStore();
+  const [loading, setLoading] = useState(false);
+  // 'exercise' -> this specific game already done today; 'day' -> all of
+  // today's games are done. null -> popup hidden.
+  const [completionNotice, setCompletionNotice] = useState(null);
+
+  // Sync fix: currentPatient can be empty on this page (direct nav, refresh,
+  // new tab) even though we still know who the patient is via publicPatientId.
+  // Re-fetch instead of silently rendering with no data, mirroring how
+  // PatientPublicDashboard loads on mount.
+  //
+  // Always refetch (not just when currentPatient is missing): this page is
+  // also the one the patient lands back on right after finishing a game.
+  // The cached currentPatient in the store still reflects pre-session
+  // state (exercise/day completion, currentDay), so without a fresh fetch
+  // here the "already completed today" / "day completed" checks below
+  // would be working off stale data. Runs once on mount.
+  useEffect(() => {
+    if (publicPatientId) {
+      setLoading(true);
+      patientPublicApi.getById(publicPatientId)
+        .then((data) => {
+          if (data?.patient) setCurrentPatient(data.patient);
+        })
+        .catch((err) => console.error('Failed to reload patient on /games:', err))
+        .finally(() => setLoading(false));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publicPatientId]);
+
+  if (loading) {
+    return <div className="min-h-screen flex items-center justify-center text-slate-400">Loading your session...</div>;
+  }
+
+  // Sync fix: today's plan drives which games show and their completion state,
+  // matching PatientPublicDashboard's day.isCompleted / day.exercises logic.
+  const todaysPlan = currentPatient?.rehabPlan?.find(
+    (d) => d.day === currentPatient?.currentDay
+  );
+  const todaysExerciseIds = new Set(
+    (todaysPlan?.exercises || [])
+      .map((ex) => normalizeToGameId(ex.exerciseId ?? ex.name))
+      .filter(Boolean)
+  );
+  const isDayCompleted = !!todaysPlan?.isCompleted;
+  const matchedGames = GAMES.filter((g) => todaysExerciseIds.has(g.id));
+  const gamesForToday = matchedGames.length > 0 ? matchedGames : GAMES;
+
+  // gameId -> whether today's plan entry for that specific exercise is
+  // already marked complete. Keyed the same way todaysExerciseIds is
+  // built, so it stays correct regardless of exerciseId/gameType/name
+  // variance upstream.
+  const completedGameIds = new Set(
+    (todaysPlan?.exercises || [])
+      .filter((ex) => ex.isCompleted)
+      .map((ex) => normalizeToGameId(ex.exerciseId ?? ex.gameType ?? ex.name))
+      .filter(Boolean)
+  );
 
   const handleStartGame = (gameId) => {
     const patientId = currentPatient?.patientId || currentPatient?._id;
@@ -108,6 +189,21 @@ export default function GameSelectPage() {
       navigate('/patient');
       return;
     }
+
+    // Whole day already finished — don't let them re-enter through any
+    // card; today's plan is done regardless of which game they tap.
+    if (isDayCompleted) {
+      setCompletionNotice('day');
+      return;
+    }
+
+    // This specific exercise is already done today, even though the day
+    // as a whole isn't (other games in today's plan are still pending).
+    if (completedGameIds.has(gameId)) {
+      setCompletionNotice('exercise');
+      return;
+    }
+
     navigate(`/game/${gameId}`);
   };
 
@@ -131,13 +227,14 @@ export default function GameSelectPage() {
                   {todaysDate}
                 </span>
               </div>
-              <h1 className="text-2xl md:text-3xl font-black text-[#1E293B]">Welcome back, Arjun K</h1>
-              <p className="text-slate-500 text-sm mt-1">Patient ID: GH-66399</p>
-              {currentPatient && (
-                <p className="text-sm text-[#0EA5E9] mt-1 font-medium">
-                  👤 {currentPatient.name} ({currentPatient.patientId})
-                </p>
-              )}
+              <h1 className="text-2xl md:text-3xl font-black text-[#1E293B]">
+                Welcome back{currentPatient?.name ? `, ${currentPatient.name.split(' ')[0]}` : ''}
+              </h1>
+              <p className="text-slate-500 text-sm mt-1">
+                {currentPatient?.patientId
+                  ? `Patient ID: ${currentPatient.patientId}`
+                  : 'No patient selected'}
+              </p>
             </div>
 
             <div className="w-14 h-14 rounded-2xl bg-white flex items-center justify-center text-[#2563EB] shadow-sm shrink-0 self-start lg:self-center">
@@ -153,8 +250,12 @@ export default function GameSelectPage() {
               <CheckCircle2 size={20} />
             </div>
             <div>
-              <p className="text-xl font-bold text-[#1E293B] leading-tight">—</p>
-              <p className="text-xs font-medium text-slate-500">Today's Progress · Not tracked yet</p>
+              <p className="text-xl font-bold text-[#1E293B] leading-tight">
+                {currentPatient?.currentDay ? `Day ${currentPatient.currentDay}/${currentPatient.rehabPlan?.length || 7}` : '—'}
+              </p>
+              <p className="text-xs font-medium text-slate-500">
+                Today's Progress{currentPatient?.currentDay ? '' : ' · Not tracked yet'}
+              </p>
             </div>
           </div>
           <div className="bg-white rounded-2xl p-5 border border-[#E8F0FE] shadow-sm flex items-center gap-4">
@@ -162,8 +263,12 @@ export default function GameSelectPage() {
               <Flame size={20} />
             </div>
             <div>
-              <p className="text-xl font-bold text-[#1E293B] leading-tight">—</p>
-              <p className="text-xs font-medium text-slate-500">Session Streak · Not tracked yet</p>
+              <p className="text-xl font-bold text-[#1E293B] leading-tight">
+                {currentPatient?.totalSessions ?? '—'}
+              </p>
+              <p className="text-xs font-medium text-slate-500">
+                Sessions Completed{currentPatient?.totalSessions ? '' : ' · Not tracked yet'}
+              </p>
             </div>
           </div>
           <div className="bg-white rounded-2xl p-5 border border-[#E8F0FE] shadow-sm flex items-center gap-4">
@@ -171,8 +276,12 @@ export default function GameSelectPage() {
               <Star size={20} />
             </div>
             <div>
-              <p className="text-xl font-bold text-[#1E293B] leading-tight">—</p>
-              <p className="text-xs font-medium text-slate-500">Total Score · Not tracked yet</p>
+              <p className="text-xl font-bold text-[#1E293B] leading-tight">
+                {currentPatient?.totalScore ?? '—'}
+              </p>
+              <p className="text-xs font-medium text-slate-500">
+                Total Score{currentPatient?.totalScore ? '' : ' · Not tracked yet'}
+              </p>
             </div>
           </div>
         </div>
@@ -183,11 +292,14 @@ export default function GameSelectPage() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {GAMES.map((game, i) => {
+          {gamesForToday.map((game, i) => {
             const Icon = game.icon;
             const isRecommended = game.id === GAME_IDS.PRECISION_REACH;
             const difficulty = DIFFICULTY[game.id] || 'Easy';
             const accent = ACCENT_COLOR[game.id] || '#2563EB';
+            // A card is "done" either because this specific exercise is
+            // complete, or (redundantly, but harmless) the whole day is.
+            const isGameCompletedToday = isDayCompleted || completedGameIds.has(game.id);
 
             return (
               <div
@@ -232,16 +344,22 @@ export default function GameSelectPage() {
                     <span className="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-xs font-bold uppercase">Hand tracking</span>
                   </div>
 
-                  {/* Progress indicator: hidden until real session data exists */}
+                  {/* Progress indicator: driven by today's rehabPlan entry */}
                   <div className="mb-6">
-                    <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">
-                      Not started today
-                    </span>
+                    {isGameCompletedToday ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 uppercase tracking-wide">
+                        <CheckCircle2 size={12} /> Completed today
+                      </span>
+                    ) : (
+                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">
+                        Not started today
+                      </span>
+                    )}
                   </div>
 
                   <button className="w-full py-4 bg-[#2563EB] text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-blue-700 active:scale-[0.98] transition-all duration-300 group-hover:shadow-lg">
                     <Play size={18} fill="currentColor" />
-                    Begin Exercise
+                    {isGameCompletedToday ? 'Practice Again' : 'Begin Exercise'}
                     <ChevronRight size={18} className="group-hover:translate-x-1 transition-transform" />
                   </button>
                 </div>
@@ -255,16 +373,35 @@ export default function GameSelectPage() {
           <h3 className="text-lg font-bold text-[#1E293B] mb-1 flex items-center gap-2">
             <span aria-hidden="true">⚕️</span> Your Recovery Journey
           </h3>
-          <p className="text-slate-500 text-sm mb-5">Not tracked yet &middot; ask your care team to set up a recovery plan.</p>
-          <div className="w-full h-3 rounded-full bg-slate-100 overflow-hidden mb-2">
-            <div className="h-full rounded-full bg-slate-200" style={{ width: '0%' }} />
-          </div>
-          <div className="flex items-center justify-between text-xs font-medium text-slate-400">
-            <span className="flex items-center gap-1.5">
-              <TrendingUp size={13} className="text-slate-300" />
-              No data yet
-            </span>
-          </div>
+          {(() => {
+            const totalDays = currentPatient?.rehabPlan?.length || 7;
+            const completedDays =
+              currentPatient?.rehabPlan?.filter((d) => d.isCompleted).length ?? 0;
+            const hasPlan = !!currentPatient?.rehabPlan?.length;
+            const pct = hasPlan ? Math.round((completedDays / totalDays) * 100) : 0;
+
+            return (
+              <>
+                <p className="text-slate-500 text-sm mb-5">
+                  {hasPlan
+                    ? `${completedDays} of ${totalDays} days completed`
+                    : 'Not tracked yet · ask your care team to set up a recovery plan.'}
+                </p>
+                <div className="w-full h-3 rounded-full bg-slate-100 overflow-hidden mb-2">
+                  <div
+                    className="h-full rounded-full bg-teal-500 transition-all duration-500"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-xs font-medium text-slate-400">
+                  <span className="flex items-center gap-1.5">
+                    <TrendingUp size={13} className="text-slate-300" />
+                    {hasPlan ? `${pct}% complete` : 'No data yet'}
+                  </span>
+                </div>
+              </>
+            );
+          })()}
         </div>
 
         {/* Medical disclaimer footer */}
@@ -276,6 +413,59 @@ export default function GameSelectPage() {
           </p>
         </footer>
       </div>
+
+      {/* Already-completed notice */}
+      {completionNotice && (
+        <div
+          className="fixed inset-0 bg-slate-900/70 backdrop-blur-md flex items-center justify-center p-4 z-50"
+          onClick={() => setCompletionNotice(null)}
+        >
+          <div
+            className="relative bg-white rounded-3xl p-14 md:p-20 max-w-3xl w-full text-center shadow-2xl overflow-hidden animate-[rehabFadeInUp_0.4s_ease]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Decorative background glow */}
+            <div className="pointer-events-none absolute -top-32 -right-32 w-96 h-96 rounded-full bg-emerald-100/60 blur-3xl" aria-hidden="true" />
+            <div className="pointer-events-none absolute -bottom-32 -left-32 w-96 h-96 rounded-full bg-blue-100/50 blur-3xl" aria-hidden="true" />
+
+            <button
+              className="absolute top-7 right-7 w-12 h-12 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors z-10"
+              onClick={() => setCompletionNotice(null)}
+              aria-label="Close"
+            >
+              <X size={26} />
+            </button>
+
+            {/* Celebratory icon cluster */}
+            <div className="relative w-40 h-40 mx-auto mb-10">
+              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-emerald-400 to-teal-500 shadow-2xl shadow-emerald-200" />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Trophy size={76} className="text-white drop-shadow-sm" strokeWidth={1.6} />
+              </div>
+              <PartyPopper size={38} className="absolute -top-2 -left-5 text-amber-400 rotate-[-20deg]" />
+              <Star size={30} className="absolute -bottom-1 -right-3 text-blue-400 fill-blue-400" />
+              <Star size={18} className="absolute top-3 -right-6 text-emerald-400 fill-emerald-400" />
+            </div>
+
+            <h3 className="relative text-4xl md:text-5xl font-black text-slate-800 mb-5 leading-tight tracking-tight">
+              {completionNotice === 'day' ? "You're all done for today!" : 'Already completed today'}
+            </h3>
+
+            <p className="relative text-slate-500 text-xl leading-relaxed mb-12 max-w-lg mx-auto">
+              {completionNotice === 'day'
+                ? "You've finished every exercise in today's plan. Come back tomorrow for your next session."
+                : "You've already completed this exercise today. You can practice it again, or come back tomorrow."}
+            </p>
+
+            <button
+              className="relative w-full py-6 bg-gradient-to-r from-blue-600 to-blue-500 text-white rounded-2xl font-bold text-xl hover:from-blue-700 hover:to-blue-600 active:scale-[0.98] transition-all duration-200 shadow-xl shadow-blue-200"
+              onClick={() => setCompletionNotice(null)}
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

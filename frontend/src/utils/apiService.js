@@ -44,7 +44,7 @@ async function performRequest(endpoint, options, timeoutMs) {
     ...options.headers,
   };
 
-  const token = getToken();
+  const token = options.skipAuth ? null : getToken();
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -208,7 +208,7 @@ export const patientApi = {
 
 // ─── SESSION API ─────────────────────────────────────────────────────────────
 export const sessionApi = {
-  getByPatient: (patientId) => request(`/sessions/patient/${patientId}`),
+  getByPatient: (patientId, opts = {}) => request(`/sessions/patient/${patientId}`, opts),
   getById: (id) => request(`/sessions/${id}`),
   start: (payload) => request("/sessions/start", {
     method: "POST",

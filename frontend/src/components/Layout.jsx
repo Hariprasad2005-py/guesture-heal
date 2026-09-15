@@ -8,28 +8,55 @@ export default function Layout({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const { user, logout, currentPatient, token, publicPatientId, setCurrentPatient } = useAppStore();
 
-  // currentPatient is persisted straight to localStorage (see appStore.js)
-  // with no backend validation on load — a stale/deleted/never-actually-
-  // saved patient from a past session renders here forever otherwise,
-  // showing a full sidebar (name, condition, patient ID) for a patient
-  // that doesn't exist in MongoDB. Verify it against the backend once on
-  // mount whenever we're relying on a public (GH-xxxx) id with no token.
-  useEffect(() => {
-    const idToVerify = currentPatient?.patientId || publicPatientId;
-    if (!idToVerify || !idToVerify.startsWith("GH-") || token) return;
-    let cancelled = false;
-    import("../utils/apiService").then(({ patientPublicApi }) => {
-      patientPublicApi.getById(idToVerify).catch((err) => {
-        if (cancelled) return;
-        console.warn("[Layout] Cached currentPatient failed backend verification, clearing:", err);
-        setCurrentPatient(null);
-        useAppStore.getState().setPublicPatientId?.(null);
-      });
-    });
-    return () => { cancelled = true; };
-  }, [currentPatient?.patientId, publicPatientId, token, setCurrentPatient]);
   const navigate = useNavigate();
   const location = useLocation();
+
+  // The patient dashboard route is /patient/dashboard/:id — that URL id
+  // is the actual source of truth for "which patient is this page about."
+  // currentPatient, by contrast, is whatever was last cached in
+  // localStorage (see appStore.js) and can silently go stale: if it's
+  // still a real, existing patient (just not THIS one), the old
+  // verify-only-on-existence check below passes it through unchanged,
+  // and the sidebar ends up showing a different person than the page
+  // content. Pull the id straight out of the URL so we can detect and
+  // correct that mismatch, not just detect outright deletion.
+  const routePatientIdMatch = location.pathname.match(
+    /\/patient\/dashboard\/([^/]+)/
+  );
+  const routePatientId = routePatientIdMatch ? routePatientIdMatch[1] : null;
+
+  // Keep the sidebar's currentPatient in sync with whichever patient
+  // dashboard is actually on screen. Two cases:
+  //  1. currentPatient is missing/deleted (existing check) → clear it.
+  //  2. currentPatient is a real patient, but a DIFFERENT one than the
+  //     URL says we're viewing → refetch and replace it with the right
+  //     one, instead of leaving the old cached identity showing.
+  useEffect(() => {
+    if (!routePatientId || !routePatientId.startsWith("GH-") || token) return;
+
+    const cachedId = currentPatient?.patientId || publicPatientId;
+    if (cachedId === routePatientId) return; // already in sync
+
+    let cancelled = false;
+    import("../utils/apiService").then(({ patientPublicApi }) => {
+      patientPublicApi
+        .getById(routePatientId)
+        .then((data) => {
+          if (cancelled || !data?.patient) return;
+          setCurrentPatient(data.patient);
+          useAppStore.getState().setPublicPatientId?.(data.patient.patientId);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          console.warn("[Layout] Failed to sync sidebar to route patient:", err);
+          setCurrentPatient(null);
+          useAppStore.getState().setPublicPatientId?.(null);
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [routePatientId, currentPatient?.patientId, publicPatientId, token, setCurrentPatient]);
 
   // Determine user type
 const isPatient = (!token && (currentPatient || publicPatientId)) || (token && user?.patientId && !user?.role);  const isTherapist = token && user?.role === "therapist";
@@ -101,6 +128,11 @@ const isPatient = (!token && (currentPatient || publicPatientId)) || (token && u
           <div className="bg-white/70 rounded-lg p-2 text-center">
             <span className="block text-slate-500">Day</span>
             <span className="font-medium text-slate-800">{patient.currentDay || 1}/7</span>
+            <span className="block text-[10px] text-slate-400 leading-tight mt-0.5">
+              {patient.rehabPlan?.find((d) => d.day === patient.currentDay)?.isCompleted
+                ? "Completed"
+                : "In progress"}
+            </span>
           </div>
           <div className="bg-white/70 rounded-lg p-2 text-center">
             <span className="block text-slate-500">Sessions</span>

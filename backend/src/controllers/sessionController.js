@@ -29,6 +29,84 @@ const reportController = require("./reportController");
 // game -- pass through completely untouched. A rep with neither field
 // is also left untouched; nothing here fabricates a value that was
 // never actually sent.
+// ─────────────────────────────────────────────────────────────
+// DAY COMPLETION
+// ─────────────────────────────────────────────────────────────
+// A day is only "done" when every game assigned to it (dayPlan.exercises,
+// one entry per gameType) has at least one COMPLETED session at >=75%
+// accuracy. Previously this was a single unconditional write --
+// `dayPlan.isCompleted = true` ran as soon as ANY one session for that
+// day finished, with no check on accuracy or on which games had
+// actually been played. That meant e.g. finishing Cloud Reach alone
+// would silently mark a 3-game day complete, and immediately advance
+// currentDay, without Precision Reach or Rehab Slicer ever being
+// touched. This recomputes the day's true state from persisted
+// sessions every time one finishes, instead of trusting a one-shot
+// flag flip.
+//
+// Recomputed (not just set-true-and-forget) so a day that later loses
+// a qualifying session (e.g. a bad session gets deleted, see
+// deleteSession) doesn't stay stuck showing complete: isCompleted
+// always reflects what's actually in the Session collection right now.
+const DAY_COMPLETION_ACCURACY_THRESHOLD = Number(process.env.DAY_COMPLETION_ACCURACY_THRESHOLD ?? 0);
+
+async function evaluateDayCompletion(patient, day) {
+  const dayPlan = patient.rehabPlan?.find((d) => d.day === day);
+  if (!dayPlan) return;
+
+  // The set of games this day actually requires. gameType may be
+  // missing on legacy/hand-edited plan entries -- skip those rather
+  // than letting an unresolvable requirement block completion forever.
+  const requiredGameTypes = [
+    ...new Set(
+      (dayPlan.exercises || [])
+        .map((ex) => ex.gameType)
+        .filter(Boolean)
+    ),
+  ];
+
+  const qualifyingGameTypes = requiredGameTypes.length
+    ? await Session.distinct("gameType", {
+        patientId: patient._id,
+        day,
+        status: "completed",
+        accuracy: { $gte: DAY_COMPLETION_ACCURACY_THRESHOLD },
+      })
+    : [];
+
+  const wasCompleted = dayPlan.isCompleted;
+  const nowCompleted =
+    requiredGameTypes.length > 0 &&
+    requiredGameTypes.every((gt) => qualifyingGameTypes.includes(gt));
+
+  dayPlan.isCompleted = nowCompleted;
+
+  // Mirror the same per-game qualifying check onto each exercise entry.
+  // Without this, GameSelectPage.jsx's "already completed today" popup
+  // (which reads dayPlan.exercises[i].isCompleted) never fires, even
+  // for games that individually hit the accuracy threshold -- only the
+  // day-level flag above was ever being recomputed.
+  (dayPlan.exercises || []).forEach((ex) => {
+    if (ex.gameType) {
+      ex.isCompleted = qualifyingGameTypes.includes(ex.gameType);
+    }
+  });
+  patient.markModified("rehabPlan");
+
+  if (nowCompleted && !wasCompleted) {
+    dayPlan.completedAt = new Date();
+    if (day === patient.currentDay && patient.currentDay < 7) {
+      patient.currentDay += 1;
+    }
+  } else if (!nowCompleted) {
+    // Don't leave a stale completedAt on a day that no longer
+    // qualifies (e.g. after a qualifying session was deleted).
+    dayPlan.completedAt = null;
+  }
+}
+
+exports.evaluateDayCompletion = evaluateDayCompletion;
+
 function normalizeRepCorrectness(repData) {
   if (!Array.isArray(repData)) return repData;
   return repData.map((rep) => {
@@ -298,19 +376,31 @@ exports.completeSession = async (req, res, next) => {
       gameSpecific,
     } = req.body;
 
-    const session = await Session.findById(req.params.id);
+    // Atomically claim this session for completion. Previously this was a
+    // plain findById + a status check on the READ result, with the actual
+    // status="completed" write happening much later (after building up
+    // session fields). Two near-simultaneous completion requests (retry,
+    // double-fire from the frontend, etc.) could both read status
+    // "in_progress" before either write landed, both pass the check, and
+    // both go on to increment patient.totalSessions -- a real race that
+    // produced a cached totalSessions higher than the actual session/report
+    // count. Flipping status atomically here means only ONE concurrent
+    // request can ever win this transition; a loser gets null back and
+    // exits before any patient stats are touched.
+    const session = await Session.findOneAndUpdate(
+      { _id: req.params.id, therapistId: req.user._id, status: "in_progress" },
+      { $set: { status: "completed", completedAt: new Date() } },
+      { new: false } // old doc, so all its pre-completion fields are still readable below
+    );
 
-    if (
-      !session ||
-      String(session.therapistId) !== String(req.user._id)
-    ) {
-      return res.status(404).json({
-        success: false,
-        message: "Session not found.",
-      });
-    }
-
-    if (session.status !== "in_progress") {
+    if (!session) {
+      const exists = await Session.findById(req.params.id);
+      if (!exists || String(exists.therapistId) !== String(req.user._id)) {
+        return res.status(404).json({
+          success: false,
+          message: "Session not found.",
+        });
+      }
       return res.status(400).json({
         success: false,
         message: "Session is not in progress.",
@@ -412,9 +502,6 @@ exports.completeSession = async (req, res, next) => {
       session.gameSpecific = gameSpecific;
     }
 
-    session.status = "completed";
-    session.completedAt = new Date();
-
     await session.save();
 
     /*
@@ -464,21 +551,7 @@ exports.completeSession = async (req, res, next) => {
         patient.currentLevel = actualLevel;
       }
 
-      const dayPlan = patient.rehabPlan?.find(
-        (d) => d.day === savedSession.day
-      );
-
-      if (dayPlan) {
-        dayPlan.isCompleted = true;
-        dayPlan.completedAt = new Date();
-      }
-
-      if (
-        savedSession.day === patient.currentDay &&
-        patient.currentDay < 7
-      ) {
-        patient.currentDay += 1;
-      }
+      await evaluateDayCompletion(patient, savedSession.day);
 
       await patient.save();
 
@@ -534,19 +607,31 @@ exports.saveRepData = async (req, res, next) => {
       isCorrect,
     } = req.body;
 
-    const session = await Session.findById(req.params.id);
+    // Atomically claim this session for completion. Previously this was a
+    // plain findById + a status check on the READ result, with the actual
+    // status="completed" write happening much later (after building up
+    // session fields). Two near-simultaneous completion requests (retry,
+    // double-fire from the frontend, etc.) could both read status
+    // "in_progress" before either write landed, both pass the check, and
+    // both go on to increment patient.totalSessions -- a real race that
+    // produced a cached totalSessions higher than the actual session/report
+    // count. Flipping status atomically here means only ONE concurrent
+    // request can ever win this transition; a loser gets null back and
+    // exits before any patient stats are touched.
+    const session = await Session.findOneAndUpdate(
+      { _id: req.params.id, therapistId: req.user._id, status: "in_progress" },
+      { $set: { status: "completed", completedAt: new Date() } },
+      { new: false } // old doc, so all its pre-completion fields are still readable below
+    );
 
-    if (
-      !session ||
-      String(session.therapistId) !== String(req.user._id)
-    ) {
-      return res.status(404).json({
-        success: false,
-        message: "Session not found.",
-      });
-    }
-
-    if (session.status !== "in_progress") {
+    if (!session) {
+      const exists = await Session.findById(req.params.id);
+      if (!exists || String(exists.therapistId) !== String(req.user._id)) {
+        return res.status(404).json({
+          success: false,
+          message: "Session not found.",
+        });
+      }
       return res.status(400).json({
         success: false,
         message: "Session is not in progress.",
@@ -809,27 +894,30 @@ exports.finishPublicSession = async (req, res, next) => {
       });
     }
 
-    const session = await Session.findById(sessionId);
+    // Same race-condition fix as completeSession above: atomically claim
+    // the in_progress -> completed transition so a duplicate/retried
+    // finish request can't both pass the status check and both increment
+    // patient stats.
+    const session = await Session.findOneAndUpdate(
+      { _id: sessionId, patientIdRef: String(patientId), mode: "public", status: "in_progress" },
+      { $set: { status: "completed", completedAt: new Date() } },
+      { new: false }
+    );
 
-    if (
-      !session ||
-      session.patientIdRef !== String(patientId)
-    ) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Session not found for this patient.",
-      });
-    }
-
-    if (session.mode !== "public") {
-      return res.status(403).json({
-        success: false,
-        message: "Not a public session.",
-      });
-    }
-
-    if (session.status === "completed") {
+    if (!session) {
+      const exists = await Session.findById(sessionId);
+      if (!exists || exists.patientIdRef !== String(patientId)) {
+        return res.status(404).json({
+          success: false,
+          message: "Session not found for this patient.",
+        });
+      }
+      if (exists.mode !== "public") {
+        return res.status(403).json({
+          success: false,
+          message: "Not a public session.",
+        });
+      }
       return res.status(400).json({
         success: false,
         message: "Session already completed.",
@@ -917,9 +1005,6 @@ exports.finishPublicSession = async (req, res, next) => {
       session.gameSpecific = gameSpecific;
     }
 
-    session.status = "completed";
-    session.completedAt = new Date();
-
     await session.save();
 
     const savedSession = await Session.findById(session._id);
@@ -966,21 +1051,7 @@ exports.finishPublicSession = async (req, res, next) => {
         patient.currentLevel = actualLevel;
       }
 
-      const dayPlan = patient.rehabPlan?.find(
-        (d) => d.day === savedSession.day
-      );
-
-      if (dayPlan) {
-        dayPlan.isCompleted = true;
-        dayPlan.completedAt = new Date();
-      }
-
-      if (
-        savedSession.day === patient.currentDay &&
-        patient.currentDay < 7
-      ) {
-        patient.currentDay += 1;
-      }
+      await evaluateDayCompletion(patient, savedSession.day);
 
       await patient.save();
 
@@ -1083,6 +1154,15 @@ exports.deleteSession = async (req, res, next) => {
         success: false,
         message: "Session not found.",
       });
+    }
+
+    // Deleting a session can remove the only qualifying (>=75%) record
+    // for one of the day's required games -- recompute so isCompleted
+    // doesn't keep claiming a day is done when its evidence is gone.
+    const patient = await Patient.findById(session.patientId);
+    if (patient) {
+      await evaluateDayCompletion(patient, session.day);
+      await patient.save();
     }
 
     res.json({

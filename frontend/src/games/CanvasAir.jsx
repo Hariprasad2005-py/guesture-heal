@@ -1,6 +1,75 @@
 // frontend/src/games/CanvasAir.jsx
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pause, Play, X, RefreshCw, ChevronLeft, ChevronRight, Shuffle, Grid3x3 } from "lucide-react";
+//
+// Canvas Air — air-painting rehabilitation game.
+//
+// The patient traces a target outline with their index fingertip. The
+// stroke is rendered live and colored by how close it is to the target:
+// green inside tight tolerance, amber near the edge, red outside.
+// Accuracy is a movement-weighted proportion of the trace that stayed
+// inside tolerance; completion is the proportion of the target path
+// actually covered. Both come from the same tracker.
+//
+// Design constraints enforced by this file:
+//   * Only INDEX_FINGER_TIP is used. useHandTracking has no `landmark`
+//     prop, so a "Wrist" UI option would be inert.
+//   * papsScore from useFacialPainDetection is 0-10. Pain is active at
+//     papsScore >= 6, matching the hook's own PAIN_THRESHOLD.
+//   * useAdaptiveDifficulty.adapt() accepts
+//     { accuracy, papsScore, combo, maxFlexionAngle }. maxFlexionAngle
+//     must be `null` when unmeasured — passing 0 closes the ROM gate
+//     forever, because 0 is a real measurement to that hook.
+//   * useGameEngine is used for countdown / pause / resume / endSession
+//     only. completeRep is never called.
+//   * No fabricated cursor. If useHandTracking returns no fingertip,
+//     the canvas shows a clear "show your hand" state.
+//   * Each shape's 15-second timer starts on the first valid filtered
+//     fingertip sample for that shape, and is computed from real
+//     elapsed timestamps, not by accumulating setTimeout ticks.
+//   * Per-attempt geometry (scale, tolerance, sampled path) is frozen
+//     at the moment the attempt starts.
+//   * Trace, cursor, and motion/smoothness all use the SAME filtered
+//     fingertip sample.
+//
+// FINGERTIP SMOOTHING
+//   useHandTracking already applies an EMA (alpha = 0.4) to raw
+//   MediaPipe landmarks before emitting. Canvas Air layers a One Euro
+//   filter on top of that, tuned for an already-smoothed input:
+//     minCutoff = 0.4   (heavier low-pass when stationary)
+//     beta      = 0.02  (release faster on fast motion, less lag)
+//     dCutoff   = 1.0
+//   A short sub-pixel deadband on the cursor prevents visible jitter
+//   when the patient holds still. The filter is only reset when the
+//   hand is gone for more than FILTER_RESET_GAP_MS, so a one-frame
+//   dropout at the edge of a reach does not produce a stutter.
+//
+// DEBUG TRACKING HUD
+//   Append ?debugTracking to the page URL to render a small dev-only
+//   overlay showing raw / mirrored / filtered / mapped fingertip values
+//   plus on-path/distance, so a real mismatch can be diagnosed from
+//   actual numbers instead of guesswork. It never renders unless that
+//   query param is present, and it never gates or alters any game
+//   logic — it only reads values that are already being computed.
+//
+// Metrics are game metrics, not validated clinical scores. PAPS is a
+// facial-expression-derived discomfort indicator, not a diagnosis.
+
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Grid3x3,
+  Pause,
+  Play,
+  RefreshCw,
+  Shuffle,
+  X,
+} from "lucide-react";
 
 import useMediaPipeUpperBody from "../hooks/useMediaPipeUpperBody";
 import useHandTracking from "../hooks/useHandTracking";
@@ -11,311 +80,215 @@ import useAdaptiveDifficulty from "../hooks/useAdaptiveDifficulty";
 import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
 import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
-import { samplePath, createPathCoverageTracker, closestPointOnPath } from "../utils/svgPathSampler";
+import {
+  samplePath,
+  createPathCoverageTracker,
+} from "../utils/svgPathSampler";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
-import MetricsEngine from "../utils/metricsEngine";
 
-// --- CONSTANTS ---
-const SESSION_SECONDS = 120;
-const TRACE_TOLERANCE_UNITS = 5;
-const MIN_TRACE_TOLERANCE_UNITS = 2.5;
-const SHAPE_TIME_LIMIT_SECONDS = 30;
-const SPARKLE_LIFETIME_MS = 700;
-const DEVIATION_PENALTY_FACTOR = 0.5;
-const MAX_ALLOWED_DEVIATION = 15;
+// ============================================================
+// CONSTANTS
+// ============================================================
 
-// How many shapes make up a single session. A random count of 4 or 5 is
-// picked once per session, then that many *distinct* shapes are drawn from
-// the full collection. The session ends once every one of those shapes has
-// been either completed or missed — it's a fixed, finite set, not an
-// endless cycle through all 19 shapes.
-const SESSION_SHAPE_MIN = 4;
-const SESSION_SHAPE_MAX = 5;
+const SHAPE_TIME_LIMIT_SECONDS = 15;
+const SHAPE_ADVANCE_DELAY_MS = 1800;
 
-// Sample density used for the reference path polyline. Curved shapes (Circle,
-// Heart, Spiral, ...) get more samples so the polyline hugs the true SVG
-// curve tightly enough that our sub-pixel projection below is meaningful —
-// with too few samples, "sub-pixel accuracy against the polyline" would
-// still be a coarse approximation of the real path.
-const PATH_SAMPLE_COUNT_SIMPLE = 400;
-const PATH_SAMPLE_COUNT_COMPLEX = 600;
-
-// Difficulty-specific completion thresholds (based on the *adaptive* difficulty
-// tier, which only affects how forgiving the coverage requirement is —
-// it no longer gates which shapes are selectable).
-const DIFFICULTY_THRESHOLDS = {
-  Beginner: 80,
-  Intermediate: 85,
-  Advanced: 90,
+const SHAPES_PER_SESSION = {
+  Beginner: 3,
+  Intermediate: 4,
+  Advanced: 5,
 };
 
-const getShapeCompleteThreshold = (difficulty) => {
-  return DIFFICULTY_THRESHOLDS[difficulty] || 80;
+const FEEDBACK_COLORS = {
+  onPath: "#10b981",
+  edge: "#f59e0b",
+  off: "#ef4444",
 };
 
-// ===== UNIFIED SHAPE COLLECTION =====
-// Every shape is available from the very start, regardless of the player's
-// adaptive difficulty tier. `difficulty` (1-5) is used ONLY to weight scoring
-// (harder shapes award more points) — it never locks a shape away.
-// All paths are centered and scaled for a 100x100 viewBox.
+const PAPS_PAIN_THRESHOLD = 6;
+
+// Minimum frame-to-frame movement (viewBox units) that counts as real
+// "movement" for movement-weighted accuracy and smoothness.
+const MIN_MOVEMENT_UNITS = 0.15;
+
+// Smoothness is only meaningful after enough real movement has been
+// observed. Below this cumulative path length (viewBox units) we report
+// null instead of an invented number.
+const MIN_PATH_LENGTH_FOR_SMOOTHNESS = 40;
+
+// --- Smoothing constants ---
+
+// One Euro parameters. Tuned for input that useHandTracking has already
+// EMA-smoothed. Lower minCutoff than the raw-landmark defaults because
+// the noise floor is already reduced; higher beta so fast motion is not
+// dragged behind by excessive low-pass.
+const ONE_EURO_MIN_CUTOFF = 0.4;
+const ONE_EURO_BETA = 0.02;
+const ONE_EURO_D_CUTOFF = 1.0;
+
+// If the fingertip is gone for less than this, we do NOT reset the
+// filter — we just stretch the filter's internal dt across the gap so
+// the first sample back is treated as "resumed", not "restarted". This
+// avoids the visible stutter caused by a single dropped frame.
+const FILTER_RESET_GAP_MS = 250;
+
+// Deadband on the cursor. Sub-0.3-unit moves (0.3% of the canvas) do
+// not reposition the cursor. This removes idle jitter without making
+// real motion lag, because any movement above this threshold moves the
+// cursor immediately and exactly.
+const CURSOR_DEADBAND_UNITS = 0.3;
+
+// A filtered point slightly outside [0,1] is still tracked; only a
+// genuinely-off-frame hand (beyond these margins) is treated as
+// "not visible". No clamping is applied — the point is either used
+// verbatim or the sample is dropped.
+const OFF_FRAME_MARGIN = 0.02;
+
+// The webcam frame is much wider than a user's comfortable seated reach,
+// and where that reach sits (centered, upper-right, etc.) varies by
+// person, seating position, and camera angle. A fixed guess for the
+// reachable box is wrong for most users. Instead we auto-calibrate:
+// expand a running min/max of the ACTUAL mirrored fingertip positions
+// seen during the session, and remap through that observed box (with
+// a little padding) once it's wide enough to trust. Until then we fall
+// back to a generous default so the game is usable from frame one.
+const DEFAULT_HAND_RANGE_X = [0.25, 0.75];
+const DEFAULT_HAND_RANGE_Y = [0.2, 0.8];
+const HAND_RANGE_PADDING = 0.05; // extra slack around the observed reach
+const HAND_RANGE_MIN_SPAN = 0.15; // below this observed span, don't trust it yet
+
+function remapNormalized(v, [lo, hi]) {
+  if (hi <= lo) return 0.5;
+  const t = (v - lo) / (hi - lo);
+  return Math.max(0, Math.min(1, t));
+}
+
+// Dev-only tracking HUD. Enabled by adding ?debugTracking to the URL —
+// never shown to a patient by default, never toggled by any app state.
+const DEBUG_TRACKING =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).has("debugTracking");
+
+// ============================================================
+// TOLERANCE (viewBox units)
+// ============================================================
+const TOLERANCE_BY_DIFFICULTY = {
+  Beginner: 6.0,
+  Intermediate: 4.5,
+  Advanced: 3.5,
+};
+const MIN_TOLERANCE_FLOOR = 2.5;
+const MAX_TOLERANCE_CEIL = 7.0;
+
+function getBaseTolerance(difficulty) {
+  return (
+    TOLERANCE_BY_DIFFICULTY[difficulty] ?? TOLERANCE_BY_DIFFICULTY.Beginner
+  );
+}
+
+// ============================================================
+// SHAPES
+// ============================================================
+const SIMPLE_DIFFICULTY_MAX = 3;
+
 const SHAPES = [
-  {
-    path: "M25 25 L75 25 L75 75 L25 75 Z",
-    name: "Square",
-    icon: "▢",
-    difficulty: 2,
-  },
-  {
-    path: "M50 15 A35 35 0 1 1 49.99 15",
-    name: "Circle",
-    icon: "●",
-    difficulty: 2,
-  },
-  {
-    path: "M50 15 L85 80 L15 80 Z",
-    name: "Triangle",
-    icon: "△",
-    difficulty: 2,
-  },
-  {
-    path: "M50 15 L80 50 L50 85 L20 50 Z",
-    name: "Diamond",
-    icon: "◇",
-    difficulty: 2,
-  },
-  {
-    path: "M20 50 Q50 0 80 50 Q50 80 20 50",
-    name: "Heart",
-    icon: "♥",
-    difficulty: 3,
-  },
-  {
-    path: "M50 10 L58 42 L90 50 L58 58 L50 90 L42 58 L10 50 L42 42 Z",
-    name: "Sparkle",
-    icon: "✦",
-    difficulty: 3,
-  },
-  {
-    path: "M50 20 L65 40 L90 40 L70 55 L80 80 L50 65 L20 80 L30 55 L10 40 L35 40 Z",
-    name: "Star",
-    icon: "★",
-    difficulty: 4,
-  },
-  {
-    path: "M20 20 C40 10 60 10 80 20 C90 40 90 60 80 80 C60 90 40 90 20 80 C10 60 10 40 20 20",
-    name: "Apple",
-    icon: "🍎",
-    difficulty: 4,
-  },
-  {
-    path: "M20 50 L35 20 L65 20 L80 50 L65 80 L35 80 Z",
-    name: "Hexagon",
-    icon: "⬡",
-    difficulty: 3,
-  },
-  {
-    path: "M20 50 L40 20 L60 20 L80 50 L60 80 L40 80 Z",
-    name: "House",
-    icon: "🏠",
-    difficulty: 3,
-  },
-  {
-    path: "M60 20 A30 30 0 1 0 60 80 A22 22 0 1 1 60 20 Z",
-    name: "Moon",
-    icon: "🌙",
-    difficulty: 3,
-  },
-  {
-    path: "M10 40 L55 40 L55 25 L90 50 L55 75 L55 60 L10 60 Z",
-    name: "Arrow",
-    icon: "➜",
-    difficulty: 2,
-  },
-  {
-    path: "M30 50 C30 35 45 35 50 50 C55 65 70 65 70 50 C70 35 55 35 50 50 C45 65 30 65 30 50 Z",
-    name: "Infinity",
-    icon: "∞",
-    difficulty: 4,
-  },
-  {
-    path: "M50 50 C50 40 60 40 60 50 C60 65 40 65 40 45 C40 25 65 25 65 50 C65 75 30 75 30 45",
-    name: "Spiral",
-    icon: "🌀",
-    difficulty: 5,
-  },
-  {
-    path: "M50 15 L83.3 39.2 L70.6 78.3 L29.4 78.3 L16.7 39.2 Z",
-    name: "Pentagon",
-    icon: "⬟",
-    difficulty: 3,
-  },
-  {
-    path: "M25 65 Q15 65 15 55 Q15 45 25 45 Q25 30 40 30 Q50 20 62 28 Q75 25 80 38 Q90 40 88 52 Q90 65 78 65 Z",
-    name: "Cloud",
-    icon: "☁",
-    difficulty: 3,
-  },
-  {
-    path: "M55 10 L30 55 L45 55 L35 90 L70 45 L52 45 Z",
-    name: "Lightning",
-    icon: "⚡",
-    difficulty: 3,
-  },
-  {
-    path: "M50 50 C35 50 35 20 50 20 C65 20 65 50 50 50 C50 65 80 65 80 50 C80 35 50 35 50 50 C65 50 65 80 50 80 C35 80 35 50 50 50 C50 35 20 35 20 50 C20 65 50 65 50 50 Z",
-    name: "Flower",
-    icon: "🌸",
-    difficulty: 4,
-  },
+  { path: "M15 50 A35 35 0 1 1 85 50 A35 35 0 1 1 15 50 Z", name: "Circle", icon: "●", difficulty: 1 },
+  { path: "M25 25 L75 25 L75 75 L25 75 Z", name: "Square", icon: "▢", difficulty: 1 },
+  { path: "M50 15 L85 80 L15 80 Z", name: "Triangle", icon: "△", difficulty: 1 },
+  { path: "M50 15 L80 50 L50 85 L20 50 Z", name: "Diamond", icon: "◇", difficulty: 2 },
+  { path: "M20 50 L35 20 L65 20 L80 50 L65 80 L35 80 Z", name: "Hexagon", icon: "⬡", difficulty: 3 },
+  { path: "M50 15 L83.3 39.2 L70.6 78.3 L29.4 78.3 L16.7 39.2 Z", name: "Pentagon", icon: "⬟", difficulty: 3 },
+  { path: "M30 50 C30 32 42 32 50 50 C58 68 70 68 70 50 C70 32 58 32 50 50 C42 68 30 68 30 50 Z", name: "Figure-8", icon: "∞", difficulty: 4 },
+  { path: "M50 10 L58 42 L90 50 L58 58 L50 90 L42 58 L10 50 L42 42 Z", name: "Sparkle", icon: "✦", difficulty: 4 },
+  { path: "M50 20 L65 40 L90 40 L70 55 L80 80 L50 65 L20 80 L30 55 L10 40 L35 40 Z", name: "Star", icon: "★", difficulty: 4 },
+  { path: "M50 50 C50 35 65 35 65 50 C65 68 35 68 35 45 C35 20 78 20 78 55", name: "Spiral", icon: "🌀", difficulty: 5 },
 ];
 
-// Randomly select 4 or 5 *distinct* shapes for a single session. Called once
-// per mount (i.e. once per session) via useState's lazy initializer.
-function pickSessionShapes() {
-  const count =
-    SESSION_SHAPE_MIN +
-    Math.floor(Math.random() * (SESSION_SHAPE_MAX - SESSION_SHAPE_MIN + 1));
-  const pool = SHAPES.map((_, i) => i);
-  const chosenIndices = [];
-  while (chosenIndices.length < count && pool.length > 0) {
-    const pick = Math.floor(Math.random() * pool.length);
-    chosenIndices.push(pool.splice(pick, 1)[0]);
+function getShapePoolForDifficulty(difficulty) {
+  if (difficulty === "Advanced") return SHAPES;
+  if (difficulty === "Intermediate") {
+    return SHAPES.filter(
+      (s) => s.difficulty <= SIMPLE_DIFFICULTY_MAX || s.name === "Figure-8"
+    );
   }
-  return chosenIndices.map((i) => SHAPES[i]);
+  return SHAPES.filter((s) => s.difficulty <= SIMPLE_DIFFICULTY_MAX);
 }
 
-// Color-coded biofeedback bands
+function shuffleArray(arr) {
+  const out = arr.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+function pickSessionShapes(difficulty, count) {
+  const eligible = getShapePoolForDifficulty(difficulty);
+  const n = Math.min(count, eligible.length);
+  return shuffleArray(eligible).slice(0, n);
+}
+
+function pickReplacementShape(difficulty, usedNames) {
+  const pool = getShapePoolForDifficulty(difficulty);
+  const fresh = pool.filter((s) => !usedNames.includes(s.name));
+  const source = fresh.length > 0 ? fresh : pool;
+  return source[Math.floor(Math.random() * source.length)];
+}
+
+// ============================================================
+// FEEDBACK / BANDS
+// ============================================================
+function classifyFeedback(distance, tolerance) {
+  if (distance == null || !Number.isFinite(distance)) return "off";
+  if (distance <= tolerance * 0.6) return "onPath";
+  if (distance <= tolerance) return "edge";
+  return "off";
+}
+
 function getAccuracyBand(pct) {
-  if (pct >= 90) return { label: "Smooth, controlled", stroke: "#22c55e", text: "text-green-400", pulse: 0.7 };
-  if (pct >= 70) return { label: "Steady improvement", stroke: "#3b82f6", text: "text-blue-400", pulse: 1.1 };
-  if (pct >= 50) return { label: "Needs focus", stroke: "#f97316", text: "text-orange-400", pulse: 1.6 };
-  return { label: "Slow down, be deliberate", stroke: "#ef4444", text: "text-red-400", pulse: 2.4 };
+  if (pct >= 90) return { label: "Smooth, controlled", stroke: "#10b981", text: "text-emerald-600", pulse: 0.7 };
+  if (pct >= 70) return { label: "Steady improvement", stroke: "#3b82f6", text: "text-blue-600", pulse: 1.1 };
+  if (pct >= 50) return { label: "Needs focus", stroke: "#f97316", text: "text-orange-600", pulse: 1.6 };
+  return { label: "Slow down, be deliberate", stroke: "#ef4444", text: "text-red-600", pulse: 2.4 };
 }
 
-// Pick a readable SVG font-size (in viewBox units) so the icon+name label
-// never overflows/clips inside the 100-wide canvas, regardless of name length.
-function getLabelFontSize(label) {
-  const len = label.length;
-  if (len <= 8) return 6.5;
-  if (len <= 12) return 5.5;
-  if (len <= 16) return 4.5;
-  return 3.8;
-}
-
-// Helper to calculate distance between two points
-function distance(p1, p2) {
-  return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
-}
-
-// ===== Sub-pixel accurate path distance =====
-// The old implementation only measured distance to the *nearest sampled
-// vertex*, which is only as accurate as the sample spacing (with 150 points
-// on a 100x100 canvas that's ~1-2 units of quantization error even when the
-// finger is exactly on the curve). This instead projects the point onto
-// every polyline *segment* (not just its endpoints) and keeps the true
-// perpendicular distance, which is accurate independent of sample density —
-// i.e. sub-pixel, not sample-pixel.
-function closestPointOnPolyline(point, pathPoints) {
-  let minDist = Infinity;
-  let bestPoint = pathPoints[0] || point;
-  let bestIndex = 0;
-
-  for (let i = 0; i < pathPoints.length - 1; i++) {
-    const a = pathPoints[i];
-    const b = pathPoints[i + 1];
-    const abx = b.x - a.x;
-    const aby = b.y - a.y;
-    const lenSq = abx * abx + aby * aby;
-    let t = lenSq > 0 ? ((point.x - a.x) * abx + (point.y - a.y) * aby) / lenSq : 0;
-    t = Math.max(0, Math.min(1, t));
-    const projX = a.x + abx * t;
-    const projY = a.y + aby * t;
-    const d = Math.hypot(point.x - projX, point.y - projY);
-    if (d < minDist) {
-      minDist = d;
-      bestPoint = { x: projX, y: projY };
-      bestIndex = i;
-    }
+// ============================================================
+// SMOOTHNESS
+// ============================================================
+function computeSmoothness(velocities, accelerations, pathLength) {
+  if (
+    !velocities ||
+    velocities.length < 5 ||
+    !accelerations ||
+    accelerations.length < 4 ||
+    pathLength < MIN_PATH_LENGTH_FOR_SMOOTHNESS
+  ) {
+    return null;
   }
 
-  return { closest: bestPoint, distance: minDist, index: bestIndex };
+  const meanSpeed = velocities.reduce((a, b) => a + b, 0) / velocities.length;
+  if (meanSpeed <= 0.5) return null;
+
+  const meanAbsAccel =
+    accelerations.reduce((a, b) => a + Math.abs(b), 0) / accelerations.length;
+
+  const ratio = meanAbsAccel / meanSpeed;
+  const score = Math.max(0, Math.min(100, 100 - ratio * 33.3));
+  return Math.round(score * 100) / 100;
 }
 
-// ===== Motion tracking for smoothness scoring =====
-// Tracks instantaneous speed (units/sec) between consecutive samples for a
-// single tracing "side" (the lone hand, or the left/right hand in symmetry
-// mode). A jittery, jerky trace has high variance in speed relative to its
-// mean (high coefficient of variation); a smooth, controlled trace has low
-// variance. That ratio — not the raw speed — is what we score, so a
-// deliberately slow-but-steady trace and a fast-but-steady trace both score
-// well, while a trace that stutters/overshoots does not.
-function emptyMotionTrack() {
-  return { lastPoint: null, lastTime: null, velocities: [] };
-}
-
-function recordMotionSample(track, point, tMs) {
-  if (track.lastPoint && track.lastTime !== null) {
-    const dtSeconds = Math.max(0.001, (tMs - track.lastTime) / 1000);
-    const d = Math.hypot(point.x - track.lastPoint.x, point.y - track.lastPoint.y);
-    track.velocities.push(d / dtSeconds);
-  }
-  track.lastPoint = point;
-  track.lastTime = tMs;
-}
-
-function computeSmoothnessScore(velocities) {
-  if (!velocities || velocities.length < 3) return 100;
-  const mean = velocities.reduce((a, b) => a + b, 0) / velocities.length;
-  if (mean <= 0) return 100;
-  const variance =
-    velocities.reduce((a, b) => a + (b - mean) * (b - mean), 0) / velocities.length;
-  const stdDev = Math.sqrt(variance);
-  const coefficientOfVariation = stdDev / mean;
-  const score = 100 - coefficientOfVariation * 40;
-  return Math.max(0, Math.min(100, Math.round(score * 100) / 100));
-}
-
-// Rewards finishing close to (or a little under) the time budget for the
-// shape; penalizes taking much longer than expected. Deliberately does not
-// reward finishing *instantly*, since an implausibly fast "completion" is
-// more likely a tracking artifact than a clean rep.
-function computeSpeedScore(actualSeconds, expectedSeconds) {
-  if (!expectedSeconds || expectedSeconds <= 0 || actualSeconds <= 0) return 100;
-  const ratio = actualSeconds / expectedSeconds;
-  let score;
-  if (ratio <= 1) {
-    score = 70 + ratio * 30; // 70 (instant) -> 100 (used the full budget well)
-  } else {
-    score = 100 - (ratio - 1) * 60; // penalize overruns
-  }
-  return Math.max(0, Math.min(100, Math.round(score * 100) / 100));
-}
-
-// Single formula combining all four required signals. Weights sum to 1 so
-// the result stays in [0, 100]. Coverage and deviation are weighted highest
-// since they most directly capture "did they actually trace the shape,
-// accurately" — speed and smoothness are secondary quality signals.
-function computeQualityScore({ coverage, avgDeviation, speedScore, smoothnessScore }) {
-  const coverageScore = Math.max(0, Math.min(100, coverage));
-  const deviationScore = Math.max(0, Math.min(100, 100 - avgDeviation * DEVIATION_PENALTY_FACTOR));
-  const raw =
-    coverageScore * 0.4 +
-    deviationScore * 0.3 +
-    speedScore * 0.15 +
-    smoothnessScore * 0.15;
-  return Math.round(raw * 100) / 100;
-}
-
-// ===== One Euro Filter =====
-// Adaptive low-pass filter for noisy landmark streams (Casiez et al.). Unlike a
-// fixed-alpha EMA or a CSS transition, the cutoff frequency adapts to the
-// signal's speed: slow/still fingertip -> heavy smoothing (kills jitter),
-// fast fingertip -> cutoff opens up so the filter tracks almost 1:1 with
-// near-zero added lag. minCutoff controls jitter-at-rest, beta controls how
-// aggressively lag is cut during fast motion.
+// ============================================================
+// ONE EURO FILTER
+//
+// Same math as before, but with an added `filterWithGap()` entry point
+// that stretches internal dt across a short dropout instead of
+// resetting. This is what removes the stutter when a single frame is
+// missed near the edge of the frame.
+// ============================================================
 class OneEuroFilter1D {
-  constructor(minCutoff = 1.1, beta = 0.35, dCutoff = 1.0) {
+  constructor(minCutoff = 0.8, beta = 0.007, dCutoff = 1.0) {
     this.minCutoff = minCutoff;
     this.beta = beta;
     this.dCutoff = dCutoff;
@@ -323,20 +296,28 @@ class OneEuroFilter1D {
     this.dxPrev = 0;
     this.tPrev = null;
   }
-
   static alpha(cutoff, dt) {
     const tau = 1 / (2 * Math.PI * cutoff);
     return 1 / (1 + tau / dt);
   }
-
-  filter(x, tMs) {
+  /**
+   * @param {number} x
+   * @param {number} tMs   current performance.now()
+   * @param {number} [forcedDtSec]  when resuming after a short gap,
+   *   the caller can force a dt so the internal velocity estimate does
+   *   not spike. If omitted, dt is derived from tMs - tPrev.
+   */
+  filter(x, tMs, forcedDtSec) {
     if (this.tPrev === null) {
       this.tPrev = tMs;
       this.xPrev = x;
       this.dxPrev = 0;
       return x;
     }
-    const dt = Math.max(0.001, (tMs - this.tPrev) / 1000);
+    const dt =
+      typeof forcedDtSec === "number" && forcedDtSec > 0
+        ? forcedDtSec
+        : Math.max(0.001, (tMs - this.tPrev) / 1000);
     const dx = (x - this.xPrev) / dt;
     const aD = OneEuroFilter1D.alpha(this.dCutoff, dt);
     const dxHat = aD * dx + (1 - aD) * this.dxPrev;
@@ -348,7 +329,6 @@ class OneEuroFilter1D {
     this.dxPrev = dxHat;
     return xHat;
   }
-
   reset() {
     this.xPrev = null;
     this.dxPrev = 0;
@@ -356,147 +336,283 @@ class OneEuroFilter1D {
   }
 }
 
-// 2D wrapper: filters x and y independently, same timestamp for both.
 class PointOneEuroFilter {
-  constructor(minCutoff = 1.1, beta = 0.35, dCutoff = 1.0) {
+  constructor(minCutoff = 0.8, beta = 0.007, dCutoff = 1.0) {
     this.fx = new OneEuroFilter1D(minCutoff, beta, dCutoff);
     this.fy = new OneEuroFilter1D(minCutoff, beta, dCutoff);
   }
-
-  filter(point, tMs) {
+  filter(point, tMs, forcedDtSec) {
     return {
-      x: this.fx.filter(point.x, tMs),
-      y: this.fy.filter(point.y, tMs),
+      x: this.fx.filter(point.x, tMs, forcedDtSec),
+      y: this.fy.filter(point.y, tMs, forcedDtSec),
     };
   }
-
   reset() {
     this.fx.reset();
     this.fy.reset();
   }
 }
 
-export default function CanvasAir({ onSessionEnd, patientId, gameId = "canvas-air" }) {
+// ============================================================
+// MOTION TRACKING
+// ============================================================
+function emptyMotionTrack() {
+  return {
+    lastPoint: null,
+    lastTime: null,
+    lastVelocity: null,
+    lastVelocityTime: null,
+    velocities: [],
+    accelerations: [],
+    pathLength: 0,
+  };
+}
+
+function recordMotionSample(track, point, tMs) {
+  if (track.lastPoint && track.lastTime !== null) {
+    const dt = Math.max(0.001, (tMs - track.lastTime) / 1000);
+    const d = Math.hypot(
+      point.x - track.lastPoint.x,
+      point.y - track.lastPoint.y
+    );
+
+    if (d >= MIN_MOVEMENT_UNITS) {
+      track.pathLength += d;
+      const v = d / dt;
+      track.velocities.push(v);
+
+      if (track.lastVelocity !== null && track.lastVelocityTime !== null) {
+        const dtA = Math.max(0.001, (tMs - track.lastVelocityTime) / 1000);
+        track.accelerations.push((v - track.lastVelocity) / dtA);
+      }
+      track.lastVelocity = v;
+      track.lastVelocityTime = tMs;
+
+      track.lastPoint = point;
+      track.lastTime = tMs;
+      return { moved: true, distance: d };
+    }
+    track.lastPoint = point;
+    track.lastTime = tMs;
+    return { moved: false, distance: d };
+  }
+  track.lastPoint = point;
+  track.lastTime = tMs;
+  return { moved: false, distance: 0 };
+}
+
+// ============================================================
+// MOVEMENT-WEIGHTED ACCURACY
+// ============================================================
+function emptyMovementStats() {
+  return { movedDistance: 0, onPathDistance: 0 };
+}
+
+function updateMovementStats(stats, distance, onPath) {
+  if (distance < MIN_MOVEMENT_UNITS) return stats;
+  return {
+    movedDistance: stats.movedDistance + distance,
+    onPathDistance: stats.onPathDistance + (onPath ? distance : 0),
+  };
+}
+
+function getMovementAccuracy(stats) {
+  if (!stats.movedDistance || stats.movedDistance <= 0) return null;
+  return (stats.onPathDistance / stats.movedDistance) * 100;
+}
+
+// ============================================================
+// ROM-ADAPTIVE SHAPE SCALING
+// ============================================================
+function getShapeScaleForROM(romDegrees, shapeDifficulty) {
+  if (typeof romDegrees !== "number" || !Number.isFinite(romDegrees) || romDegrees <= 0) {
+    return 1.0;
+  }
+  let scale;
+  if (romDegrees < 30) scale = 0.6;
+  else if (romDegrees < 60) scale = 0.78;
+  else if (romDegrees < 90) scale = 0.95;
+  else if (romDegrees < 120) scale = 1.08;
+  else scale = 1.2;
+  if (shapeDifficulty >= 4) scale *= 0.92;
+  return Math.round(scale * 100) / 100;
+}
+
+function scalePathPoints(points, scale) {
+  if (scale === 1) return points;
+  return points.map((p) => ({
+    x: 50 + (p.x - 50) * scale,
+    y: 50 + (p.y - 50) * scale,
+    length: p.length,
+  }));
+}
+
+function getShapeTransform(scale) {
+  return `translate(50 50) scale(${scale}) translate(-50 -50)`;
+}
+
+// ============================================================
+// COMPONENT
+// ============================================================
+export default function CanvasAir({
+  onSessionEnd,
+  patientId,
+  gameId = "canvas-air",
+}) {
   const videoRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
 
-  // ---- This session's fixed set of 4-5 shapes (chosen once per mount) ----
-  const [sessionShapes] = useState(() => pickSessionShapes());
+  const { currentDifficulty, adapt } = useAdaptiveDifficulty();
 
-  // ---- Existing single-hand state ----
-  const [trace, setTrace] = useState([]);
-  const [completed, setCompleted] = useState(0);
+  const engine = useGameEngine({
+    sessionLength: 600,
+    totalReps: 0,
+    onRepComplete: undefined,
+    onSessionComplete: () => finalizeSessionRef.current?.(),
+  });
+
+  const {
+    gameState,
+    countdown,
+    timeLeft,
+    isPaused,
+    sessionStartTime,
+    startSession,
+    pauseSession,
+    resumeSession,
+    endSession,
+  } = engine;
+
+  const telemetry = useSessionTelemetry(patientId, gameId);
+  const audio = useAudioFeedback(true);
+
+  const initialShapeCount =
+    SHAPES_PER_SESSION[currentDifficulty] ?? SHAPES_PER_SESSION.Beginner;
+  const [sessionShapes, setSessionShapes] = useState(() =>
+    pickSessionShapes(currentDifficulty, initialShapeCount)
+  );
+
+  const totalShapes = sessionShapes.length;
+
   const [currentShapeIndex, setCurrentShapeIndex] = useState(0);
-  const [shapeProgress, setShapeProgress] = useState(0);
-  const [showShapeComplete, setShowShapeComplete] = useState(false);
-  const [isTracing, setIsTracing] = useState(false);
-  const [stars, setStars] = useState(0);
-  const [score, setScore] = useState(0);
-  const [repData, setRepData] = useState([]);
-  const [tracingAccuracy, setTracingAccuracy] = useState(0);
+  const [completed, setCompleted] = useState(0);
   const [missed, setMissed] = useState(0);
+  const [abandoned, setAbandoned] = useState(0);
+  const [score, setScore] = useState(0);
+  const [shapeProgress, setShapeProgress] = useState(0);
+  const [tracingAccuracy, setTracingAccuracy] = useState(null);
+  const [averageDeviation, setAverageDeviation] = useState(0);
+  const [showShapeComplete, setShowShapeComplete] = useState(false);
   const [showShapeMissed, setShowShapeMissed] = useState(false);
+  const [showShapeAbandoned, setShowShapeAbandoned] = useState(false);
+  const [lastShapeMetrics, setLastShapeMetrics] = useState(null);
+  const [shapeMetricsHistory, setShapeMetricsHistory] = useState([]);
+  const [showGallery, setShowGallery] = useState(false);
+  const [trace, setTrace] = useState([]);
+  const [sparkles, setSparkles] = useState([]);
   const [shapeTimeLeft, setShapeTimeLeft] = useState(SHAPE_TIME_LIMIT_SECONDS);
   const [calibrated, setCalibrated] = useState(false);
 
-  // ---- Enhanced tracking state ----
-  const [averageDeviation, setAverageDeviation] = useState(0);
-  const [missedSegments, setMissedSegments] = useState([]);
-  const [timeToComplete, setTimeToComplete] = useState(0);
-  const shapeStartTimeRef = useRef(null);
-  const [pathCoverage, setPathCoverage] = useState([]);
-  const [totalPathPoints, setTotalPathPoints] = useState(0);
+  const [frozenAttempt, setFrozenAttempt] = useState(null);
 
-  // ---- Per-shape / per-session precision metrics ----
-  const [lastShapeMetrics, setLastShapeMetrics] = useState(null);
-  const [shapeMetricsHistory, setShapeMetricsHistory] = useState([]);
-  const motionRef = useRef({
-    single: emptyMotionTrack(),
-    left: emptyMotionTrack(),
-    right: emptyMotionTrack(),
+  // ---- Cursor DOM state (no React re-render per frame) ----
+  const cursorElRef = useRef(null);
+  const cursorPosRef = useRef({ x: 50, y: 50, visible: false });
+  const [cursorVisible, setCursorVisible] = useState(false);
+
+  // ---- Debug HUD (dev-only, see DEBUG_TRACKING) ----
+  // Written every frame from the same code paths that already compute
+  // these values; a separate rAF loop below reads it so the HUD never
+  // triggers a React re-render.
+  const debugElRef = useRef(null);
+  const debugSnapshotRef = useRef({
+    raw: null,
+    mirrored: null,
+    filtered: null,
+    mapped: null,
+    onPath: null,
+    distance: null,
+    valid: false,
   });
 
-  // ---- hand mode ----
-  const [handMode, setHandMode] = useState("single");
-
-  // ---- shape gallery ----
-  const [showGallery, setShowGallery] = useState(false);
-
-  // ---- symmetry-mode state ----
-  const [traceLeft, setTraceLeft] = useState([]);
-  const [traceRight, setTraceRight] = useState([]);
-  const [shapeProgressLeft, setShapeProgressLeft] = useState(0);
-  const [shapeProgressRight, setShapeProgressRight] = useState(0);
-  const [tracingAccuracyLeft, setTracingAccuracyLeft] = useState(0);
-  const [tracingAccuracyRight, setTracingAccuracyRight] = useState(0);
-  const [isTracingLeft, setIsTracingLeft] = useState(false);
-  const [isTracingRight, setIsTracingRight] = useState(false);
-  const [guidePointsRight, setGuidePointsRight] = useState([]);
-
-  // ---- streak / combo / precision-mode ----
-  const [streak, setStreak] = useState(0);
-  const [bestStreak, setBestStreak] = useState(0);
-  const [celebrateStreak, setCelebrateStreak] = useState(null);
-  const [dynamicTolerance, setDynamicTolerance] = useState(TRACE_TOLERANCE_UNITS);
-  const [sparkles, setSparkles] = useState([]);
-  const comboMultiplierRef = useRef(1);
-
-  const minAngleRef = useRef(null);
-  const maxAngleRef = useRef(0);
-  const leftMinAngleRef = useRef(null);
-  const leftMaxAngleRef = useRef(0);
-  const rightMinAngleRef = useRef(null);
-  const rightMaxAngleRef = useRef(0);
-
-  const hasEndedRef = useRef(false);
-  const metricsEngine = useRef(new MetricsEngine());
-
-  const sampledPathRef = useRef([]);
-  const trackerRef = useRef(null);
-  const tracingStatsRef = useRef({ totalSamples: 0, onPathSamples: 0 });
-  const pathCoverageRef = useRef(new Set());
-
-  const trackerLeftRef = useRef(null);
-  const trackerRightRef = useRef(null);
-  const statsLeftRef = useRef({ totalSamples: 0, onPathSamples: 0 });
-  const statsRightRef = useRef({ totalSamples: 0, onPathSamples: 0 });
-
-  // ---- Cursor smoothing (One Euro Filter) ----
-  // Filters run on every raw hand-tracking sample, independent of game state,
-  // so the on-screen cursor and the path-tracing math always agree and stay
-  // responsive even while paused/between reps.
-  const fingertipFilterRef = useRef(new PointOneEuroFilter());
-  const leftHandFilterRef = useRef(new PointOneEuroFilter());
-  const rightHandFilterRef = useRef(new PointOneEuroFilter());
-  const [smoothedFingertip, setSmoothedFingertip] = useState(null);
-  const [smoothedLeftHand, setSmoothedLeftHand] = useState(null);
-  const [smoothedRightHand, setSmoothedRightHand] = useState(null);
-
-  // ---- Raw (unfiltered) cursor tracking ----
-  // The `smoothed*` state above still feeds the tracing/scoring math (kept
-  // filtered for measurement stability). The on-screen cursor dot(s), by
-  // contrast, read straight from these raw refs every animation frame with
-  // zero smoothing/interpolation, so the dot is a direct 1:1 mirror of the
-  // fingertip with no added lag — see the rAF loop below.
-  const rawFingertipRef = useRef(null);
-  const rawLeftHandRef = useRef(null);
-  const rawRightHandRef = useRef(null);
-  const cursorElRef = useRef(null);
-  const leftCursorElRef = useRef(null);
-  const rightCursorElRef = useRef(null);
-
-  const { isActive, error: poseError, calibrate, calibrationData } = useMediaPipeUpperBody({
+  const {
+    isActive,
+    error: poseError,
+    calibrate,
+    calibrationData,
+  } = useMediaPipeUpperBody({
     videoRef,
     onPoseUpdate: setPoseData,
   });
 
   const {
     fingertip,
-    leftHand,
-    rightHand,
     isReady: handReady,
     error: handError,
-  } = useHandTracking({ videoRef, numHands: handMode === "symmetry" ? 2 : 1 });
+  } = useHandTracking({
+    videoRef,
+    numHands: 1,
+  });
+
+  const { shoulderAngle } = usePoseDetection(poseData);
+  const guidance = usePostureGuidance(poseData, calibrationData);
+  const { papsScore, isPainDetected, resetPainState } =
+    useFacialPainDetection({ videoRef });
+
+  const currentShape = sessionShapes[currentShapeIndex] || null;
+  const currentShapePath = currentShape?.path || SHAPES[0].path;
+  const currentShapeLabel = currentShape
+    ? `${currentShape.icon || ""} ${currentShape.name || ""}`.trim()
+    : "";
+
+  const baseTolerance = getBaseTolerance(currentDifficulty);
+  const dynamicTolerance = useMemo(
+    () =>
+      Math.max(
+        MIN_TOLERANCE_FLOOR,
+        Math.min(MAX_TOLERANCE_CEIL, baseTolerance)
+      ),
+    [baseTolerance]
+  );
+
+  const romDegrees = useMemo(() => {
+    if (!poseData) return null;
+    const v = poseData.maxShoulderAngle;
+    return typeof v === "number" && Number.isFinite(v) && v > 0
+      ? Math.round(v)
+      : null;
+  }, [poseData]);
+
+  const totalAttempted = completed + missed + abandoned;
+  const accuracyBand = getAccuracyBand(tracingAccuracy ?? 0);
+
+  // Moved here (before the `if (isComplete) return ...` below) because
+  // useMemo is a Hook: calling it after a conditional early return means
+  // this component calls a different number of hooks depending on
+  // gameState, which violates React's Rules of Hooks and throws
+  // "Rendered fewer hooks than expected" the moment a session completes.
+  const contiguousGroups = useMemo(() => {
+    const groups = { onPath: [], edge: [], off: [] };
+    if (trace.length === 0) return groups;
+
+    let current = null;
+    let buffer = [];
+    const flush = () => {
+      if (buffer.length >= 2 && current) groups[current].push(buffer.slice());
+      buffer = [];
+    };
+
+    for (const p of trace) {
+      const cls = p.cls || "off";
+      if (cls !== current) {
+        flush();
+        current = cls;
+      }
+      buffer.push(p);
+    }
+    flush();
+    return groups;
+  }, [trace]);
 
   useEffect(() => {
     if (!isActive || calibrated) return undefined;
@@ -509,829 +625,970 @@ export default function CanvasAir({ onSessionEnd, patientId, gameId = "canvas-ai
     };
   }, [isActive, calibrated, calibrate]);
 
-  // Smooth the raw fingertip/hand landmarks on every incoming sample, as soon
-  // as it arrives — this runs regardless of gameState/pause so the cursor
-  // never freezes or snaps stale, and it's the single source of truth both
-  // the rendered cursor and the tracing loops read from below.
+  // ---- Fingertip filtering ----
+  //
+  // Runs whenever useHandTracking emits a new fingertip. The FILTERED
+  // point is what the rest of the component reads. The filter is only
+  // reset when the hand has been gone for FILTER_RESET_GAP_MS; a
+  // one-frame dropout stretches the filter's internal dt instead of
+  // starting over, so the cursor does not stutter at the edge of a
+  // reach.
+  const filteredFingertipRef = useRef(null);
+  const filteredTimestampRef = useRef(0);
+  const fingertipFilterRef = useRef(
+    new PointOneEuroFilter(
+      ONE_EURO_MIN_CUTOFF,
+      ONE_EURO_BETA,
+      ONE_EURO_D_CUTOFF
+    )
+  );
+  const lastFingertipSeenMsRef = useRef(0);
+
+  // Running min/max of mirrored fingertip.x/y actually seen this session.
+  // Expand-only: we want the box to grow to cover real reach, not shrink
+  // and clip a user out again after they've proven they can reach further.
+  const observedRangeRef = useRef({ minX: null, maxX: null, minY: null, maxY: null });
+
+  function getEffectiveHandRange() {
+    const obs = observedRangeRef.current;
+    const spanX = obs.maxX != null ? obs.maxX - obs.minX : 0;
+    const spanY = obs.maxY != null ? obs.maxY - obs.minY : 0;
+    const rangeX =
+      spanX >= HAND_RANGE_MIN_SPAN
+        ? [Math.max(0, obs.minX - HAND_RANGE_PADDING), Math.min(1, obs.maxX + HAND_RANGE_PADDING)]
+        : DEFAULT_HAND_RANGE_X;
+    const rangeY =
+      spanY >= HAND_RANGE_MIN_SPAN
+        ? [Math.max(0, obs.minY - HAND_RANGE_PADDING), Math.min(1, obs.maxY + HAND_RANGE_PADDING)]
+        : DEFAULT_HAND_RANGE_Y;
+    return { rangeX, rangeY };
+  }
+
   useEffect(() => {
-    if (!fingertip) {
-      fingertipFilterRef.current.reset();
-      setSmoothedFingertip(null);
-      rawFingertipRef.current = null;
+    const now = performance.now();
+
+    // No fingertip this render.
+    if (
+      !fingertip ||
+      !Number.isFinite(fingertip.x) ||
+      !Number.isFinite(fingertip.y)
+    ) {
+      if (DEBUG_TRACKING) {
+        debugSnapshotRef.current.raw = null;
+        debugSnapshotRef.current.valid = false;
+      }
+      const lastSeen = lastFingertipSeenMsRef.current;
+      if (lastSeen === 0 || now - lastSeen > FILTER_RESET_GAP_MS) {
+        fingertipFilterRef.current.reset();
+        filteredFingertipRef.current = null;
+        filteredTimestampRef.current = 0;
+      }
+      // If the gap is short, keep the last filtered point in the ref.
+      // The tracing effect will still see `fingertip === null` and skip,
+      // but the filter state survives so the next sample is smooth.
       return;
     }
-    // Raw ref updates immediately and unfiltered — the cursor rAF loop
-    // reads this directly, independent of the filtered value below.
-    rawFingertipRef.current = fingertip;
-    setSmoothedFingertip(fingertipFilterRef.current.filter(fingertip, performance.now()));
+
+    // useHandTracking emits normalized (0..1) coordinates in the raw
+    // camera frame. The <video> is mirrored with scale-x-[-1], so we
+    // flip x here before filtering. This is the ONLY place x is flipped.
+    const mirrored = { x: 1 - fingertip.x, y: fingertip.y };
+
+    const obs = observedRangeRef.current;
+    obs.minX = obs.minX == null ? mirrored.x : Math.min(obs.minX, mirrored.x);
+    obs.maxX = obs.maxX == null ? mirrored.x : Math.max(obs.maxX, mirrored.x);
+    obs.minY = obs.minY == null ? mirrored.y : Math.min(obs.minY, mirrored.y);
+    obs.maxY = obs.maxY == null ? mirrored.y : Math.max(obs.maxY, mirrored.y);
+
+    if (DEBUG_TRACKING) {
+      debugSnapshotRef.current.raw = { x: fingertip.x, y: fingertip.y };
+      debugSnapshotRef.current.mirrored = mirrored;
+      debugSnapshotRef.current.valid = true;
+    }
+
+    const lastSeen = lastFingertipSeenMsRef.current;
+    const gapMs = lastSeen === 0 ? 0 : now - lastSeen;
+    const isResuming = gapMs > 0 && gapMs < FILTER_RESET_GAP_MS;
+
+    let filtered;
+    if (isResuming) {
+      // Stretch dt across the gap. Use the previous frame's nominal dt
+      // (~1/60s) as the forced dt so the One Euro does not see a huge
+      // instantaneous velocity on the first sample back.
+      const forcedDt = 1 / 60;
+      filtered = fingertipFilterRef.current.filter(mirrored, now, forcedDt);
+    } else {
+      filtered = fingertipFilterRef.current.filter(mirrored, now);
+    }
+
+    filteredFingertipRef.current = filtered;
+    filteredTimestampRef.current = now;
+    lastFingertipSeenMsRef.current = now;
+    if (DEBUG_TRACKING) {
+      debugSnapshotRef.current.filtered = filtered;
+    }
   }, [fingertip]);
 
-  useEffect(() => {
-    if (!leftHand) {
-      leftHandFilterRef.current.reset();
-      setSmoothedLeftHand(null);
-      rawLeftHandRef.current = null;
-      return;
-    }
-    rawLeftHandRef.current = leftHand;
-    setSmoothedLeftHand(leftHandFilterRef.current.filter(leftHand, performance.now()));
-  }, [leftHand]);
-
-  useEffect(() => {
-    if (!rightHand) {
-      rightHandFilterRef.current.reset();
-      setSmoothedRightHand(null);
-      rawRightHandRef.current = null;
-      return;
-    }
-    rawRightHandRef.current = rightHand;
-    setSmoothedRightHand(rightHandFilterRef.current.filter(rightHand, performance.now()));
-  }, [rightHand]);
-
-  // ===== Cursor render loop (requestAnimationFrame) =====
-  // Writes the fingertip/hand cursor position directly to the DOM via refs,
-  // every animation frame, bypassing React state + re-render entirely for
-  // this specific value. Each tick reads whatever the latest *raw* sample
-  // is (no filtering, no interpolation between samples) and maps it 1:1 to
-  // the cursor position, so the dot tracks the finger at the display's
-  // native refresh rate (typically 60fps) with no added lag or smoothing.
-  // Combined with the absence of any CSS transition on these elements
-  // (never add one — a transition would just reintroduce lag), this is a
-  // direct, immediate mapping from tracked position to rendered position.
+  // ---- Cursor rAF ----
+  // Reads cursorPosRef, which is written by the tracing effect. If the
+  // tracing effect hasn't written for a while (paused, show overlay),
+  // the cursor keeps its last position and its last visibility flag.
   useEffect(() => {
     let rafId;
-
-    const place = (el, raw) => {
-      if (!el) return;
-      if (!raw) {
-        el.style.display = "none";
-        return;
-      }
-      el.style.display = "block";
-      el.style.left = `${(1 - raw.x) * 100}%`;
-      el.style.top = `${raw.y * 100}%`;
-    };
-
     const tick = () => {
-      place(cursorElRef.current, rawFingertipRef.current);
-      place(leftCursorElRef.current, rawLeftHandRef.current);
-      place(rightCursorElRef.current, rawRightHandRef.current);
+      const el = cursorElRef.current;
+      const pos = cursorPosRef.current;
+      if (el) {
+        if (!pos.visible) {
+          if (el.style.display !== "none") el.style.display = "none";
+        } else {
+          if (el.style.display !== "block") el.style.display = "block";
+          el.style.left = `${pos.x}%`;
+          el.style.top = `${pos.y}%`;
+        }
+      }
       rafId = requestAnimationFrame(tick);
     };
-
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
   }, []);
 
-  const { shoulderAngle, leftShoulderAngle, rightShoulderAngle } = usePoseDetection(poseData);
-  const guidance = usePostureGuidance(poseData, calibrationData);
-  const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
-  const { currentDifficulty, adapt } = useAdaptiveDifficulty();
-  const telemetry = useSessionTelemetry(patientId, gameId);
-  const audio = useAudioFeedback(true);
-
-  // This session's fixed shape list (4-5 shapes, chosen once above).
-  // Adaptive difficulty no longer filters which shapes can be selected — it
-  // only tunes the coverage threshold and the score bonus below.
-  const shapeList = sessionShapes;
-  const currentShape = shapeList[currentShapeIndex % shapeList.length];
-  const shapePath = currentShape?.path || SHAPES[0].path;
-  const totalShapes = shapeList.length;
-  const shapeLabel = `${currentShape?.icon || ""} ${currentShape?.name || ""}`.trim();
-  const shapeLabelFontSize = getLabelFontSize(shapeLabel);
-
-  const romDegrees =
-    minAngleRef.current === null ? 0 : Math.max(0, Math.round(maxAngleRef.current - minAngleRef.current));
-  const leftROM =
-    leftMinAngleRef.current === null ? null : Math.max(0, Math.round(leftMaxAngleRef.current - leftMinAngleRef.current));
-  const rightROM =
-    rightMinAngleRef.current === null ? null : Math.max(0, Math.round(rightMaxAngleRef.current - rightMinAngleRef.current));
-
-  const symmetryScore =
-    leftROM !== null && rightROM !== null && leftROM > 0 && rightROM > 0
-      ? Math.round((Math.min(leftROM, rightROM) / Math.max(leftROM, rightROM)) * 100)
-      : null;
-  const symmetryFlag = symmetryScore !== null && symmetryScore < 80;
-
-  const totalAttempted = completed + missed;
-  const shapeAccuracy = totalAttempted > 0 ? Math.round((completed / totalAttempted) * 100) : 100;
-  const sessionShapesRemaining = Math.max(0, shapeList.length - totalAttempted);
-
-  // Precise (unrounded) progress/accuracy — rounding only ever happens at
-  // display time or when a value is persisted into a metrics record, never
-  // in the running calculation itself, so error can't accumulate across a
-  // multi-minute session.
-  const displayShapeProgress =
-    handMode === "symmetry" ? (shapeProgressLeft + shapeProgressRight) / 2 : shapeProgress;
-  const displayTracingAccuracy =
-    handMode === "symmetry" ? (tracingAccuracyLeft + tracingAccuracyRight) / 2 : tracingAccuracy;
-  const displayIsTracing = handMode === "symmetry" ? isTracingLeft || isTracingRight : isTracing;
-  const accuracyBand = getAccuracyBand(displayTracingAccuracy);
-  const comboMultiplier = streak >= 10 ? 3 : streak >= 5 ? 2 : streak >= 3 ? 1.5 : 1;
-
+  // ---- Debug HUD rAF (dev-only) ----
+  // Reads debugSnapshotRef, which is written inline by the filtering
+  // and tracing effects above. Kept as its own rAF loop so it never
+  // causes a React re-render, matching the cursor loop's approach.
   useEffect(() => {
-    comboMultiplierRef.current = comboMultiplier;
-  }, [comboMultiplier]);
+    if (!DEBUG_TRACKING) return undefined;
+    let rafId;
+    const tick = () => {
+      const el = debugElRef.current;
+      const s = debugSnapshotRef.current;
+      if (el) {
+        const fmt = (p) =>
+          p ? `${p.x.toFixed(3)}, ${p.y.toFixed(3)}` : "—";
+        el.textContent =
+          `valid:     ${s.valid}\n` +
+          `raw:       ${fmt(s.raw)}\n` +
+          `mirrored:  ${fmt(s.mirrored)}\n` +
+          `filtered:  ${fmt(s.filtered)}\n` +
+          `mapped:    ${
+            s.mapped ? `${s.mapped.x.toFixed(2)}, ${s.mapped.y.toFixed(2)}` : "—"
+          }\n` +
+          `onPath:    ${s.onPath}\n` +
+          `distance:  ${s.distance == null ? "—" : s.distance.toFixed(3)}`;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
 
   useEffect(() => {
     const id = setInterval(() => {
-      setSparkles((prev) => {
-        const next = prev.filter((s) => Date.now() - s.createdAt < SPARKLE_LIFETIME_MS);
-        return next.length === prev.length ? prev : next;
-      });
-    }, 200);
+      setSparkles((prev) =>
+        prev.filter((s) => Date.now() - s.createdAt < 700)
+      );
+    }, 250);
     return () => clearInterval(id);
   }, []);
 
-  const engine = useGameEngine({
-    sessionLength: SESSION_SECONDS,
-    totalReps: 0,
-    onRepComplete: (success) => {
-      telemetry.recordRep(success);
-      if (success) {
-        audio.playSuccess();
-        setStars((s) => Math.min(5, s + 1));
-        setStreak((prev) => {
-          const next = prev + 1;
-          setBestStreak((b) => Math.max(b, next));
-          if (next === 3 || next === 5 || next === 10) {
-            setCelebrateStreak(next);
-            setTimeout(() => setCelebrateStreak(null), 1500);
-          }
-          return next;
-        });
-        setDynamicTolerance((t) => Math.max(MIN_TRACE_TOLERANCE_UNITS, t - 0.2));
-      } else {
-        setStreak(0);
-        setDynamicTolerance(TRACE_TOLERANCE_UNITS);
-      }
+  // ---- Per-attempt refs ----
+  const movementStatsRef = useRef(emptyMovementStats());
+  const averageDeviationRef = useRef(0);
+  const motionRef = useRef(emptyMotionTrack());
+  const attemptStartMsRef = useRef(null);
+  const attemptIdRef = useRef(0);
+  const attemptShapeIndexRef = useRef(null);
+  const attemptStateRef = useRef("NOT_STARTED");
+  const finalizedAttemptsRef = useRef(new Set());
+  const hasEndedRef = useRef(false);
+  const finalizeSessionRef = useRef(null);
+  const shapeMetricsHistoryRef = useRef([]);
+
+  useEffect(() => {
+    shapeMetricsHistoryRef.current = shapeMetricsHistory;
+  }, [shapeMetricsHistory]);
+
+  // ---- Attempt lifecycle ----
+  const beginAttempt = useCallback(
+    (shapeIndex, shapeDef) => {
+      if (!shapeDef) return;
+
+      const scale = getShapeScaleForROM(romDegrees, shapeDef.difficulty);
+
+      const sampleCount = shapeDef.path.length > 80 ? 600 : 400;
+      const rawPoints = samplePath(shapeDef.path, sampleCount);
+      const sampledPath = scalePathPoints(rawPoints, scale);
+      const tracker = createPathCoverageTracker(sampledPath, dynamicTolerance);
+
+      // Freeze the hand->canvas remap range for this whole attempt, same
+      // as scale/tolerance/sampledPath just above. observedRangeRef keeps
+      // growing in the background from every raw fingertip sample (see
+      // the filtering effect), but reading it fresh every frame DURING
+      // tracing means the mapping itself shifts mid-stroke whenever the
+      // box expands — the same physical fingertip position lands on a
+      // different canvas point than a moment ago. That produces exactly
+      // the teleporting, disconnected-dot trace seen in testing. Freezing
+      // it here removes the mid-attempt jump; the range still improves
+      // from attempt to attempt as more of the user's reach is observed.
+      const handRange = getEffectiveHandRange();
+
+      attemptIdRef.current += 1;
+      attemptShapeIndexRef.current = shapeIndex;
+      attemptStateRef.current = "ACTIVE";
+      attemptStartMsRef.current = null;
+      movementStatsRef.current = emptyMovementStats();
+      averageDeviationRef.current = 0;
+      motionRef.current = emptyMotionTrack();
+
+      // Reset the fingertip filter so the new attempt starts from a
+      // clean state. Without this, a stale filtered value from the last
+      // attempt could momentarily place the cursor somewhere unexpected.
+      fingertipFilterRef.current.reset();
+      filteredFingertipRef.current = null;
+      filteredTimestampRef.current = 0;
+      lastFingertipSeenMsRef.current = 0;
+
+      setFrozenAttempt({
+        attemptId: attemptIdRef.current,
+        shape: shapeDef,
+        shapeIndex,
+        scale,
+        tolerance: dynamicTolerance,
+        sampledPath,
+        tracker,
+        handRange,
+      });
+
+      setTrace([]);
+      setShapeProgress(0);
+      setTracingAccuracy(null);
+      setAverageDeviation(0);
+      setShowShapeComplete(false);
+      setShowShapeMissed(false);
+      setShowShapeAbandoned(false);
+      setLastShapeMetrics(null);
+      setShapeTimeLeft(SHAPE_TIME_LIMIT_SECONDS);
+      cursorPosRef.current = { x: 50, y: 50, visible: false };
+      setCursorVisible(false);
     },
-    onSessionComplete: () => {
-      finalizeTelemetry();
-    },
-  });
-
-  const {
-    gameState,
-    countdown,
-    timeLeft,
-    isPaused,
-    startSession,
-    pauseSession,
-    resumeSession,
-    completeRep,
-    endSession,
-  } = engine;
-
-  // ---- Shape navigation helpers (free choice among this session's 4-5 shapes) ----
-  const resetShapeUiState = useCallback(() => {
-    setShowShapeComplete(false);
-    setShowShapeMissed(false);
-    setLastShapeMetrics(null);
-    setTrace([]);
-    setTraceLeft([]);
-    setTraceRight([]);
-    pathCoverageRef.current = new Set();
-    setPathCoverage([]);
-  }, []);
-
-  const goToNextShape = useCallback(() => {
-    resetShapeUiState();
-    setCurrentShapeIndex((i) => (i + 1) % shapeList.length);
-  }, [resetShapeUiState, shapeList.length]);
-
-  const goToPrevShape = useCallback(() => {
-    resetShapeUiState();
-    setCurrentShapeIndex((i) => (i - 1 + shapeList.length) % shapeList.length);
-  }, [resetShapeUiState, shapeList.length]);
-
-  const goToRandomShape = useCallback(() => {
-    resetShapeUiState();
-    setCurrentShapeIndex((i) => {
-      if (shapeList.length <= 1) return i;
-      let next = i;
-      while (next === i) {
-        next = Math.floor(Math.random() * shapeList.length);
-      }
-      return next;
-    });
-  }, [resetShapeUiState, shapeList.length]);
-
-  const selectShape = useCallback(
-    (index) => {
-      resetShapeUiState();
-      setCurrentShapeIndex(index);
-      setShowGallery(false);
-    },
-    [resetShapeUiState]
+    [dynamicTolerance, romDegrees]
   );
 
-  // ===== Enhanced shape-reset effect: SINGLE-HAND mode =====
   useEffect(() => {
-    // Denser sampling for curved/complex shapes so the polyline we project
-    // onto for deviation/coverage tracks the true SVG curve tightly.
-    const sampleCount = shapePath.length > 80 ? PATH_SAMPLE_COUNT_COMPLEX : PATH_SAMPLE_COUNT_SIMPLE;
-    const points = samplePath(shapePath, sampleCount);
-    sampledPathRef.current = points;
-    trackerRef.current = createPathCoverageTracker(points, dynamicTolerance);
-    tracingStatsRef.current = { totalSamples: 0, onPathSamples: 0 };
-    pathCoverageRef.current = new Set();
-    motionRef.current.single = emptyMotionTrack();
-    setPathCoverage([]);
-    setTotalPathPoints(points.length);
-    setTrace([]);
-    setShapeProgress(0);
-    setTracingAccuracy(0);
-    setShapeTimeLeft(SHAPE_TIME_LIMIT_SECONDS + Math.floor((currentShape?.difficulty || 1) * 2));
-    setShowShapeMissed(false);
-    setAverageDeviation(0);
-    setMissedSegments([]);
-    shapeStartTimeRef.current = Date.now();
-  }, [shapePath, dynamicTolerance, currentShape]);
-
-  // ===== Shape-reset effect: SYMMETRY mode =====
-  useEffect(() => {
-    if (handMode !== "symmetry") return undefined;
-    const sampleCount = shapePath.length > 80 ? PATH_SAMPLE_COUNT_COMPLEX : PATH_SAMPLE_COUNT_SIMPLE;
-    const leftPoints = samplePath(shapePath, sampleCount);
-    const rightPoints = leftPoints.map((p) => ({ x: 100 - p.x, y: p.y }));
-    trackerLeftRef.current = createPathCoverageTracker(leftPoints, dynamicTolerance);
-    trackerRightRef.current = createPathCoverageTracker(rightPoints, dynamicTolerance);
-    statsLeftRef.current = { totalSamples: 0, onPathSamples: 0 };
-    statsRightRef.current = { totalSamples: 0, onPathSamples: 0 };
-    motionRef.current.left = emptyMotionTrack();
-    motionRef.current.right = emptyMotionTrack();
-    setGuidePointsRight(rightPoints);
-    setTraceLeft([]);
-    setTraceRight([]);
-    setShapeProgressLeft(0);
-    setShapeProgressRight(0);
-    setTracingAccuracyLeft(0);
-    setTracingAccuracyRight(0);
-    setAverageDeviation(0);
-    setMissedSegments([]);
-    shapeStartTimeRef.current = Date.now();
-  }, [shapePath, handMode, dynamicTolerance]);
-
-  // Track ROM with metrics engine
-  useEffect(() => {
-    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
-    const repResult = metricsEngine.current.trackAngle(shoulderAngle, performance.now());
-    if (repResult) {
-      setRepData((prev) => [...prev, repResult]);
+    if (!currentShape) return;
+    if (
+      frozenAttempt &&
+      frozenAttempt.shapeIndex === currentShapeIndex &&
+      frozenAttempt.shape === currentShape &&
+      attemptStateRef.current === "ACTIVE"
+    ) {
+      return;
     }
-  }, [gameState, isPaused, shoulderAngle]);
+    beginAttempt(currentShapeIndex, currentShape);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentShapeIndex, currentShape]);
 
-  // Per-side ROM tracking
-  useEffect(() => {
-    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
-    if (typeof leftShoulderAngle === "number") {
-      if (leftMinAngleRef.current === null || (leftShoulderAngle > 0 && leftShoulderAngle < leftMinAngleRef.current)) {
-        leftMinAngleRef.current = leftShoulderAngle > 0 ? leftShoulderAngle : 0;
-      }
-      if (leftShoulderAngle > leftMaxAngleRef.current) leftMaxAngleRef.current = leftShoulderAngle;
-    }
-    if (typeof rightShoulderAngle === "number") {
-      if (rightMinAngleRef.current === null || (rightShoulderAngle > 0 && rightShoulderAngle < rightMinAngleRef.current)) {
-        rightMinAngleRef.current = rightShoulderAngle > 0 ? rightShoulderAngle : 0;
-      }
-      if (rightShoulderAngle > rightMaxAngleRef.current) rightMaxAngleRef.current = rightShoulderAngle;
-    }
-  }, [gameState, isPaused, leftShoulderAngle, rightShoulderAngle]);
+  // ---- Finalize an attempt and record it ----
+  const finalizeAttempt = useCallback(
+    (reason) => {
+      const attempt = frozenAttempt;
+      if (!attempt) return null;
+      if (attemptStateRef.current === "FINALIZED") return null;
+      if (finalizedAttemptsRef.current.has(attempt.attemptId)) return null;
 
-  // ===== Enhanced main tracing loop: SINGLE-HAND mode =====
-  useEffect(() => {
-    if (handMode !== "single") return undefined;
-    if (gameState !== GAME_STATES.ACTIVE || isPaused || showShapeComplete || showShapeMissed) return undefined;
+      attemptStateRef.current = "FINALIZED";
+      finalizedAttemptsRef.current.add(attempt.attemptId);
 
-    if (!smoothedFingertip) {
-      setIsTracing(false);
-      return undefined;
-    }
+      const elapsedSeconds =
+        attemptStartMsRef.current != null
+          ? (performance.now() - attemptStartMsRef.current) / 1000
+          : 0;
 
-    const point = { x: (1 - smoothedFingertip.x) * 100, y: smoothedFingertip.y * 100 };
-    const tracker = trackerRef.current;
-    if (!tracker) return undefined;
+      const stats = movementStatsRef.current;
+      const accuracy = getMovementAccuracy(stats);
+      const smoothness = computeSmoothness(
+        motionRef.current.velocities,
+        motionRef.current.accelerations,
+        motionRef.current.pathLength
+      );
 
-    const nowMs = performance.now();
-    recordMotionSample(motionRef.current.single, point, nowMs);
+      const coverage = attempt.tracker.getCoverage();
 
-    const { onPath } = tracker.update(point);
+      const painActive = papsScore >= PAPS_PAIN_THRESHOLD;
+      const safeSmoothness = smoothness ?? 0;
+      const rawScore =
+        reason === "completed"
+          ? Math.round(safeSmoothness / 10) + attempt.shape.difficulty
+          : 0;
+      const painAdjustedScore =
+        reason === "completed" && painActive
+          ? attempt.shape.difficulty + 3
+          : rawScore;
 
-    tracingStatsRef.current.totalSamples += 1;
-    if (onPath) tracingStatsRef.current.onPathSamples += 1;
-
-    const stats = tracingStatsRef.current;
-    // High-precision accuracy — kept as a float throughout; only rounded
-    // for display or when written into a persisted metrics record.
-    const accuracy = stats.totalSamples
-      ? (stats.onPathSamples / stats.totalSamples) * 100
-      : 0;
-    setTracingAccuracy(accuracy);
-
-    // Sub-pixel deviation: project onto path *segments*, not just the
-    // nearest sampled vertex, so accuracy doesn't depend on sample spacing.
-    const { closest, distance: dist, index } = closestPointOnPolyline(point, sampledPathRef.current);
-    if (dist < MAX_ALLOWED_DEVIATION && index !== -1) {
-      const totalSamples = stats.totalSamples || 1;
-      setAverageDeviation((prev) => (prev * (totalSamples - 1) + dist) / totalSamples);
-
-      // Track path coverage more granularly
-      if (onPath && index !== -1) {
-        // Mark coverage for nearby path points
-        const coverageRadius = 3;
-        for (let i = Math.max(0, index - coverageRadius); i < Math.min(sampledPathRef.current.length, index + coverageRadius); i++) {
-          pathCoverageRef.current.add(i);
-        }
-        setPathCoverage(Array.from(pathCoverageRef.current));
-      }
-    }
-
-    setIsTracing(onPath);
-    if (onPath) {
-      setTrace((current) => [...current.slice(-199), point]);
-      if (Math.random() < 0.12) {
-        setSparkles((prev) => [
-          ...prev.slice(-14),
-          { id: `${Date.now()}-${Math.random()}`, x: point.x, y: point.y, color: getAccuracyBand(accuracy).stroke, side: "single", createdAt: Date.now() },
-        ]);
-      }
-    }
-
-    // High-precision coverage: fraction of unique path samples visited,
-    // kept as a float (e.g. 87.34%) instead of rounded to a whole percent —
-    // with 400-600 samples per shape, each point is worth ~0.17-0.25%, so
-    // this is precise well beyond a single integer percentage point.
-    const coverage = pathCoverageRef.current.size > 0
-      ? Math.min(100, (pathCoverageRef.current.size / (sampledPathRef.current.length || 1)) * 100)
-      : tracker.getCoverage();
-    setShapeProgress(coverage);
-
-    // Difficulty-specific completion with quality scoring
-    const difficultyThreshold = getShapeCompleteThreshold(currentDifficulty);
-    if (coverage >= difficultyThreshold && !showShapeComplete) {
-      setShowShapeComplete(true);
-      setCompleted((v) => v + 1);
-
-      const timeToCompleteSeconds = shapeStartTimeRef.current
-        ? (Date.now() - shapeStartTimeRef.current) / 1000
-        : 0;
-      const expectedSeconds = SHAPE_TIME_LIMIT_SECONDS + (currentShape?.difficulty || 1) * 2;
-      const speedScore = computeSpeedScore(timeToCompleteSeconds, expectedSeconds);
-      const smoothnessScore = computeSmoothnessScore(motionRef.current.single.velocities);
-      const qualityScore = computeQualityScore({
-        coverage,
-        avgDeviation: averageDeviation,
-        speedScore,
-        smoothnessScore,
-      });
-
-      // Bonus for complex shapes (difficulty rating only affects scoring)
-      const shapeBonus = currentShape?.difficulty || 1;
-
-      // Update score based on quality
-      const basePoints = Math.round((qualityScore / 10) * shapeBonus);
-      const difficultyBonus = currentDifficulty === 'Advanced' ? 3 :
-                             currentDifficulty === 'Intermediate' ? 2 : 1;
-      const finalPoints = (basePoints + difficultyBonus) * comboMultiplierRef.current;
-      setScore((s) => s + finalPoints);
-
-      // Detailed, precise metrics for this single shape completion.
-      const shapeMetrics = {
-        shapeName: currentShape?.name,
-        shapeDifficulty: currentShape?.difficulty,
+      const metrics = {
+        attemptId: attempt.attemptId,
+        shapeName: attempt.shape.name,
+        shapeDifficulty: attempt.shape.difficulty,
+        shapeScaleApplied: attempt.scale,
+        outcome: reason,
+        completed: reason === "completed",
+        abandoned: reason === "abandoned",
         coveragePercent: Math.round(coverage * 100) / 100,
-        tracingAccuracyPercent: Math.round(accuracy * 100) / 100,
-        averageDeviationUnits: Math.round(averageDeviation * 1000) / 1000,
-        timeToCompleteSeconds: Math.round(timeToCompleteSeconds * 100) / 100,
-        expectedSeconds,
-        speedScore,
-        smoothnessScore,
-        qualityScore,
-        pointsAwarded: finalPoints,
+        tracingAccuracyPercent:
+          accuracy == null ? null : Math.round(accuracy * 100) / 100,
+        averageDeviationUnits:
+          Math.round(averageDeviationRef.current * 1000) / 1000,
+        completionTimeSeconds: Math.round(elapsedSeconds * 100) / 100,
+        smoothnessScore: smoothness,
+        movedDistanceUnits: Math.round(stats.movedDistance * 100) / 100,
+        toleranceUsed: Math.round(attempt.tolerance * 100) / 100,
+        papsScore,
+        painAdjusted: painActive,
       };
-      setLastShapeMetrics(shapeMetrics);
-      setShapeMetricsHistory((prev) => [...prev, shapeMetrics]);
 
-      // Record the shape completion
-      completeRep(true, {
-        accuracy,
-        coverage,
-        deviation: averageDeviation,
-        timeToComplete: timeToCompleteSeconds,
-        shapeName: currentShape?.name,
-        shapeDifficulty: currentShape?.difficulty,
-        qualityScore,
+      setLastShapeMetrics(metrics);
+      setShapeMetricsHistory((prev) => {
+        const next = prev.concat(metrics);
+        shapeMetricsHistoryRef.current = next;
+        return next;
       });
 
-      setTimeout(() => {
-        setShowShapeComplete(false);
-        setLastShapeMetrics(null);
-        // Only advance to another shape if the session isn't already done —
-        // the session-completion effect below handles ending it.
-        setCurrentShapeIndex((i) => (i + 1) % shapeList.length);
-      }, 1800);
-    }
+      if (reason === "completed") {
+        setCompleted((v) => v + 1);
+        setScore((s) => s + painAdjustedScore);
+        setShowShapeComplete(true);
+        if (safeSmoothness >= 70 || painActive) audio.playSuccess();
+      } else if (reason === "timeout") {
+        setMissed((m) => m + 1);
+        setShowShapeMissed(true);
+        audio.playMiss();
+      } else {
+        setAbandoned((a) => a + 1);
+      }
 
-    telemetry.trackAngle(shoulderAngle);
+      telemetry.recordRep(reason === "completed", {
+        accuracy: metrics.tracingAccuracyPercent,
+        coverage: metrics.coveragePercent,
+        deviation: metrics.averageDeviationUnits,
+        timeToComplete: metrics.completionTimeSeconds,
+        shapeName: metrics.shapeName,
+        shapeDifficulty: metrics.shapeDifficulty,
+        shapeScaleApplied: metrics.shapeScaleApplied,
+        smoothness: metrics.smoothnessScore,
+        toleranceUsed: metrics.toleranceUsed,
+        papsScore: metrics.papsScore,
+        painAdjusted: metrics.painAdjusted,
+        outcome: metrics.outcome,
+      });
 
-    if (minAngleRef.current === null || (shoulderAngle > 0 && shoulderAngle < minAngleRef.current)) {
-      minAngleRef.current = shoulderAngle > 0 ? shoulderAngle : 0;
-    }
-    if (shoulderAngle > maxAngleRef.current) {
-      maxAngleRef.current = shoulderAngle;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handMode, smoothedFingertip, gameState, isPaused, showShapeComplete, showShapeMissed, shoulderAngle, currentDifficulty, averageDeviation, currentShape, shapeList.length]);
+      return metrics;
+    },
+    [frozenAttempt, papsScore, telemetry, audio]
+  );
 
-  // ===== Main tracing loop: SYMMETRY mode =====
+  const advanceShape = useCallback(() => {
+    const next = currentShapeIndex + 1;
+    if (next >= totalShapes) return;
+
+    const history = shapeMetricsHistoryRef.current;
+    const recent = history.slice(-3);
+    const recentAcc =
+      recent.length > 0
+        ? recent
+            .map((m) => m.tracingAccuracyPercent ?? 0)
+            .reduce((a, b) => a + b, 0) / recent.length
+        : 0;
+
+    const newDifficulty = adapt({
+      accuracy: recentAcc,
+      papsScore,
+      combo: completed,
+      maxFlexionAngle: romDegrees,
+    });
+
+    setSessionShapes((prev) => {
+      const nextList = prev.slice();
+      const usedNames = nextList.map((s) => s.name);
+      const replacement = pickReplacementShape(newDifficulty, usedNames);
+      nextList[next] = replacement;
+      return nextList;
+    });
+
+    setCurrentShapeIndex(next);
+  }, [
+    currentShapeIndex,
+    totalShapes,
+    adapt,
+    completed,
+    papsScore,
+    romDegrees,
+  ]);
+
   useEffect(() => {
-    if (handMode !== "symmetry") return undefined;
-    if (gameState !== GAME_STATES.ACTIVE || isPaused || showShapeComplete || showShapeMissed) return undefined;
+    if (!showShapeComplete && !showShapeMissed) return undefined;
+    const t = setTimeout(() => {
+      setShowShapeComplete(false);
+      setShowShapeMissed(false);
+      setLastShapeMetrics(null);
+      advanceShape();
+    }, SHAPE_ADVANCE_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [showShapeComplete, showShapeMissed, advanceShape]);
 
-    const trackerL = trackerLeftRef.current;
-    const trackerR = trackerRightRef.current;
-    if (!trackerL || !trackerR) return undefined;
+  // ---- Tracing ----
+  //
+  // The tracing effect is the SINGLE writer of cursorPosRef. The rAF
+  // loop above only reads. This guarantees the cursor and the trace
+  // never disagree by a frame.
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    if (showShapeComplete || showShapeMissed) return;
+    if (!frozenAttempt) return;
+    if (!fingertip) return;
 
-    let leftCoverage = shapeProgressLeft;
-    let rightCoverage = shapeProgressRight;
-    let leftAcc = 0;
-    let rightAcc = 0;
+    const filtered = filteredFingertipRef.current;
+    if (!filtered) return;
+    if (!Number.isFinite(filtered.x) || !Number.isFinite(filtered.y)) return;
+
+    // Reject genuinely off-frame samples. A small margin is allowed so
+    // a filtered value just past the edge of the frame is still used,
+    // but nothing is ever clamped — a point outside the box is either
+    // used verbatim or dropped.
+    if (
+      filtered.x < -OFF_FRAME_MARGIN ||
+      filtered.x > 1 + OFF_FRAME_MARGIN ||
+      filtered.y < -OFF_FRAME_MARGIN ||
+      filtered.y > 1 + OFF_FRAME_MARGIN
+    ) {
+      cursorPosRef.current = { ...cursorPosRef.current, visible: false };
+      if (cursorVisible) setCursorVisible(false);
+      return;
+    }
+
+    if (attemptStartMsRef.current == null) {
+      attemptStartMsRef.current = performance.now();
+    }
+
+    const { rangeX, rangeY } = frozenAttempt.handRange;
+    const nx = remapNormalized(filtered.x, rangeX);
+    const ny = remapNormalized(filtered.y, rangeY);
+    const point = { x: nx * 100, y: ny * 100 };
     const nowMs = performance.now();
 
-    if (smoothedLeftHand) {
-      const pointL = { x: (1 - smoothedLeftHand.x) * 100, y: smoothedLeftHand.y * 100 };
-      recordMotionSample(motionRef.current.left, pointL, nowMs);
-      const { onPath } = trackerL.update(pointL);
-      statsLeftRef.current.totalSamples += 1;
-      if (onPath) statsLeftRef.current.onPathSamples += 1;
-      leftAcc = statsLeftRef.current.totalSamples
-        ? (statsLeftRef.current.onPathSamples / statsLeftRef.current.totalSamples) * 100
-        : 0;
-      setTracingAccuracyLeft(leftAcc);
-      setIsTracingLeft(onPath);
-      if (onPath) {
-        setTraceLeft((cur) => [...cur.slice(-199), pointL]);
-        if (Math.random() < 0.12) {
-          setSparkles((prev) => [
-            ...prev.slice(-14),
-            { id: `${Date.now()}-${Math.random()}-l`, x: pointL.x, y: pointL.y, color: getAccuracyBand(leftAcc).stroke, side: "left", createdAt: Date.now() },
-          ]);
-        }
+    // Cursor position — deadbanded against sub-pixel jitter.
+    const prevCursor = cursorPosRef.current;
+    if (prevCursor.visible) {
+      const dx = Math.abs(prevCursor.x - point.x);
+      const dy = Math.abs(prevCursor.y - point.y);
+      if (dx < CURSOR_DEADBAND_UNITS && dy < CURSOR_DEADBAND_UNITS) {
+        // Keep the last position; do not update left/top.
+      } else {
+        cursorPosRef.current = { x: point.x, y: point.y, visible: true };
       }
-      leftCoverage = trackerL.getCoverage();
-      setShapeProgressLeft(leftCoverage);
     } else {
-      setIsTracingLeft(false);
+      cursorPosRef.current = { x: point.x, y: point.y, visible: true };
+    }
+    if (!cursorVisible) setCursorVisible(true);
+
+    const { distance } = recordMotionSample(motionRef.current, point, nowMs);
+
+    const result = frozenAttempt.tracker.update(point);
+
+    movementStatsRef.current = updateMovementStats(
+      movementStatsRef.current,
+      distance,
+      result.onPath
+    );
+    const acc = getMovementAccuracy(movementStatsRef.current);
+    setTracingAccuracy(acc);
+
+    if (Number.isFinite(result.distance)) {
+      const prev = averageDeviationRef.current;
+      averageDeviationRef.current = prev + (result.distance - prev) * 0.05;
+      setAverageDeviation(averageDeviationRef.current);
     }
 
-    if (smoothedRightHand) {
-      const pointR = { x: (1 - smoothedRightHand.x) * 100, y: smoothedRightHand.y * 100 };
-      recordMotionSample(motionRef.current.right, pointR, nowMs);
-      const { onPath } = trackerR.update(pointR);
-      statsRightRef.current.totalSamples += 1;
-      if (onPath) statsRightRef.current.onPathSamples += 1;
-      rightAcc = statsRightRef.current.totalSamples
-        ? (statsRightRef.current.onPathSamples / statsRightRef.current.totalSamples) * 100
-        : 0;
-      setTracingAccuracyRight(rightAcc);
-      setIsTracingRight(onPath);
-      if (onPath) {
-        setTraceRight((cur) => [...cur.slice(-199), pointR]);
-        if (Math.random() < 0.12) {
-          setSparkles((prev) => [
-            ...prev.slice(-14),
-            { id: `${Date.now()}-${Math.random()}-r`, x: pointR.x, y: pointR.y, color: getAccuracyBand(rightAcc).stroke, side: "right", createdAt: Date.now() },
-          ]);
-        }
-      }
-      rightCoverage = trackerR.getCoverage();
-      setShapeProgressRight(rightCoverage);
-    } else {
-      setIsTracingRight(false);
+    const cls = classifyFeedback(result.distance, frozenAttempt.tolerance);
+
+    if (DEBUG_TRACKING) {
+      debugSnapshotRef.current.mapped = point;
+      debugSnapshotRef.current.onPath = result.onPath;
+      debugSnapshotRef.current.distance = result.distance;
     }
 
-    telemetry.trackAngle(shoulderAngle);
+    setTrace((cur) => {
+      const next = cur.concat({ x: point.x, y: point.y, cls });
+      return next.length > 500 ? next.slice(next.length - 500) : next;
+    });
 
-    const difficultyThreshold = getShapeCompleteThreshold(currentDifficulty);
-    if (leftCoverage >= difficultyThreshold && rightCoverage >= difficultyThreshold && !showShapeComplete) {
-      setShowShapeComplete(true);
-      setCompleted((v) => v + 1);
-
-      const avgAccuracy = (leftAcc + rightAcc) / 2;
-      const avgCoverage = (leftCoverage + rightCoverage) / 2;
-      const avgDeviation = averageDeviation || 0;
-      const timeToCompleteSeconds = shapeStartTimeRef.current
-        ? (Date.now() - shapeStartTimeRef.current) / 1000
-        : 0;
-      const expectedSeconds = SHAPE_TIME_LIMIT_SECONDS + (currentShape?.difficulty || 1) * 2;
-      const speedScore = computeSpeedScore(timeToCompleteSeconds, expectedSeconds);
-      const combinedVelocities = [
-        ...motionRef.current.left.velocities,
-        ...motionRef.current.right.velocities,
-      ];
-      const smoothnessScore = computeSmoothnessScore(combinedVelocities);
-      const qualityScore = computeQualityScore({
-        coverage: avgCoverage,
-        avgDeviation,
-        speedScore,
-        smoothnessScore,
+    if (cls === "onPath" && Math.random() < 0.06) {
+      setSparkles((prev) => {
+        const next = prev.concat({
+          id: `${Date.now()}-${Math.random()}`,
+          x: point.x,
+          y: point.y,
+          color: FEEDBACK_COLORS.onPath,
+          createdAt: Date.now(),
+        });
+        return next.length > 16 ? next.slice(next.length - 16) : next;
       });
-
-      const shapeBonus = currentShape?.difficulty || 1;
-      const basePoints = Math.round((qualityScore / 10) * shapeBonus);
-      const difficultyBonus = currentDifficulty === 'Advanced' ? 3 :
-                             currentDifficulty === 'Intermediate' ? 2 : 1;
-      const finalPoints = (basePoints + difficultyBonus) * comboMultiplierRef.current;
-      setScore((s) => s + finalPoints);
-
-      const shapeMetrics = {
-        shapeName: currentShape?.name,
-        shapeDifficulty: currentShape?.difficulty,
-        coveragePercent: Math.round(avgCoverage * 100) / 100,
-        coveragePercentLeft: Math.round(leftCoverage * 100) / 100,
-        coveragePercentRight: Math.round(rightCoverage * 100) / 100,
-        tracingAccuracyPercent: Math.round(avgAccuracy * 100) / 100,
-        averageDeviationUnits: Math.round(avgDeviation * 1000) / 1000,
-        timeToCompleteSeconds: Math.round(timeToCompleteSeconds * 100) / 100,
-        expectedSeconds,
-        speedScore,
-        smoothnessScore,
-        qualityScore,
-        pointsAwarded: finalPoints,
-      };
-      setLastShapeMetrics(shapeMetrics);
-      setShapeMetricsHistory((prev) => [...prev, shapeMetrics]);
-
-      completeRep(true, {
-        accuracy: avgAccuracy,
-        coverage: avgCoverage,
-        deviation: avgDeviation,
-        timeToComplete: timeToCompleteSeconds,
-        shapeName: currentShape?.name,
-        shapeDifficulty: currentShape?.difficulty,
-        qualityScore,
-      });
-
-      setTimeout(() => {
-        setShowShapeComplete(false);
-        setLastShapeMetrics(null);
-        setCurrentShapeIndex((i) => (i + 1) % shapeList.length);
-      }, 1800);
     }
+
+    setShapeProgress(frozenAttempt.tracker.getCoverage());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handMode, smoothedLeftHand, smoothedRightHand, gameState, isPaused, showShapeComplete, showShapeMissed, shoulderAngle, currentDifficulty, averageDeviation, currentShape, shapeList.length]);
+  }, [
+    gameState,
+    isPaused,
+    showShapeComplete,
+    showShapeMissed,
+    frozenAttempt,
+    fingertip,
+  ]);
 
-  // Per-shape countdown
   useEffect(() => {
-    if (gameState !== GAME_STATES.ACTIVE || isPaused || showShapeComplete || showShapeMissed) {
-      return undefined;
-    }
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    if (showShapeComplete || showShapeMissed || showShapeAbandoned) return;
+    if (!frozenAttempt) return;
+    if (attemptStateRef.current !== "ACTIVE") return;
 
-    if (shapeTimeLeft <= 0) {
-      setShowShapeMissed(true);
-      setMissed((m) => m + 1);
+    const threshold =
+      currentDifficulty === "Advanced"
+        ? 90
+        : currentDifficulty === "Intermediate"
+        ? 85
+        : 80;
 
-      // Even on a miss, the user traced *something* — measure it instead of
-      // throwing it away. Use whatever coverage/accuracy/deviation was
-      // accumulated up to the timeout (partial credit is still real data).
-      const coverageAtMiss = handMode === "symmetry"
-        ? (shapeProgressLeft + shapeProgressRight) / 2
-        : shapeProgress;
-      const accuracyAtMiss = handMode === "symmetry"
-        ? (tracingAccuracyLeft + tracingAccuracyRight) / 2
-        : tracingAccuracy;
-      const timeToCompleteSeconds = shapeStartTimeRef.current
-        ? (Date.now() - shapeStartTimeRef.current) / 1000
-        : 0;
-      const expectedSeconds = SHAPE_TIME_LIMIT_SECONDS + (currentShape?.difficulty || 1) * 2;
-      const speedScore = computeSpeedScore(timeToCompleteSeconds, expectedSeconds);
-      const velocitiesAtMiss = handMode === "symmetry"
-        ? [...motionRef.current.left.velocities, ...motionRef.current.right.velocities]
-        : motionRef.current.single.velocities;
-      const smoothnessScore = computeSmoothnessScore(velocitiesAtMiss);
-      const qualityScore = computeQualityScore({
-        coverage: coverageAtMiss,
-        avgDeviation: averageDeviation,
-        speedScore,
-        smoothnessScore,
-      });
+    if (shapeProgress < threshold) return;
+    if (frozenAttempt.tracker.getCoverage() < threshold) return;
 
-      const shapeMetrics = {
-        shapeName: currentShape?.name,
-        shapeDifficulty: currentShape?.difficulty,
-        completed: false,
-        coveragePercent: Math.round(coverageAtMiss * 100) / 100,
-        tracingAccuracyPercent: Math.round(accuracyAtMiss * 100) / 100,
-        averageDeviationUnits: Math.round(averageDeviation * 1000) / 1000,
-        timeToCompleteSeconds: Math.round(timeToCompleteSeconds * 100) / 100,
-        expectedSeconds,
-        speedScore,
-        smoothnessScore,
-        qualityScore,
-        pointsAwarded: 0,
-      };
-      setLastShapeMetrics(shapeMetrics);
-      setShapeMetricsHistory((prev) => [...prev, shapeMetrics]);
+    finalizeAttempt("completed");
+  }, [
+    shapeProgress,
+    gameState,
+    isPaused,
+    showShapeComplete,
+    showShapeMissed,
+    showShapeAbandoned,
+    frozenAttempt,
+    currentDifficulty,
+    finalizeAttempt,
+  ]);
 
-      completeRep(false, {
-        accuracy: accuracyAtMiss,
-        coverage: coverageAtMiss,
-        deviation: averageDeviation,
-        timeToComplete: timeToCompleteSeconds,
-        shapeName: currentShape?.name,
-        shapeDifficulty: currentShape?.difficulty,
-        qualityScore,
-      });
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    if (showShapeComplete || showShapeMissed || showShapeAbandoned) return;
+    if (!frozenAttempt) return;
+    if (attemptStartMsRef.current == null) return;
+    if (attemptStateRef.current !== "ACTIVE") return;
 
-      // IMPORTANT: this setTimeout is deliberately NOT returned as this
-      // effect's cleanup. setShowShapeMissed(true) above triggers a
-      // re-render, and showShapeMissed is one of this effect's own
-      // dependencies — so React would immediately re-run this effect,
-      // invoke the *previous* run's cleanup first, and cancel the timer
-      // before it ever fired. That's exactly what left the game frozen on
-      // "Time's Up" until the outer session clock ran out. Letting this
-      // timer live outside the cleanup lifecycle (same pattern as the
-      // shape-complete path above) guarantees it actually advances the
-      // shape once, regardless of how many times this effect re-runs.
-      setTimeout(() => {
-        setShowShapeMissed(false);
-        setLastShapeMetrics(null);
-        setCurrentShapeIndex((i) => (i + 1) % shapeList.length);
-      }, 1800);
-      return undefined;
-    }
+    let rafId;
+    const tick = () => {
+      const start = attemptStartMsRef.current;
+      if (start == null) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
+      const elapsed = (performance.now() - start) / 1000;
+      const remaining = Math.max(
+        0,
+        Math.ceil(SHAPE_TIME_LIMIT_SECONDS - elapsed)
+      );
+      setShapeTimeLeft((prev) => (prev === remaining ? prev : remaining));
+      if (remaining > 0 && attemptStateRef.current === "ACTIVE") {
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [
+    gameState,
+    isPaused,
+    showShapeComplete,
+    showShapeMissed,
+    showShapeAbandoned,
+    frozenAttempt,
+  ]);
 
-    const tick = setTimeout(() => {
-      setShapeTimeLeft((t) => Math.max(0, t - 1));
-    }, 1000);
-    return () => clearTimeout(tick);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameState, isPaused, showShapeComplete, showShapeMissed, shapeTimeLeft, completeRep, shapeList.length, handMode, currentShape]);
+  useEffect(() => {
+    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
+    if (showShapeComplete || showShapeMissed || showShapeAbandoned) return;
+    if (!frozenAttempt) return;
+    if (attemptStartMsRef.current == null) return;
+    if (attemptStateRef.current !== "ACTIVE") return;
+    if (shapeTimeLeft > 0) return;
+    finalizeAttempt("timeout");
+  }, [
+    shapeTimeLeft,
+    gameState,
+    isPaused,
+    showShapeComplete,
+    showShapeMissed,
+    showShapeAbandoned,
+    frozenAttempt,
+    finalizeAttempt,
+  ]);
 
-  // ===== Session-complete watchdog =====
-  // The session has exactly `shapeList.length` shapes (4 or 5). Once every
-  // one of them has been either completed or missed, end the session — no
-  // more looping back through the same shapes. The short delay lets the
-  // completion/miss overlay (and per-shape metrics card) finish showing
-  // before the session summary takes over.
   useEffect(() => {
     if (gameState !== GAME_STATES.ACTIVE) return undefined;
-    if (completed + missed < shapeList.length) return undefined;
+    if (completed + missed + abandoned < totalShapes) return undefined;
     const t = setTimeout(() => {
-      finalizeTelemetry();
       endSession();
-    }, 1900);
+    }, SHAPE_ADVANCE_DELAY_MS + 200);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [completed, missed, shapeList.length, gameState]);
+  }, [completed, missed, abandoned, totalShapes, gameState, endSession]);
 
-  // Adaptive difficulty (tunes coverage threshold / scoring bonus only)
-  useEffect(() => {
-    if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
-    const timer = setInterval(() => {
-      adapt({ accuracy: displayTracingAccuracy, papsScore, combo: completed });
-    }, 15000);
-    return () => clearInterval(timer);
-  }, [gameState, isPaused, adapt, displayTracingAccuracy, papsScore, completed]);
-
-  // Pain detection
   useEffect(() => {
     if (!isPainDetected || gameState !== GAME_STATES.ACTIVE) return;
     pauseSession();
     telemetry.trackPain(papsScore);
   }, [isPainDetected, gameState, pauseSession, telemetry, papsScore]);
 
-  const finalizeTelemetry = useCallback(() => {
+  const finalizeSession = useCallback(() => {
     if (hasEndedRef.current) return;
     hasEndedRef.current = true;
-    const sessionStats = metricsEngine.current.getSessionStats();
+
+    if (attemptStateRef.current === "ACTIVE" && frozenAttempt) {
+      const remaining = frozenAttempt;
+      const stats = movementStatsRef.current;
+      const accuracy = getMovementAccuracy(stats);
+      const smoothness = computeSmoothness(
+        motionRef.current.velocities,
+        motionRef.current.accelerations,
+        motionRef.current.pathLength
+      );
+      const elapsedSeconds =
+        attemptStartMsRef.current != null
+          ? (performance.now() - attemptStartMsRef.current) / 1000
+          : 0;
+      const trailing = {
+        attemptId: remaining.attemptId,
+        shapeName: remaining.shape.name,
+        shapeDifficulty: remaining.shape.difficulty,
+        shapeScaleApplied: remaining.scale,
+        outcome: "abandoned",
+        completed: false,
+        abandoned: true,
+        coveragePercent: Math.round(remaining.tracker.getCoverage() * 100) / 100,
+        tracingAccuracyPercent:
+          accuracy == null ? null : Math.round(accuracy * 100) / 100,
+        averageDeviationUnits:
+          Math.round(averageDeviationRef.current * 1000) / 1000,
+        completionTimeSeconds: Math.round(elapsedSeconds * 100) / 100,
+        smoothnessScore: smoothness,
+        movedDistanceUnits: Math.round(stats.movedDistance * 100) / 100,
+        toleranceUsed: Math.round(remaining.tolerance * 100) / 100,
+        papsScore,
+        painAdjusted: papsScore >= PAPS_PAIN_THRESHOLD,
+      };
+      if (!finalizedAttemptsRef.current.has(trailing.attemptId)) {
+        finalizedAttemptsRef.current.add(trailing.attemptId);
+        attemptStateRef.current = "FINALIZED";
+        shapeMetricsHistoryRef.current = shapeMetricsHistoryRef.current.concat(trailing);
+        telemetry.recordRep(false, {
+          accuracy: trailing.tracingAccuracyPercent,
+          coverage: trailing.coveragePercent,
+          deviation: trailing.averageDeviationUnits,
+          timeToComplete: trailing.completionTimeSeconds,
+          shapeName: trailing.shapeName,
+          shapeDifficulty: trailing.shapeDifficulty,
+          shapeScaleApplied: trailing.shapeScaleApplied,
+          smoothness: trailing.smoothnessScore,
+          toleranceUsed: trailing.toleranceUsed,
+          papsScore: trailing.papsScore,
+          painAdjusted: trailing.painAdjusted,
+          outcome: "abandoned",
+        });
+        setAbandoned((a) => a + 1);
+      }
+    }
+
+    const history = shapeMetricsHistoryRef.current;
+
+    const accuracies = history
+      .map((m) => m.tracingAccuracyPercent)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
+    const smoothnesses = history
+      .map((m) => m.smoothnessScore)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
+    const coverages = history
+      .map((m) => m.coveragePercent)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
+    const times = history
+      .map((m) => m.completionTimeSeconds)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
+
+    const mean = (arr) =>
+      arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+
+    const avgAccuracyRaw = mean(accuracies);
+    const avgSmoothnessRaw = mean(smoothnesses);
+    const avgCoverageRaw = mean(coverages);
+    const avgCompletionTimeRaw = mean(times);
+
+    const avgAccuracy =
+      avgAccuracyRaw == null ? null : Math.round(avgAccuracyRaw * 100) / 100;
+    const avgSmoothness =
+      avgSmoothnessRaw == null
+        ? null
+        : Math.round(avgSmoothnessRaw * 100) / 100;
+    const avgCoverage =
+      avgCoverageRaw == null ? null : Math.round(avgCoverageRaw * 100) / 100;
+    const avgCompletionTime =
+      avgCompletionTimeRaw == null
+        ? null
+        : Math.round(avgCompletionTimeRaw * 100) / 100;
+
+    const abandonedCount = history.filter((m) => m.abandoned).length;
+    const completedCount = history.filter(
+      (m) => m.outcome === "completed"
+    ).length;
+    const missedCount = history.filter((m) => m.outcome === "timeout").length;
+
+    const durationSeconds =
+      sessionStartTime != null
+        ? Math.max(0, Math.round((Date.now() - sessionStartTime) / 1000))
+        : null;
+
+    const completionRatio =
+      history.length > 0
+        ? Math.round((completedCount / history.length) * 100)
+        : 0;
+    const summaryAccuracyPercent = avgAccuracy ?? completionRatio;
+
     telemetry.endSession({
       gameName: "Canvas Air",
       score,
-      completed,
-      totalShapes,
-      accuracy: shapeAccuracy,
-      romDegrees: sessionStats.averageRom || romDegrees,
-      papsScore,
+      accuracy: summaryAccuracyPercent,
+      accuracyPercent: summaryAccuracyPercent,
+      smoothness: avgSmoothness,
       difficulty: currentDifficulty,
-      stars,
+      paps: papsScore,
+      durationSeconds,
+      reps: completedCount,
+      hitsOrCatchesOrCompletions: completedCount,
+      missesOrDrops: missedCount,
       gameSpecific: {
-        pathCoveragePercent: Math.round(displayShapeProgress * 100) / 100,
-        shapesCompleted: completed,
-        shapesMissed: missed,
-        shapeSuccessRatePercent: shapeAccuracy,
+        paps: papsScore,
+        painAdjusted: papsScore >= PAPS_PAIN_THRESHOLD,
+        shapesCompleted: completedCount,
+        shapesMissed: missedCount,
+        shapesAbandoned: abandonedCount,
         totalShapes,
-        sessionShapeNames: shapeList.map((s) => s.name),
-        tracingAccuracyPercent: Math.round(displayTracingAccuracy * 100) / 100,
-        averageDeviation: Math.round(averageDeviation * 1000) / 1000,
-        qualityScore: Math.max(
-          0,
-          Math.round((displayTracingAccuracy - averageDeviation * DEVIATION_PENALTY_FACTOR) * 100) / 100
-        ),
-        shapeMetricsHistory,
-        repData: sessionStats.reps || repData,
-        handMode,
-        streak,
-        bestStreak,
-        leftROM,
-        rightROM,
-        symmetryScore,
-        symmetryFlag,
+        sessionShapeNames: sessionShapes.map((s) => s.name),
+        accuracyPercent: summaryAccuracyPercent,
+        averageTracingAccuracyPercent: avgAccuracy,
+        averageSmoothness: avgSmoothness,
+        averageCoveragePercent: avgCoverage,
+        averageCompletionTimeSeconds: avgCompletionTime,
+        averageDeviationUnits:
+          history.length > 0
+            ? Math.round(
+                mean(
+                  history
+                    .map((m) => m.averageDeviationUnits)
+                    .filter((v) => typeof v === "number" && Number.isFinite(v))
+                ) * 1000
+              ) / 1000
+            : null,
+        painAdjustedShapes: history.filter((m) => m.painAdjusted).length,
+        brushJoint: "INDEX_FINGER_TIP",
+        shapeMetricsHistory: history,
       },
+      romData: null,
     });
   }, [
     telemetry,
     score,
-    completed,
-    missed,
-    shapeAccuracy,
-    totalShapes,
-    shapeList,
-    displayTracingAccuracy,
-    romDegrees,
     papsScore,
     currentDifficulty,
-    stars,
-    displayShapeProgress,
-    shapeMetricsHistory,
-    repData,
-    handMode,
-    streak,
-    bestStreak,
-    leftROM,
-    rightROM,
-    symmetryScore,
-    symmetryFlag,
-    averageDeviation,
+    totalShapes,
+    sessionShapes,
+    frozenAttempt,
+    sessionStartTime,
   ]);
 
-  const canStart = isActive && handReady && !poseError && !handError && calibrated;
+  finalizeSessionRef.current = finalizeSession;
 
-  // Ending the session manually (the header X button) should behave exactly
-  // like a natural session completion: finalize telemetry first so the report
-  // has real data, then flip the game engine into COMPLETE so the screen
-  // below renders the session summary/report. finalizeTelemetry is guarded
-  // by hasEndedRef, so this is safe even if the engine also fires its own
-  // onSessionComplete callback.
   const handleEndSession = useCallback(() => {
-    finalizeTelemetry();
     endSession();
-  }, [finalizeTelemetry, endSession]);
+  }, [endSession]);
 
-  // ========== RENDER ==========
+  const handleRestartSession = useCallback(() => {
+    hasEndedRef.current = false;
+    finalizedAttemptsRef.current = new Set();
+    attemptStateRef.current = "NOT_STARTED";
+    attemptStartMsRef.current = null;
+    attemptShapeIndexRef.current = null;
+
+    fingertipFilterRef.current.reset();
+    filteredFingertipRef.current = null;
+    filteredTimestampRef.current = 0;
+    lastFingertipSeenMsRef.current = 0;
+    observedRangeRef.current = { minX: null, maxX: null, minY: null, maxY: null };
+
+    setFrozenAttempt(null);
+    setCompleted(0);
+    setMissed(0);
+    setAbandoned(0);
+    setScore(0);
+    setShapeMetricsHistory([]);
+    shapeMetricsHistoryRef.current = [];
+    setCurrentShapeIndex(0);
+    setTrace([]);
+    setSparkles([]);
+    setShapeProgress(0);
+    setTracingAccuracy(null);
+    setAverageDeviation(0);
+    setShowShapeComplete(false);
+    setShowShapeMissed(false);
+    setShowShapeAbandoned(false);
+    setLastShapeMetrics(null);
+    cursorPosRef.current = { x: 50, y: 50, visible: false };
+    setCursorVisible(false);
+
+    const freshCount =
+      SHAPES_PER_SESSION[currentDifficulty] ?? SHAPES_PER_SESSION.Beginner;
+    setSessionShapes(pickSessionShapes(currentDifficulty, freshCount));
+
+    telemetry.startTracking();
+    startSession();
+  }, [telemetry, startSession, currentDifficulty]);
+
+  const navigateToShapeIndex = useCallback(
+    (targetIndex, { reshuffle = false } = {}) => {
+      if (totalShapes === 0) return;
+      const normalized =
+        ((targetIndex % totalShapes) + totalShapes) % totalShapes;
+
+      const isLiveAttempt =
+        attemptStateRef.current === "ACTIVE" &&
+        attemptStartMsRef.current != null &&
+        frozenAttempt != null;
+
+      if (isLiveAttempt) {
+        finalizeAttempt("abandoned");
+      } else if (attemptStateRef.current === "ACTIVE" && frozenAttempt) {
+        attemptStateRef.current = "FINALIZED";
+        finalizedAttemptsRef.current.add(frozenAttempt.attemptId);
+      }
+
+      if (reshuffle) {
+        const freshCount =
+          SHAPES_PER_SESSION[currentDifficulty] ?? SHAPES_PER_SESSION.Beginner;
+        setSessionShapes(pickSessionShapes(currentDifficulty, freshCount));
+        setCurrentShapeIndex(0);
+        return;
+      }
+
+      if (normalized === currentShapeIndex) {
+        // Re-selecting the shape already on screen: currentShapeIndex and
+        // currentShape don't change, so the effect that normally starts a
+        // fresh attempt on shape change won't re-fire. Start it directly
+        // here instead of just clearing it, or this shape is left with
+        // no tracker and can never be completed.
+        beginAttempt(normalized, sessionShapes[normalized]);
+        return;
+      }
+
+      setCurrentShapeIndex(normalized);
+    },
+    [
+      totalShapes,
+      frozenAttempt,
+      currentShapeIndex,
+      currentDifficulty,
+      finalizeAttempt,
+      beginAttempt,
+      sessionShapes,
+    ]
+  );
+
+  const handleRandomShape = useCallback(() => {
+    if (totalShapes === 0) return;
+    const target = Math.floor(Math.random() * totalShapes);
+    navigateToShapeIndex(target);
+  }, [navigateToShapeIndex, totalShapes]);
+
+  const handleReshuffle = useCallback(() => {
+    navigateToShapeIndex(0, { reshuffle: true });
+  }, [navigateToShapeIndex]);
 
   const isInstructions = gameState === GAME_STATES.INSTRUCTIONS;
   const isComplete = gameState === GAME_STATES.COMPLETE;
   const isActiveScreen = !isInstructions && !isComplete;
-  const isSymmetry = handMode === "symmetry";
+  const canStart =
+    isActive && handReady && !poseError && !handError && calibrated;
 
   if (isComplete) {
+    const history = shapeMetricsHistoryRef.current;
+    const accuracies = history
+      .map((m) => m.tracingAccuracyPercent)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
+    const smoothnesses = history
+      .map((m) => m.smoothnessScore)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
+    const coverages = history
+      .map((m) => m.coveragePercent)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
+
+    const mean = (arr) =>
+      arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+
+    const completedCount = history.filter(
+      (m) => m.outcome === "completed"
+    ).length;
+    const missedCount = history.filter((m) => m.outcome === "timeout").length;
+    const abandonedCount = history.filter((m) => m.abandoned).length;
+    const avgAcc = mean(accuracies);
+    const avgSm = mean(smoothnesses);
+    const avgCov = mean(coverages);
+    const completionRatio =
+      history.length > 0
+        ? Math.round((completedCount / history.length) * 100)
+        : 0;
+    const summaryAccuracy =
+      avgAcc == null ? completionRatio : Math.round(avgAcc * 100) / 100;
+
+    const durationSeconds =
+      sessionStartTime != null
+        ? Math.max(0, Math.round((Date.now() - sessionStartTime) / 1000))
+        : 0;
+
     const sessionData = {
       sessionId: telemetry.sessionId,
       gameId,
       patientId,
       date: new Date().toISOString(),
-      durationSeconds: SESSION_SECONDS - timeLeft,
+      durationSeconds,
       score,
-      accuracyPercent: Math.round(displayTracingAccuracy * 100) / 100,
+      accuracyPercent: summaryAccuracy,
+      reps: completedCount,
+      hitsOrCatchesOrCompletions: completedCount,
+      missesOrDrops: missedCount,
       romData: {
-        averageRomDegrees: romDegrees || 0,
-        maxRomDegrees: maxAngleRef.current || 0,
-        perRep: repData.map((r, i) => ({
-          rep: i + 1,
-          romDegrees: r.romDegrees || 0,
-          success: r.success !== false,
-        })),
-        leftRomDegrees: leftROM,
-        rightRomDegrees: rightROM,
-        symmetryScorePercent: symmetryScore,
+        averageRomDegrees: romDegrees ?? 0,
+        maxRomDegrees: romDegrees ?? 0,
+        minRomDegrees: 0,
+        perRep: [],
       },
-      reps: completed + missed,
-      hitsOrCatchesOrCompletions: completed,
-      missesOrDrops: missed,
       gameSpecificMetrics: {
-        pathCoveragePercent: Math.round(displayShapeProgress * 100) / 100,
-        shapesCompleted: completed,
-        shapesMissed: missed,
-        shapeSuccessRatePercent: shapeAccuracy,
+        paps: papsScore,
+        painAdjusted: papsScore >= PAPS_PAIN_THRESHOLD,
+        shapesCompleted: completedCount,
+        shapesMissed: missedCount,
+        shapesAbandoned: abandonedCount,
         totalShapes,
-        sessionShapeNames: shapeList.map((s) => s.name),
-        stars,
-        handMode,
-        bestStreak,
-        averageDeviation: Math.round(averageDeviation * 1000) / 1000,
-        qualityScore: Math.max(
-          0,
-          Math.round((displayTracingAccuracy - averageDeviation * DEVIATION_PENALTY_FACTOR) * 100) / 100
-        ),
-        shapeMetricsHistory,
-        averageQualityScore:
-          shapeMetricsHistory.length > 0
-            ? Math.round(
-                (shapeMetricsHistory.reduce((a, m) => a + m.qualityScore, 0) / shapeMetricsHistory.length) * 100
-              ) / 100
-            : 0,
+        sessionShapeNames: sessionShapes.map((s) => s.name),
+        accuracyPercent: summaryAccuracy,
+        averageAccuracyPercent:
+          avgAcc == null ? null : Math.round(avgAcc * 100) / 100,
+        averageSmoothness:
+          avgSm == null ? null : Math.round(avgSm * 100) / 100,
+        averageCoveragePercent:
+          avgCov == null ? null : Math.round(avgCov * 100) / 100,
+        brushJoint: "INDEX_FINGER_TIP",
+        shapeMetricsHistory: history,
       },
     };
 
@@ -1343,99 +1600,108 @@ export default function CanvasAir({ onSessionEnd, patientId, gameId = "canvas-ai
         patientId={patientId}
         onSaveReport={async () => await telemetry.saveReport(sessionData)}
         onFinish={() => onSessionEnd?.(sessionData)}
+        onRestart={handleRestartSession}
       />
     );
   }
 
-  const cameraFeed = (
-    <video
-      ref={videoRef}
-      autoPlay
-      playsInline
-      muted
-      className="w-full h-full scale-x-[-1] object-cover"
-    />
-  );
-
-  const ShapeGalleryPanel = (
-    <div className="absolute right-0 top-14 z-30 max-h-96 w-72 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950/95 p-3 shadow-2xl backdrop-blur">
+  const galleryPanel = (
+    <div className="absolute right-0 top-14 z-30 max-h-96 w-72 overflow-y-auto rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-bold uppercase tracking-wide text-slate-400">
-          This Session ({shapeList.length})
+        <span className="text-xs font-bold uppercase tracking-wide text-slate-500">
+          This Session ({sessionShapes.length})
         </span>
         <button
           onClick={() => setShowGallery(false)}
-          className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+          className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+          aria-label="Close shape gallery"
         >
           <X size={14} />
         </button>
       </div>
       <div className="grid grid-cols-3 gap-2">
-        {shapeList.map((s, i) => (
+        {sessionShapes.map((s, i) => (
           <button
-            key={s.name}
-            onClick={() => selectShape(i)}
+            key={`${s.name}-${i}`}
+            onClick={() => {
+              setShowGallery(false);
+              navigateToShapeIndex(i);
+            }}
             className={`flex flex-col items-center gap-1 rounded-lg border p-2 text-center transition-colors ${
-              i === currentShapeIndex % shapeList.length
-                ? "border-cyan-400 bg-cyan-950/60"
-                : "border-slate-800 bg-slate-900 hover:border-slate-600"
+              i === currentShapeIndex
+                ? "border-teal-500 bg-teal-50"
+                : "border-slate-200 bg-white hover:border-slate-300"
             }`}
           >
             <span className="text-xl leading-none">{s.icon}</span>
-            <span className="text-[10px] leading-tight text-slate-300">{s.name}</span>
-            <span className="text-[9px] text-yellow-500">{"⭐".repeat(s.difficulty)}</span>
+            <span className="text-[10px] leading-tight text-slate-700">
+              {s.name}
+            </span>
+            <span className="text-[9px] text-amber-500">
+              {"★".repeat(s.difficulty)}
+            </span>
           </button>
         ))}
       </div>
     </div>
   );
 
+  const formatClock = (s) => {
+    const safe = Math.max(0, Math.floor(s));
+    return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`;
+  };
+
+  const liveSmoothness = computeSmoothness(
+    motionRef.current.velocities,
+    motionRef.current.accelerations,
+    motionRef.current.pathLength
+  );
+
+  const frozenScale = frozenAttempt?.scale ?? 1.0;
+  const frozenTolerance = frozenAttempt?.tolerance ?? dynamicTolerance;
+
   return (
-    <div className="min-h-screen bg-[#0B1120] text-white">
+    <div className="min-h-full w-full bg-slate-50 text-slate-800">
       <style>{`
         @keyframes canvasAirPulse {
-          0%, 100% { opacity: 0.55; }
-          50% { opacity: 1; }
+          0%, 100% { opacity: 0.45; }
+          50% { opacity: 0.9; }
         }
         @keyframes canvasAirSparkle {
           0% { opacity: 0.9; transform: scale(1); }
           100% { opacity: 0; transform: scale(2.2); }
         }
         @keyframes canvasAirComplete {
-          0% { transform: scale(0.8) rotate(-10deg); opacity: 0; }
-          50% { transform: scale(1.2) rotate(5deg); opacity: 1; }
-          100% { transform: scale(1) rotate(0deg); opacity: 1; }
+          0% { transform: scale(0.85); opacity: 0; }
+          60% { transform: scale(1.05); opacity: 1; }
+          100% { transform: scale(1); opacity: 1; }
         }
         @keyframes canvasAirShake {
           0%, 100% { transform: translateX(0); }
-          25% { transform: translateX(-10px); }
-          75% { transform: translateX(10px); }
-        }
-        .shape-complete-anim {
-          animation: canvasAirComplete 0.6s ease-out forwards;
-        }
-        .shape-missed-anim {
-          animation: canvasAirShake 0.5s ease-in-out;
+          25% { transform: translateX(-8px); }
+          75% { transform: translateX(8px); }
         }
       `}</style>
 
       {isActiveScreen && gameState === GAME_STATES.COUNTDOWN && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-cyan-400">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/90 text-8xl font-black text-teal-600">
           {countdown || "GO"}
         </div>
       )}
 
       {isActiveScreen && isPainDetected && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
-          <div className="rounded-2xl bg-slate-900 p-8 text-center max-w-md">
-            <h2 className="mb-3 text-xl font-bold text-red-400">Discomfort Detected</h2>
-            <p className="mb-6 text-slate-300">Please rest before continuing.</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50">
+          <div className="max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-2xl">
+            <h2 className="mb-3 text-xl font-bold text-red-600">
+              Discomfort Detected
+            </h2>
+            <p className="mb-6 text-slate-600">Please rest before continuing.</p>
             <button
               onClick={() => {
                 resetPainState();
                 resumeSession();
               }}
-              className="rounded-lg bg-cyan-500 px-6 py-2 font-bold hover:bg-cyan-400"
+              className="rounded-lg bg-teal-600 px-6 py-2 font-bold text-white hover:bg-teal-500"
             >
               Resume
             </button>
@@ -1443,193 +1709,268 @@ export default function CanvasAir({ onSessionEnd, patientId, gameId = "canvas-ai
         </div>
       )}
 
-      {isActiveScreen && celebrateStreak && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center pointer-events-none">
-          <div className="rounded-2xl bg-black/70 px-10 py-6 text-center animate-pulse">
-            <div className="text-5xl font-black text-amber-400">🔥 Streak {celebrateStreak}!</div>
-            <div className="mt-1 text-sm text-amber-200">x{comboMultiplier} score multiplier</div>
-          </div>
-        </div>
-      )}
-
       {isActiveScreen && (
-        <div className="fixed left-0 right-0 top-0 z-40 flex justify-between border-b border-slate-800 bg-slate-950/90 px-8 py-4 backdrop-blur">
-          <div className="flex gap-5 font-mono text-sm overflow-x-auto">
-            <span>⏱ {timeLeft}s</span>
-            <span>📐 {Math.round(shoulderAngle)}°</span>
-            <span>✅ {completed}/{totalShapes}</span>
-            <span>🎯 {displayShapeProgress.toFixed(2)}%</span>
-            <span className={accuracyBand.text}>🖊️ {displayTracingAccuracy.toFixed(2)}%</span>
-            <span>💪 {romDegrees}°</span>
-            {streak > 0 && <span className="text-amber-400">🔥 {streak}x{comboMultiplier}</span>}
-            {isSymmetry && (
-              <span className={symmetryFlag ? "text-red-400" : "text-slate-300"}>
-                ⚖️ {symmetryScore !== null ? `${symmetryScore}%` : "—"}
+        <div className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
+          <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-6 py-3">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-sm text-slate-700">
+              <span
+                className={`inline-flex items-center gap-1.5 ${
+                  shapeTimeLeft <= 5 && !showShapeComplete && !showShapeMissed
+                    ? "text-red-600"
+                    : ""
+                }`}
+              >
+                <span className="text-slate-400">Shape time</span>
+                <span className="font-semibold">{shapeTimeLeft}s</span>
               </span>
-            )}
-            <span className="text-cyan-400">{currentDifficulty}</span>
-            <span className="text-purple-400">⭐ {score}</span>
-          </div>
-          <div className="flex gap-2 flex-shrink-0">
-            <button
-              onClick={goToPrevShape}
-              title="Previous shape"
-              className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
-            >
-              <ChevronLeft size={18} />
-            </button>
-            <button
-              onClick={goToNextShape}
-              title="Next shape"
-              className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
-            >
-              <ChevronRight size={18} />
-            </button>
-            <button
-              onClick={goToRandomShape}
-              title="Random shape"
-              className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
-            >
-              <Shuffle size={18} />
-            </button>
-            <button
-              onClick={() => setShowGallery((v) => !v)}
-              title="Choose shape"
-              className={`rounded-lg p-2 ${showGallery ? "bg-cyan-600" : "bg-slate-800 hover:bg-slate-700"}`}
-            >
-              <Grid3x3 size={18} />
-            </button>
-            <button
-              onClick={() => (isPaused ? resumeSession() : pauseSession())}
-              className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
-            >
-              {isPaused ? <Play size={18} /> : <Pause size={18} />}
-            </button>
-            <button onClick={handleEndSession} title="End session" className="rounded-lg bg-red-950 p-2 hover:bg-red-900">
-              <X size={18} />
-            </button>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-slate-400">Session</span>
+                <span className="font-semibold">{formatClock(timeLeft)}</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-slate-400">Shapes</span>
+                <span className="font-semibold">
+                  {completed}/{totalShapes}
+                </span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-slate-400">Coverage</span>
+                <span className="font-semibold">
+                  {shapeProgress.toFixed(1)}%
+                </span>
+              </span>
+              <span
+                className={`inline-flex items-center gap-1.5 font-semibold ${accuracyBand.text}`}
+              >
+                <span className="font-normal text-slate-400">Accuracy</span>
+                {tracingAccuracy == null ? "—" : `${tracingAccuracy.toFixed(1)}%`}
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-slate-400">Smoothness</span>
+                <span className="font-semibold">
+                  {liveSmoothness == null ? "—" : liveSmoothness.toFixed(0)}
+                </span>
+              </span>
+              <span className="rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-700">
+                {currentDifficulty}
+              </span>
+              {papsScore > 0 && (
+                <span className="rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 text-xs font-semibold text-purple-700">
+                  PAPS {papsScore}
+                  {papsScore >= PAPS_PAIN_THRESHOLD ? " · pain-adjusted" : ""}
+                </span>
+              )}
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                Score {score}
+              </span>
+            </div>
+            <div className="flex flex-shrink-0 items-center gap-1.5">
+              <button
+                onClick={() =>
+                  navigateToShapeIndex(currentShapeIndex - 1)
+                }
+                title="Previous shape"
+                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <button
+                onClick={() =>
+                  navigateToShapeIndex(currentShapeIndex + 1)
+                }
+                title="Next shape"
+                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
+              >
+                <ChevronRight size={18} />
+              </button>
+              <button
+                onClick={() => setShowGallery((v) => !v)}
+                title="Choose shape"
+                className={`rounded-lg border p-2 ${
+                  showGallery
+                    ? "border-teal-500 bg-teal-50 text-teal-700"
+                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                <Grid3x3 size={18} />
+              </button>
+              <button
+                onClick={() => (isPaused ? resumeSession() : pauseSession())}
+                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
+              >
+                {isPaused ? <Play size={18} /> : <Pause size={18} />}
+              </button>
+              <button
+                onClick={handleEndSession}
+                title="End session"
+                className="rounded-lg border border-red-200 bg-red-50 p-2 text-red-600 hover:bg-red-100"
+              >
+                <X size={18} />
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {isActiveScreen && showGallery && <div className="fixed right-8 top-20 z-40">{ShapeGalleryPanel}</div>}
+      {isActiveScreen && showGallery && (
+        <div className="fixed right-6 top-20 z-40">{galleryPanel}</div>
+      )}
 
-      <div className={isActiveScreen ? `flex h-[calc(100vh-140px)] gap-6 p-8 pt-24` : "p-8"}>
-        <div className={isActiveScreen ? "max-w-none" : "max-w-4xl mx-auto w-full"}>
+      <div
+        className={
+          isActiveScreen
+            ? "mx-auto flex max-w-[1400px] flex-col gap-5 p-5 lg:flex-row"
+            : "mx-auto max-w-5xl p-6 pb-16"
+        }
+      >
+        <div className={isActiveScreen ? "" : "w-full"}>
           {isInstructions && (
-            <>
-              <h1 className="mb-2 text-3xl font-black">🎨 Canvas Air</h1>
-              <p className="mb-4 text-slate-400">
-                Trace the shape with your fingertip. Complete the shape to earn points!
-                This session has {shapeList.length} shapes, randomly picked from the
-                full collection — trace or miss all of them and the session wraps up
-                automatically. Difficulty only changes how many points a shape is worth.
+            <div className="mb-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h1 className="mb-2 text-3xl font-black text-slate-800">
+                Canvas <span className="text-teal-600">Air</span>
+              </h1>
+              <p className="mb-5 leading-relaxed text-slate-600">
+                Trace each shape by moving your index fingertip in the air.
+                The stroke is drawn in real time: green when it is on the
+                outline, red when it is far off. Your session has{" "}
+                <span className="font-semibold text-slate-800">
+                  {sessionShapes.length} shapes
+                </span>{" "}
+                at the {currentDifficulty.toLowerCase()} level. Each shape
+                has {SHAPE_TIME_LIMIT_SECONDS} seconds, counted from the
+                first moment your hand is actually tracked — so camera
+                warm-up does not cost you any of it.
               </p>
 
-              <div className="mb-4 flex flex-wrap gap-2">
-                <button
-                  onClick={() => setHandMode("single")}
-                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-                    handMode === "single" ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                  }`}
-                >
-                  Single Hand
-                </button>
-                <button
-                  onClick={() => setHandMode("symmetry")}
-                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-                    handMode === "symmetry" ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                  }`}
-                >
-                  Symmetry Mode
-                </button>
-                <button
-                  onClick={goToPrevShape}
-                  className="rounded-lg bg-slate-800 px-3 py-2 text-sm font-semibold hover:bg-slate-700 transition-colors"
-                  title="Previous shape"
-                >
-                  <ChevronLeft size={16} className="inline" />
-                </button>
-                <button
-                  onClick={goToNextShape}
-                  className="rounded-lg bg-purple-800 px-4 py-2 text-sm font-semibold hover:bg-purple-700 transition-colors"
-                >
-                  <RefreshCw size={16} className="inline mr-1" />
-                  Next Shape
-                </button>
-                <button
-                  onClick={goToRandomShape}
-                  className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold hover:bg-slate-700 transition-colors"
-                >
-                  <Shuffle size={16} className="inline mr-1" />
-                  Random
-                </button>
+              <div className="mb-5 flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">
+                  <span className="text-xs uppercase tracking-wide text-slate-500">
+                    Brush
+                  </span>
+                  <span>Index fingertip</span>
+                </span>
                 <button
                   onClick={() => setShowGallery((v) => !v)}
                   className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-                    showGallery ? "bg-cyan-600 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                    showGallery
+                      ? "bg-teal-600 text-white shadow-sm"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
                   }`}
                 >
-                  <Grid3x3 size={16} className="inline mr-1" />
-                  This Session's Shapes
+                  <Grid3x3 size={16} className="mr-1 inline" />
+                  Session Shapes
+                </button>
+                <button
+                  onClick={handleReshuffle}
+                  className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  <RefreshCw size={16} className="mr-1 inline" />
+                  Reshuffle
+                </button>
+                <button
+                  onClick={handleRandomShape}
+                  className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  <Shuffle size={16} className="mr-1 inline" />
+                  Random
                 </button>
               </div>
 
-              {showGallery && <div className="relative mb-4">{ShapeGalleryPanel}</div>}
+              {showGallery && <div className="relative mb-5">{galleryPanel}</div>}
 
-              {/* Shape preview — name, difficulty and icon live in the caption
-                  under the box itself instead of a separate text line above it */}
-              <div className="mb-1 w-40 h-40 rounded-xl border-2 border-slate-800 bg-white p-2">
-                <svg viewBox="0 0 100 100" className="w-full h-full">
-                  <path d={shapePath} fill="none" stroke="#0891b2" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+              <div className="flex items-start gap-5">
+                <div className="h-40 w-40 flex-shrink-0 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                  <svg viewBox="0 0 100 100" className="h-full w-full">
+                    <g transform={getShapeTransform(frozenScale)}>
+                      <path
+                        d={currentShapePath}
+                        fill="none"
+                        stroke="#0d9488"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </g>
+                  </svg>
+                </div>
+                <div className="pt-2">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="text-lg font-bold text-slate-800">
+                      {currentShape?.name}
+                    </span>
+                    <span className="text-amber-500">
+                      {"★".repeat(currentShape?.difficulty || 1)}
+                    </span>
+                  </div>
+                  <div className="space-y-0.5 text-xs text-slate-500">
+                    <div>
+                      Shape {currentShapeIndex + 1} of {sessionShapes.length}
+                    </div>
+                    <div>
+                      Target scale:{" "}
+                      <span className="font-mono font-semibold text-teal-700">
+                        {frozenScale.toFixed(2)}×
+                      </span>
+                    </div>
+                    <div>
+                      Tolerance:{" "}
+                      <span className="font-mono font-semibold">
+                        {frozenTolerance.toFixed(1)}u ({currentDifficulty})
+                      </span>
+                    </div>
+                    <div>
+                      Per-shape time:{" "}
+                      <span className="font-mono font-semibold">
+                        {SHAPE_TIME_LIMIT_SECONDS}s
+                      </span>
+                    </div>
+                    <div>
+                      Brush joint:{" "}
+                      <span className="font-mono font-semibold">
+                        Index fingertip
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div className="mb-4 flex items-center gap-2 text-xs text-slate-400">
-                <span className="text-cyan-400 font-bold">{currentShape?.name}</span>
-                <span className="text-yellow-500">{'⭐'.repeat(currentShape?.difficulty || 1)}</span>
-                <span className="text-slate-500">
-                  Shape {(currentShapeIndex % shapeList.length) + 1} of {shapeList.length}
-                </span>
-              </div>
-
-              {handMode === "symmetry" && (
-                <p className="mb-4 text-xs text-slate-500">
-                  Traces a mirrored copy of the shape with each hand at once. Symmetry score compares
-                  left vs. right shoulder range of motion.
-                </p>
-              )}
-            </>
+            </div>
           )}
 
           <div
             className={
               isActiveScreen
-                ? `relative overflow-hidden rounded-2xl border-4 border-slate-800 flex-shrink-0 ${isSymmetry ? "w-[24%]" : "w-[38%]"}`
-                : "relative overflow-hidden rounded-2xl border-4 border-slate-800 aspect-video"
+                ? "relative w-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm lg:w-72 lg:flex-shrink-0"
+                : "relative aspect-video overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
             }
           >
-            {cameraFeed}
-            <SkeletonOverlay poseData={poseData} overallStatus={guidance.overallStatus} shoulderAngle={shoulderAngle} />
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="h-full w-full scale-x-[-1] object-cover"
+            />
+            <SkeletonOverlay
+              poseData={poseData}
+              overallStatus={guidance.overallStatus}
+              shoulderAngle={shoulderAngle}
+            />
             {isInstructions && (
-              <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
-                {Math.round(shoulderAngle)}° | PAPS {papsScore} | Hand {handReady ? (fingertip ? "✅" : "🔍") : "⏳"}
+              <div className="absolute left-3 top-3 rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 font-mono text-xs text-slate-700 shadow-sm">
+                {Math.round(shoulderAngle)}° · PAPS {papsScore} · Tip
               </div>
             )}
             {isActiveScreen && (
-              <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
-                {isSymmetry
-                  ? `L ${leftHand ? "✓" : "…"}  R ${rightHand ? "✓" : "…"}`
-                  : `${Math.round(shoulderAngle)}° ${fingertip ? "" : "| hand not visible"}`}
-              </div>
-            )}
-            {isSymmetry && (
-              <div className="absolute right-3 top-3 flex flex-col gap-1 text-xs font-mono">
-                <span className={`rounded px-2 py-0.5 ${leftHand ? "bg-cyan-900/80 text-cyan-300" : "bg-slate-800/80 text-slate-500"}`}>
-                  L {leftHand ? "✓" : "…"}
-                </span>
-                <span className={`rounded px-2 py-0.5 ${rightHand ? "bg-cyan-900/80 text-cyan-300" : "bg-slate-800/80 text-slate-500"}`}>
-                  R {rightHand ? "✓" : "…"}
-                </span>
+              <div
+                className={`absolute bottom-3 left-3 rounded-lg border px-3 py-1.5 font-mono text-xs shadow-sm ${
+                  cursorVisible
+                    ? "border-slate-200 bg-white/90 text-slate-700"
+                    : "border-amber-300 bg-amber-50 text-amber-800"
+                }`}
+              >
+                {cursorVisible
+                  ? "Fingertip tracking ✓"
+                  : "Fingertip not visible — show your hand to the camera"}
               </div>
             )}
           </div>
@@ -1637,312 +1978,347 @@ export default function CanvasAir({ onSessionEnd, patientId, gameId = "canvas-ai
           {isInstructions && (
             <>
               <div
-                className={`mt-4 rounded-xl border p-4 ${
+                className={`mt-4 rounded-xl border p-4 text-sm ${
                   guidance.overallStatus === "ok"
-                    ? "border-green-800 bg-green-950/30 text-green-300"
-                    : "border-amber-800 bg-amber-950/30 text-amber-300"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : "border-amber-200 bg-amber-50 text-amber-800"
                 }`}
               >
                 {guidance.message}
               </div>
 
               {(poseError || handError) && (
-                <div className="mt-4 rounded-xl border border-red-800 bg-red-950/30 p-4 text-red-300">
-                  {poseError || handError}. Check camera permissions and connection, then reload.
+                <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                  {poseError || handError}. Check camera permissions and
+                  connection, then reload.
                 </div>
               )}
 
-              <div className="mt-4 flex flex-wrap gap-3 text-xs font-mono text-slate-400">
-                <span>🟢 90-100% Perfect</span>
-                <span>🔵 70-89% Good</span>
-                <span>🟠 50-69% Needs focus</span>
-                <span>🔴 &lt;50% Slow down</span>
+              <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">
+                <div className="mb-2 font-semibold text-slate-700">
+                  How the brush stroke is scored
+                </div>
+                <ul className="space-y-1 text-xs leading-relaxed">
+                  <li>
+                    ·{" "}
+                    <span className="font-semibold text-emerald-600">
+                      Green
+                    </span>{" "}
+                    — on the outline (inside the tight tolerance band).
+                  </li>
+                  <li>
+                    ·{" "}
+                    <span className="font-semibold text-amber-600">Amber</span>{" "}
+                    — drifting, but still inside the loose band.
+                  </li>
+                  <li>
+                    · <span className="font-semibold text-red-600">Red</span>{" "}
+                    — outside tolerance, off the outline.
+                  </li>
+                  <li>
+                    · Accuracy is measured over your actual movement: how
+                    much of the distance you travelled stayed on the
+                    outline. Holding still does not change it either way.
+                  </li>
+                  <li>
+                    · Coverage is the proportion of the outline you
+                    actually visited. These are two different things.
+                  </li>
+                  <li>
+                    · Smoothness is scored from the{" "}
+                    <span className="font-semibold">acceleration</span> of
+                    your stroke, normalized against its speed, and only
+                    after you have moved enough to measure it.
+                  </li>
+                  <li>
+                    · Each shape has {SHAPE_TIME_LIMIT_SECONDS} seconds. If
+                    time runs out before coverage reaches the target, the
+                    shape is recorded as{" "}
+                    <span className="font-semibold">not completed</span>.
+                  </li>
+                </ul>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-3 font-mono text-xs text-slate-500">
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  90–100% Optimal
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-blue-500" />
+                  70–89% Good
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-orange-500" />
+                  50–69% Needs focus
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-red-500" />
+                  &lt;50% Slow down
+                </span>
               </div>
 
               <button
-                onClick={() => {
-                  telemetry.startTracking();
-                  startSession();
-                }}
+                onClick={handleRestartSession}
                 disabled={!guidance.isReady || !canStart}
-                className="mt-6 rounded-xl bg-cyan-500 px-8 py-3 font-bold hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500"
+                className="mt-6 rounded-xl bg-teal-600 px-8 py-3 font-bold text-white shadow-sm hover:bg-teal-500 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
               >
                 {canStart
                   ? "Start Session"
                   : isActive && !calibrated
-                  ? "Hold still, calibrating…"
-                  : "Waiting for hand + pose tracking…"}
+                  ? "Hold still — calibrating…"
+                  : "Waiting for camera tracking…"}
               </button>
             </>
           )}
         </div>
 
-        {isActiveScreen && !isSymmetry && (
-          <div className="relative w-[62%] overflow-hidden rounded-2xl border-4 border-slate-800 bg-white">
-            <svg viewBox="0 0 100 100" className="w-full h-full" preserveAspectRatio="none">
-              {/* Shape name and icon at top — font size scales down for long names so nothing clips */}
+        {isActiveScreen && (
+          <div className="relative flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <svg
+              viewBox="0 0 100 100"
+              className="h-full w-full"
+              preserveAspectRatio="none"
+            >
               <text
                 x="50"
                 y="9"
                 textAnchor="middle"
-                fontSize={shapeLabelFontSize}
+                fontSize="4.5"
                 fontWeight="700"
                 fill="#334155"
               >
-                {shapeLabel}
+                {currentShapeLabel}
+              </text>
+              <text x="97" y="9" textAnchor="end" fontSize="4" fill="#f59e0b">
+                {"★".repeat(currentShape?.difficulty || 1)}
               </text>
 
-              {/* Shape difficulty indicator (informational — never gates selection) */}
-              <text x="97" y="9" textAnchor="end" fontSize="4" fill="#eab308">
-                {'⭐'.repeat(currentShape?.difficulty || 1)}
-              </text>
-
-              {/* Path outline with pulse animation */}
-              <path
-                d={shapePath}
-                fill="none"
-                stroke="#334155"
-                strokeWidth="2.5"
-                strokeDasharray="4 4"
-                style={{ animation: `canvasAirPulse ${accuracyBand.pulse}s ease-in-out infinite` }}
-              />
-
-              {/* Highlight covered path segments */}
-              {pathCoverage.length > 0 && (
+              <g transform={getShapeTransform(frozenScale)}>
                 <path
-                  d={shapePath}
+                  d={currentShapePath}
                   fill="none"
-                  stroke={accuracyBand.stroke}
-                  strokeWidth="4"
-                  strokeDasharray="2 4"
-                  opacity="0.3"
+                  stroke="#cbd5e1"
+                  strokeWidth="2.5"
+                  strokeDasharray="4 4"
                   style={{
-                    strokeDashoffset: `${(1 - (pathCoverage.length / (sampledPathRef.current.length || 1))) * 100}%`,
-                    transition: "stroke-dashoffset 0.3s"
+                    animation: `canvasAirPulse ${accuracyBand.pulse}s ease-in-out infinite`,
                   }}
                 />
-              )}
+              </g>
 
-              {/* User's trace */}
-              <polyline
-                points={trace.map((p) => `${p.x},${p.y}`).join(" ")}
-                fill="none"
-                stroke={isTracing ? accuracyBand.stroke : "#94a3b8"}
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{ transition: "stroke 0.3s" }}
-              />
+              {contiguousGroups.onPath.map((seg, i) => (
+                <polyline
+                  key={`onPath-${i}`}
+                  points={seg.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke={FEEDBACK_COLORS.onPath}
+                  strokeWidth="3.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ))}
+              {contiguousGroups.edge.map((seg, i) => (
+                <polyline
+                  key={`edge-${i}`}
+                  points={seg.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke={FEEDBACK_COLORS.edge}
+                  strokeWidth="3.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ))}
+              {contiguousGroups.off.map((seg, i) => (
+                <polyline
+                  key={`off-${i}`}
+                  points={seg.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke={FEEDBACK_COLORS.off}
+                  strokeWidth="3.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ))}
 
-              {/* Sparkles */}
-              {sparkles
-                .filter((s) => s.side === "single")
-                .map((s) => (
-                  <circle
-                    key={s.id}
-                    cx={s.x}
-                    cy={s.y}
-                    r="2.2"
-                    fill={s.color}
-                    style={{ animation: "canvasAirSparkle 0.7s ease-out forwards" }}
-                  />
-                ))}
+              {sparkles.map((s) => (
+                <circle
+                  key={s.id}
+                  cx={s.x}
+                  cy={s.y}
+                  r="2"
+                  fill={s.color}
+                  style={{
+                    animation: "canvasAirSparkle 0.7s ease-out forwards",
+                  }}
+                />
+              ))}
 
-              {/* Bottom info */}
-              <text x="50" y="95" textAnchor="middle" fontSize="4" fontWeight="500" fill="#64748b">
-                {currentShape?.name} • {currentDifficulty} • {shapeProgress.toFixed(2)}% covered
+              <text
+                x="50"
+                y="95"
+                textAnchor="middle"
+                fontSize="4"
+                fontWeight="500"
+                fill="#94a3b8"
+              >
+                {currentShape?.name} · {currentDifficulty} ·{" "}
+                {shapeProgress.toFixed(1)}% · scale {frozenScale.toFixed(2)}× ·{" "}
+                tol {frozenTolerance.toFixed(1)}u
               </text>
             </svg>
 
-            {!smoothedFingertip && (
-              <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 text-center text-sm text-slate-400">
-                Show your hand to the camera
+            {!cursorVisible && (
+              <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 px-6 text-center text-sm text-slate-500">
+                <div className="font-semibold text-slate-700">
+                  Show your hand to the camera
+                </div>
+                <div className="mt-1 text-xs text-slate-500">
+                  The shape timer starts as soon as your fingertip is tracked.
+                </div>
               </div>
             )}
 
-            <div className="absolute right-4 top-20 rounded-lg bg-black/70 px-3 py-1 text-xs font-mono text-white">
-              ⏱ {shapeTimeLeft}s
+            <div
+              className={`absolute right-4 top-4 rounded-full border px-3 py-1 font-mono text-xs shadow-sm ${
+                shapeTimeLeft <= 5 && !showShapeComplete && !showShapeMissed
+                  ? "border-red-200 bg-red-50 text-red-600"
+                  : "border-slate-200 bg-white text-slate-700"
+              }`}
+            >
+              {shapeTimeLeft}s
             </div>
 
-            <div className="absolute right-4 top-4 flex h-14 w-14 items-center justify-center rounded-full bg-black/70">
+            <div className="absolute right-4 top-16 flex h-14 w-14 items-center justify-center rounded-full border border-slate-200 bg-white shadow-sm">
               <div className="relative h-12 w-12">
                 <svg className="h-12 w-12 -rotate-90">
-                  <circle cx="24" cy="24" r="18" fill="none" stroke="#2d3748" strokeWidth="3" />
                   <circle
                     cx="24"
                     cy="24"
                     r="18"
                     fill="none"
-                    stroke={isTracing ? accuracyBand.stroke : "#94a3b8"}
+                    stroke="#e2e8f0"
                     strokeWidth="3"
-                    strokeDasharray={`${2 * Math.PI * 18 * (shapeProgress / 100)} ${2 * Math.PI * 18}`}
-                    style={{ transition: "stroke-dasharray 0.3s, stroke 0.3s" }}
+                  />
+                  <circle
+                    cx="24"
+                    cy="24"
+                    r="18"
+                    fill="none"
+                    stroke={accuracyBand.stroke}
+                    strokeWidth="3"
+                    strokeDasharray={`${2 * Math.PI * 18 * (shapeProgress / 100)} ${
+                      2 * Math.PI * 18
+                    }`}
+                    style={{
+                      transition: "stroke-dasharray 0.3s, stroke 0.3s",
+                    }}
                   />
                 </svg>
-                <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white">
+                <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-slate-700">
                   {Math.round(shapeProgress)}%
                 </span>
               </div>
             </div>
 
-            <div className="absolute left-4 top-4 flex gap-1">
-              {Array.from({ length: Math.min(5, completed) }).map((_, i) => (
-                <span key={i} className="text-yellow-400 text-lg">⭐</span>
-              ))}
+            <div className="absolute left-4 bottom-4 text-sm font-bold text-teal-700">
+              Score: {score}
             </div>
 
-            <div className="absolute left-4 bottom-4 text-sm font-bold text-cyan-400">Score: {score}</div>
-
             {showShapeComplete && (
-              <div className="shape-complete-anim absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-center">
-                <div className="text-6xl font-black text-emerald-400">✨ COMPLETE!</div>
+              <div
+                className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-white/90 text-center"
+                style={{
+                  animation: "canvasAirComplete 0.5s ease-out forwards",
+                }}
+              >
+                <div className="text-5xl font-black text-emerald-500">
+                  Shape Complete
+                </div>
                 {lastShapeMetrics && (
-                  <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 rounded-lg bg-black/50 px-6 py-3 font-mono text-sm text-slate-100">
-                    <span>Coverage</span>
-                    <span className="text-right">{lastShapeMetrics.coveragePercent.toFixed(2)}%</span>
-                    <span>Accuracy</span>
-                    <span className="text-right">{lastShapeMetrics.tracingAccuracyPercent.toFixed(2)}%</span>
-                    <span>Avg. deviation</span>
-                    <span className="text-right">{lastShapeMetrics.averageDeviationUnits.toFixed(3)} u</span>
-                    <span>Time</span>
-                    <span className="text-right">{lastShapeMetrics.timeToCompleteSeconds.toFixed(2)}s</span>
-                    <span>Smoothness</span>
-                    <span className="text-right">{lastShapeMetrics.smoothnessScore.toFixed(1)}</span>
-                    <span>Speed score</span>
-                    <span className="text-right">{lastShapeMetrics.speedScore.toFixed(1)}</span>
-                    <span className="font-bold text-emerald-300">Quality</span>
-                    <span className="text-right font-bold text-emerald-300">{lastShapeMetrics.qualityScore.toFixed(2)}</span>
+                  <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 rounded-xl border border-slate-200 bg-white px-6 py-3 font-mono text-sm text-slate-700 shadow-sm">
+                    <span className="text-slate-500">Coverage</span>
+                    <span className="text-right">
+                      {lastShapeMetrics.coveragePercent.toFixed(1)}%
+                    </span>
+                    <span className="text-slate-500">Accuracy</span>
+                    <span className="text-right">
+                      {lastShapeMetrics.tracingAccuracyPercent == null
+                        ? "—"
+                        : `${lastShapeMetrics.tracingAccuracyPercent.toFixed(1)}%`}
+                    </span>
+                    <span className="text-slate-500">Avg. deviation</span>
+                    <span className="text-right">
+                      {lastShapeMetrics.averageDeviationUnits.toFixed(3)} u
+                    </span>
+                    <span className="text-slate-500">Completion time</span>
+                    <span className="text-right">
+                      {lastShapeMetrics.completionTimeSeconds.toFixed(2)}s
+                    </span>
+                    <span className="text-slate-500">Smoothness</span>
+                    <span className="text-right">
+                      {lastShapeMetrics.smoothnessScore == null
+                        ? "—"
+                        : lastShapeMetrics.smoothnessScore.toFixed(1)}
+                    </span>
+                    {lastShapeMetrics.painAdjusted && (
+                      <>
+                        <span className="text-red-500">Pain-adjusted</span>
+                        <span className="text-right text-red-500">
+                          PAPS {lastShapeMetrics.papsScore}
+                        </span>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
             )}
 
             {showShapeMissed && (
-              <div className="shape-missed-anim absolute inset-0 flex items-center justify-center bg-black/60 text-5xl font-black text-red-400">
-                ⏰ Time's Up
+              <div
+                className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-white/90 text-center"
+                style={{ animation: "canvasAirShake 0.45s ease-in-out" }}
+              >
+                <div className="text-5xl font-black text-red-500">
+                  Time's up
+                </div>
+                {lastShapeMetrics && (
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-1 rounded-xl border border-slate-200 bg-white px-6 py-3 font-mono text-sm text-slate-700 shadow-sm">
+                    <span className="text-slate-500">Coverage</span>
+                    <span className="text-right">
+                      {lastShapeMetrics.coveragePercent.toFixed(1)}%
+                    </span>
+                    <span className="text-slate-500">Accuracy</span>
+                    <span className="text-right">
+                      {lastShapeMetrics.tracingAccuracyPercent == null
+                        ? "—"
+                        : `${lastShapeMetrics.tracingAccuracyPercent.toFixed(1)}%`}
+                    </span>
+                    <span className="text-slate-500">Recorded as</span>
+                    <span className="text-right text-red-600 font-bold">
+                      completed: false
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 
             <div
               ref={cursorElRef}
-              className="absolute w-5 h-5 rounded-full border-2 border-pink-500 bg-pink-200/30 shadow-lg pointer-events-none"
+              className="pointer-events-none absolute h-5 w-5 rounded-full border-2 border-teal-500 bg-teal-200/60 shadow"
               style={{
                 display: "none",
                 transform: "translate(-50%, -50%)",
                 willChange: "left, top",
-                // left/top are written directly every animation frame by the
-                // rAF loop above, from the raw (unfiltered) fingertip
-                // position — no CSS transition, no interpolation, 1:1.
               }}
             />
-          </div>
-        )}
-
-        {isActiveScreen && isSymmetry && (
-          <div className="flex w-[74%] gap-4">
-            <div className="relative w-1/2 overflow-hidden rounded-2xl border-4 border-slate-800 bg-white">
-              <svg viewBox="0 0 100 100" className="w-full h-full" preserveAspectRatio="none">
-                <text x="50" y="9" textAnchor="middle" fontSize={Math.min(shapeLabelFontSize, 5.5)} fontWeight="700" fill="#334155">
-                  {shapeLabel}
-                </text>
-                <path
-                  d={shapePath}
-                  fill="none"
-                  stroke="#334155"
-                  strokeWidth="2.5"
-                  strokeDasharray="4 4"
-                  style={{ animation: `canvasAirPulse ${getAccuracyBand(tracingAccuracyLeft).pulse}s ease-in-out infinite` }}
-                />
-                <polyline
-                  points={traceLeft.map((p) => `${p.x},${p.y}`).join(" ")}
-                  fill="none"
-                  stroke={isTracingLeft ? getAccuracyBand(tracingAccuracyLeft).stroke : "#94a3b8"}
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  style={{ transition: "stroke 0.3s" }}
-                />
-                {sparkles
-                  .filter((s) => s.side === "left")
-                  .map((s) => (
-                    <circle key={s.id} cx={s.x} cy={s.y} r="2.2" fill={s.color} style={{ animation: "canvasAirSparkle 0.7s ease-out forwards" }} />
-                  ))}
-                <text x="50" y="95" textAnchor="middle" fontSize="4" fontWeight="500" fill="#64748b">
-                  Left • {shapeProgressLeft.toFixed(2)}%
-                </text>
-              </svg>
-              <div
-                ref={leftCursorElRef}
-                className="absolute w-4 h-4 rounded-full border-2 border-pink-500 bg-pink-200/30 shadow-lg pointer-events-none"
-                style={{ display: "none", transform: "translate(-50%, -50%)", willChange: "left, top" }}
-              />
-            </div>
-
-            <div className="relative w-1/2 overflow-hidden rounded-2xl border-4 border-slate-800 bg-white">
-              <svg viewBox="0 0 100 100" className="w-full h-full" preserveAspectRatio="none">
-                <text x="50" y="9" textAnchor="middle" fontSize={Math.min(shapeLabelFontSize, 5.5)} fontWeight="700" fill="#334155">
-                  {shapeLabel}
-                </text>
-                <polyline
-                  points={guidePointsRight.map((p) => `${p.x},${p.y}`).join(" ")}
-                  fill="none"
-                  stroke="#334155"
-                  strokeWidth="2.5"
-                  strokeDasharray="4 4"
-                  style={{ animation: `canvasAirPulse ${getAccuracyBand(tracingAccuracyRight).pulse}s ease-in-out infinite` }}
-                />
-                <polyline
-                  points={traceRight.map((p) => `${p.x},${p.y}`).join(" ")}
-                  fill="none"
-                  stroke={isTracingRight ? getAccuracyBand(tracingAccuracyRight).stroke : "#94a3b8"}
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  style={{ transition: "stroke 0.3s" }}
-                />
-                {sparkles
-                  .filter((s) => s.side === "right")
-                  .map((s) => (
-                    <circle key={s.id} cx={s.x} cy={s.y} r="2.2" fill={s.color} style={{ animation: "canvasAirSparkle 0.7s ease-out forwards" }} />
-                  ))}
-                <text x="50" y="95" textAnchor="middle" fontSize="4" fontWeight="500" fill="#64748b">
-                  Right • {shapeProgressRight.toFixed(2)}%
-                </text>
-              </svg>
-              <div
-                ref={rightCursorElRef}
-                className="absolute w-4 h-4 rounded-full border-2 border-pink-500 bg-pink-200/30 shadow-lg pointer-events-none"
-                style={{ display: "none", transform: "translate(-50%, -50%)", willChange: "left, top" }}
-              />
-            </div>
-
-            <div className="absolute right-4 top-4 rounded-lg bg-black/70 px-3 py-1 text-xs font-mono text-white">
-              ⏱ {shapeTimeLeft}s
-            </div>
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-xs text-slate-500">
-              {((shapeProgressLeft + shapeProgressRight) / 2).toFixed(2)}% combined
-            </div>
-            {showShapeComplete && (
-              <div className="shape-complete-anim pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-center">
-                <div className="text-5xl font-black text-emerald-400">✨ COMPLETE!</div>
-                {lastShapeMetrics && (
-                  <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 rounded-lg bg-black/50 px-6 py-3 font-mono text-sm text-slate-100">
-                    <span>Coverage (avg)</span>
-                    <span className="text-right">{lastShapeMetrics.coveragePercent.toFixed(2)}%</span>
-                    <span>Avg. deviation</span>
-                    <span className="text-right">{lastShapeMetrics.averageDeviationUnits.toFixed(3)} u</span>
-                    <span>Time</span>
-                    <span className="text-right">{lastShapeMetrics.timeToCompleteSeconds.toFixed(2)}s</span>
-                    <span className="font-bold text-emerald-300">Quality</span>
-                    <span className="text-right font-bold text-emerald-300">{lastShapeMetrics.qualityScore.toFixed(2)}</span>
-                  </div>
-                )}
-              </div>
-            )}
-            {showShapeMissed && (
-              <div className="shape-missed-anim pointer-events-none absolute inset-0 flex items-center justify-center bg-black/60 text-4xl font-black text-red-400">
-                ⏰ Time's Up
-              </div>
+            {DEBUG_TRACKING && (
+              <pre
+                ref={debugElRef}
+                className="pointer-events-none absolute left-4 top-4 z-40 whitespace-pre rounded-lg bg-black/80 px-3 py-2 font-mono text-[10px] leading-tight text-emerald-300"
+              >
+                loading…
+              </pre>
             )}
           </div>
         )}

@@ -267,6 +267,12 @@ const CONDITION_GAMES = {
   "wrist rehabilitation": ["rehab-slicer", "canvas-air", "catch-flex"],
   "parkinson's": ["catch-flex", "canvas-air", "cloud-reach"],
   "rotator cuff": ["cloud-reach", "precision-reach", "rehab-slicer"],
+  // Added: general "shoulder" match (e.g. "Shoulder Impingement Syndrome")
+  // was previously unmatched by any key here and silently fell through to
+  // "default" — same games CONDITION_EXERCISES already assigns to its own
+  // "shoulder" key, kept consistent with the "rotator cuff" game set since
+  // both are shoulder-mobility-focused.
+  "shoulder": ["cloud-reach", "precision-reach", "rehab-slicer"],
   "default": ["precision-reach", "canvas-air", "catch-flex"],
 };
 
@@ -297,40 +303,71 @@ function progressionMultiplier(day) {
 // the Patient schema / dashboard expect (exerciseId, name, sets, reps,
 // holdSeconds, description, videoUrl) — exerciseId here IS the gameId, so it
 // can be used directly to route into GameEngine (/games/:gameId).
+const GAMES_PER_DAY = 3;
+
 function generateRehabPlan(condition = "", painLevel = 3, affectedSide = "n/a") {
-  // Get exercises for the condition
-  const exercises = getExercisesForCondition(condition);
+  // Previously this pulled clinical PT names from EXERCISE_LIBRARY via
+  // getExercisesForCondition() and only appended ONE hardcoded game
+  // ("Precision Reach") on top — despite the comment above GAMES_LIBRARY
+  // already claiming this function "pulls from GAMES_LIBRARY". That
+  // migration was never finished, which is why the patient dashboard
+  // showed 5 generic PT exercise names plus only 1 of the app's 5 real
+  // games. That was then fixed to use getGamesForCondition() — but that
+  // returns the SAME 3 condition-recommended games every single call, so
+  // every day of the week showed an identical, unvarying list. Fixed
+  // here by rotating through the full GAMES_LIBRARY across the 7 days,
+  // still prioritizing the condition-recommended games (they appear
+  // first in the rotation order, so they show up more often / earlier
+  // in the week) without pinning every day to the exact same 3.
+  //
+  // gameType uses the underscore form of the hyphenated GAMES_LIBRARY id
+  // (e.g. "precision-reach" -> "precision_reach") to match the one
+  // confirmed convention already in use (GAME_CLINICAL_TARGETS is keyed
+  // this way for Precision Reach). This is applied uniformly, but only
+  // Precision Reach's session.gameType string has actually been
+  // confirmed against real session data — flagging this assumption
+  // rather than silently guessing.
+  const recommended = getGamesForCondition(condition);
+  const recommendedIds = new Set(recommended.map((g) => g.gameId));
+  const allGames = Object.values(GAMES_LIBRARY);
+  // Recommended games first (so they're weighted toward earlier days /
+  // appear more often across the rotation), then whatever's left in the
+  // library, deduped.
+  const rotationOrder = [
+    ...recommended,
+    ...allGames.filter((g) => !recommendedIds.has(g.gameId)),
+  ];
+
   const plan = [];
 
   for (let day = 1; day <= 7; day++) {
-    const dayExercises = exercises.map((ex) => ({
-      exerciseId: ex.exerciseId,  // ← Use exercise ID
-      name: ex.name,              // ← Use exercise name
-      sets: ex.sets || 3,
-      reps: ex.reps || 10,
-      holdSeconds: ex.holdSeconds || 0,
-      targetRom: ex.targetRom || 90,
-      description: ex.description || "",
-      videoUrl: ex.videoUrl || "",
-    }));
+    // Deterministic day-by-day rotation (no randomness, so a plan is
+    // reproducible/inspectable) — each day starts 1 position further
+    // into rotationOrder and wraps around, so across a 7-day week every
+    // game in the library gets used at least once instead of the same
+    // 3 repeating on every day.
+    const startIndex = (day - 1) % rotationOrder.length;
+    const dayGames = [];
+    for (let i = 0; i < GAMES_PER_DAY; i++) {
+      dayGames.push(rotationOrder[(startIndex + i) % rotationOrder.length]);
+    }
 
-    // Game-based entry for Precision Reach. Scope limited to this one game
-    // per the current task -- other games' actual session.gameType strings
-    // haven't been confirmed against GAMES_LIBRARY's hyphenated ids, so
-    // they are not added here yet. targetRom is included only if a real
-    // clinical value exists in GAME_CLINICAL_TARGETS; otherwise the field
-    // is omitted entirely (never defaulted, never fabricated).
-    const precisionReachTargetRom = getGameTargetRom("precision_reach", condition);
-    dayExercises.push({
-      exerciseId: "precision_reach",
-      name: "Precision Reach",
-      gameType: "precision_reach",
-      sets: 3,
-      reps: 10,
-      holdSeconds: 0,
-      ...(precisionReachTargetRom != null ? { targetRom: precisionReachTargetRom } : {}),
-      description: "In-app gesture game.",
-      videoUrl: "",
+    const dayExercises = dayGames.map((game) => {
+      const gameType = game.gameId.replace(/-/g, "_");
+      const targetRom = getGameTargetRom(gameType, condition);
+      return {
+        exerciseId: gameType,
+        name: game.name,
+        gameType,
+        sets: 3,
+        reps: 10,
+        holdSeconds: 0,
+        // Never fabricated: only present when a clinician-approved value
+        // exists in GAME_CLINICAL_TARGETS for this game + condition.
+        ...(targetRom != null ? { targetRom } : {}),
+        description: game.description,
+        videoUrl: "",
+      };
     });
 
     plan.push({

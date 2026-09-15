@@ -73,16 +73,27 @@ async function seed() {
 
       for (let day = 1; day <= 2; day++) {
         const dayPlan = rehabPlan[day - 1];
-        const exerciseResults = dayPlan.exercises.map((ex) => ({
-          exerciseId: ex.exerciseId,
-          name: ex.name,
-          setsCompleted: ex.sets,
-          repsCompleted: ex.reps,
-          averageRom: Math.round(ex.targetRom * 0.75),
-          maxRom: Math.round(ex.targetRom * 0.85),
-          accuracy: 70 + day * 5,
-          score: 200 + day * 80,
-        }));
+        // ex.targetRom is now only present when a clinician-approved value
+        // exists (see rehabPlanGenerator's GAME_CLINICAL_TARGETS) — most
+        // game entries won't have one yet. This demo seed still needs SOME
+        // plausible numbers to populate a realistic-looking completed
+        // session, so it falls back to a neutral placeholder ONLY here,
+        // in synthetic seed data — never inside generateRehabPlan itself,
+        // which must keep omitting targetRom rather than fabricating it.
+        const DEMO_SEED_FALLBACK_ROM = 90;
+        const exerciseResults = dayPlan.exercises.map((ex) => {
+          const rom = ex.targetRom ?? DEMO_SEED_FALLBACK_ROM;
+          return {
+            exerciseId: ex.exerciseId,
+            name: ex.name,
+            setsCompleted: ex.sets,
+            repsCompleted: ex.reps,
+            averageRom: Math.round(rom * 0.75),
+            maxRom: Math.round(rom * 0.85),
+            accuracy: 70 + day * 5,
+            score: 200 + day * 80,
+          };
+        });
 
         const session = await Session.create({
           patientId: patient._id,
