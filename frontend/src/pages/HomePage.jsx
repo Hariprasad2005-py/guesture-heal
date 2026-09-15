@@ -378,6 +378,7 @@ const HomePage = () => {
   Navbar
   ────────────────────────────────────────────────────────────────────────── */
 const Navbar = ({ scrolled, isOpen, setIsOpen, setShowRoleModal }) => {
+  const navigate = useNavigate();
   const navLinks = ['Home', 'Services', 'How It Works', 'AI Technology', 'Testimonials', 'FAQ', 'Contact'];
 
   return (
@@ -389,7 +390,10 @@ const Navbar = ({ scrolled, isOpen, setIsOpen, setShowRoleModal }) => {
     >
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-[72px]">
-          <div className="flex items-center gap-2.5 cursor-pointer">
+          <div
+            className="flex items-center gap-2.5 cursor-pointer"
+            onClick={() => navigate('/')}
+          >
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-teal-500 to-[#FF8A65] flex items-center justify-center shadow-md shadow-teal-500/30">
               <Activity className="w-5 h-5 text-white" strokeWidth={2.25} />
             </div>
