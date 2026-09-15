@@ -392,7 +392,13 @@ const Navbar = ({ scrolled, isOpen, setIsOpen, setShowRoleModal }) => {
         <div className="flex items-center justify-between h-[72px]">
           <div
             className="flex items-center gap-2.5 cursor-pointer"
-            onClick={() => navigate('/')}
+            onClick={() => {
+              if (window.location.pathname === '/') {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              } else {
+                navigate('/');
+              }
+            }}
           >
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-teal-500 to-[#FF8A65] flex items-center justify-center shadow-md shadow-teal-500/30">
               <Activity className="w-5 h-5 text-white" strokeWidth={2.25} />
