@@ -126,9 +126,12 @@ export default function GameSelectPage() {
   const navigate = useNavigate();
   const { currentPatient, publicPatientId, token, setCurrentPatient } = useAppStore();
   const [loading, setLoading] = useState(false);
-  // 'exercise' -> this specific game already done today; 'day' -> all of
-  // today's games are done. null -> popup hidden.
   const [completionNotice, setCompletionNotice] = useState(null);
+
+  // TEST MODE — activated by appending ?test=1 to the URL.
+  // When true, the daily-completion popup is bypassed for this page only.
+  // Production users never set this param, so nothing changes for them.
+  const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
 
   // Sync fix: currentPatient can be empty on this page (direct nav, refresh,
   // new tab) even though we still know who the patient is via publicPatientId.
@@ -187,6 +190,13 @@ export default function GameSelectPage() {
     const patientId = currentPatient?.patientId || currentPatient?._id;
     if (!patientId && !token) {
       navigate('/patient');
+      return;
+    }
+
+    // TEST MODE: skip daily-completion restrictions entirely and pass
+    // isTestMode through the URL so GameEngine can forward it to the game.
+    if (isTestMode) {
+      navigate(`/game/${gameId}?test=1`);
       return;
     }
 

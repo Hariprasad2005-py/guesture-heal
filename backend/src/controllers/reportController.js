@@ -137,7 +137,23 @@ exports.getReportsByPatient = async (req, res, next) => {
 
     // Therapists can read reports for any patient they can look up;
     // the patient ownership check above is the access gate.
-    const reportFilter = { patientId: req.params.patientId };
+    // ─────────────────────────────────────────────────────────────
+    // 50% ACCURACY VALIDITY FILTER
+    // ─────────────────────────────────────────────────────────────
+    // Applies to EXISTING stored reports, not just new ones. A report
+    // whose session scored below 50% must not appear in any report
+    // list, regardless of when it was generated. performance.accuracy
+    // is null when accuracy was never recorded (a distinct case from
+    // "recorded but failing") -- null is intentionally NOT excluded
+    // here, only accuracy values that are present and below 50.
+    const reportFilter = {
+      patientId: req.params.patientId,
+      $or: [
+        { "performance.accuracy": { $gte: 50 } },
+        { "performance.accuracy": null },
+        { "performance.accuracy": { $exists: false } },
+      ],
+    };
     const reports = await Report.find(reportFilter)
       .populate(
         "patientId",
@@ -169,6 +185,23 @@ exports.getReport = async (req, res, next) => {
       );
 
     if (!report) {
+      return res.status(404).json({
+        success: false,
+        message: "Report not found.",
+      });
+    }
+
+    // Direct-link guard: the dashboard list can hide a <50% report, but
+    // a user (or a bookmarked/shared link) can still hit this route by
+    // ID directly. Without this check that would expose an invalid
+    // report as if it were a valid completed one -- the exact gap you
+    // flagged. Uses the report's own stored performance.accuracy, the
+    // same field the list endpoints now filter on, so a report can
+    // never be visible in one place and blocked in the other.
+    if (
+      typeof report.performance?.accuracy === "number" &&
+      report.performance.accuracy < 50
+    ) {
       return res.status(404).json({
         success: false,
         message: "Report not found.",
@@ -581,6 +614,16 @@ exports.getReportsByTherapist = async (req, res, next) => {
       }
     }
 
+    // Same 50% validity filter as getReportsByPatient -- this is the
+    // endpoint the Reports Dashboard most likely calls when no specific
+    // patient is selected, so it's the most probable source of the
+    // "Total Reports: 3" / "Avg Accuracy: 90%" figures you're seeing.
+    filter.$or = [
+      { "performance.accuracy": { $gte: 50 } },
+      { "performance.accuracy": null },
+      { "performance.accuracy": { $exists: false } },
+    ];
+
     const reports = await Report.find(filter)
       .populate(
         "patientId",
@@ -628,7 +671,14 @@ exports.getPublicReportsByPatient = async (req, res, next) => {
       return res.status(404).json({ success: false, message: "Patient not found." });
     }
 
-    const reports = await Report.find({ patientIdRef: patientId })
+    const reports = await Report.find({
+      patientIdRef: patientId,
+      $or: [
+        { "performance.accuracy": { $gte: 50 } },
+        { "performance.accuracy": null },
+        { "performance.accuracy": { $exists: false } },
+      ],
+    })
       .sort({ createdAt: -1 })
       .select("-patientSnapshot -therapistId");
 

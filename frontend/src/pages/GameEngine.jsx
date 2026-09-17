@@ -26,6 +26,10 @@ const GameEngine = () => {
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
 
+  // TEST MODE — set when the URL contains ?test=1. Passed down to the
+  // game so it can skip telemetry/reports and reset state between runs.
+  const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
+
   const GameComponent = GAME_COMPONENTS[gameId];
   const gameName = GAME_DISPLAY_NAMES[gameId] || gameId;
 
@@ -130,6 +134,7 @@ const GameEngine = () => {
           onBack={() => navigate('/games')}
           patientId={patientId || 'guest'}
           gameId={gameId}
+          isTestMode={isTestMode}
         />
       </div>
     </div>

@@ -21,13 +21,36 @@ export default function SessionSummary({
   const navigate = useNavigate();
   const { token, user } = useAppStore();
   const [saving, setSaving] = React.useState(false);
+  // Set only when the backend rejected this session (currently: the
+  // <50% accuracy discard). Distinct from a generic save error --
+  // this is an expected, non-broken outcome ("it didn't count"), not
+  // a failure, so it gets its own message/styling rather than
+  // console.error-and-continue.
+  const [discardInfo, setDiscardInfo] = React.useState(null);
+  const [saveError, setSaveError] = React.useState(null);
 
   const handleSaveAndViewReport = async () => {
     setSaving(true);
+    setDiscardInfo(null);
+    setSaveError(null);
     try {
       const result = await onSaveReport?.();
       if (result && result.success === false) {
+        if (result.discarded) {
+          // Below-threshold session: backend already deleted it.
+          // Do NOT navigate to a report page -- there is no report
+          // and no completed session to show.
+          setDiscardInfo({
+            accuracy: result.accuracy,
+            message:
+              result.message ||
+              'Session not saved because accuracy was below the 50% completion threshold.',
+          });
+          return;
+        }
         console.error('Report save reported failure:', result.error);
+        setSaveError(result.message || result.error || 'Failed to save session.');
+        return;
       }
       const isTherapist = !!token && user?.role === 'therapist';
       if (patientId && patientId !== 'guest') {
@@ -38,7 +61,23 @@ export default function SessionSummary({
         navigate('/games');
       }
     } catch (err) {
-      console.error('Failed to save report:', err);
+      // Covers the case where onSaveReport throws on non-2xx (e.g. a
+      // fetch wrapper that throws for 422s) instead of resolving with
+      // { success: false }. err.discarded / err.accuracy / err.message
+      // are read defensively in case the thrower attached the parsed
+      // body; if not, this still degrades to the generic error path
+      // below rather than silently navigating away.
+      if (err?.discarded) {
+        setDiscardInfo({
+          accuracy: err.accuracy,
+          message:
+            err.message ||
+            'Session not saved because accuracy was below the 50% completion threshold.',
+        });
+      } else {
+        console.error('Failed to save report:', err);
+        setSaveError(err?.message || 'Failed to save session.');
+      }
     } finally {
       setSaving(false);
     }
@@ -103,6 +142,30 @@ export default function SessionSummary({
         <h1 className="text-4xl font-black mb-2">🎯 Session Complete!</h1>
         <p className="text-slate-400">{gameName || 'Rehab Game'}</p>
       </div>
+
+      {/* Below-threshold discard notice */}
+      {discardInfo && (
+        <div className="mb-6 flex items-start gap-3 rounded-xl border border-rose-700/60 bg-rose-950/30 px-5 py-4 text-rose-300">
+          <Target className="mt-0.5 h-5 w-5 flex-shrink-0 text-rose-400" />
+          <div>
+            <p className="font-semibold text-rose-200">
+              Session Not Saved{typeof discardInfo.accuracy === 'number' ? ` — ${discardInfo.accuracy}% Accuracy` : ''}
+            </p>
+            <p className="text-sm leading-relaxed text-rose-300/80">{discardInfo.message}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Generic save error (distinct from a below-threshold discard) */}
+      {saveError && (
+        <div className="mb-6 flex items-start gap-3 rounded-xl border border-red-700/60 bg-red-950/30 px-5 py-4 text-red-300">
+          <Shield className="mt-0.5 h-5 w-5 flex-shrink-0 text-red-400" />
+          <div>
+            <p className="font-semibold text-red-200">Couldn't Save Session</p>
+            <p className="text-sm leading-relaxed text-red-300/80">{saveError}</p>
+          </div>
+        </div>
+      )}
 
       {/* Pain-adjustment alert */}
       {painAdjusted && (
@@ -183,13 +246,20 @@ export default function SessionSummary({
 
       {/* Action Buttons */}
       <div className="flex flex-col sm:flex-row gap-4">
-        <button
-          onClick={handleSaveAndViewReport}
-          disabled={saving}
-          className="flex-1 bg-cyan-500 text-white px-8 py-4 rounded-xl font-bold hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500 transition-all"
-        >
-          {saving ? 'Saving...' : '📊 Save & View Report'}
-        </button>
+        {/* Once a session is confirmed discarded, there is nothing left
+            to save -- retrying will 422 again since the doc is already
+            deleted. Swap the primary action for a plain acknowledgement
+            back to Games instead of leaving a dead "Save & View Report"
+            button up. */}
+        {!discardInfo && (
+          <button
+            onClick={handleSaveAndViewReport}
+            disabled={saving}
+            className="flex-1 bg-cyan-500 text-white px-8 py-4 rounded-xl font-bold hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500 transition-all"
+          >
+            {saving ? 'Saving...' : '📊 Save & View Report'}
+          </button>
+        )}
         <button
           onClick={onFinish}
           className="flex-1 bg-slate-800 text-white px-8 py-4 rounded-xl font-bold hover:bg-slate-700 transition-all"

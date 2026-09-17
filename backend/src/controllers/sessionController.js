@@ -407,6 +407,28 @@ exports.completeSession = async (req, res, next) => {
       });
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // 50% ACCURACY COMPLETION THRESHOLD
+    // ─────────────────────────────────────────────────────────────
+    // Authoritative gate. accuracy >= 50 keeps and completes the
+    // session (session was already flipped to "completed" by the
+    // atomic claim above). accuracy < 50 deletes this session
+    // document outright -- it must not count as completed, must not
+    // touch patient.totalSessions/averageAccuracy, must not feed
+    // evaluateDayCompletion, and must not generate a report. Exactly
+    // 50 must pass (>=, not >). Comparison is against the raw numeric
+    // request value, not a rounded/stored copy, so 49.9 stays < 50.
+    if (typeof accuracy === "number" && accuracy < 50) {
+      await Session.findByIdAndDelete(session._id);
+      return res.status(422).json({
+        success: false,
+        discarded: true,
+        accuracy,
+        message:
+          "Session not saved because accuracy was below the 50% completion threshold.",
+      });
+    }
+
     /*
      * IMPORTANT:
      * Do not use `value || fallback`.
@@ -921,6 +943,24 @@ exports.finishPublicSession = async (req, res, next) => {
       return res.status(400).json({
         success: false,
         message: "Session already completed.",
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 50% ACCURACY COMPLETION THRESHOLD (public/self-serve path)
+    // ─────────────────────────────────────────────────────────────
+    // Same rule and same reasoning as completeSession: accuracy >= 50
+    // keeps/completes; accuracy < 50 deletes the session document and
+    // returns a non-success response before any patient/report side
+    // effects run.
+    if (typeof accuracy === "number" && accuracy < 50) {
+      await Session.findByIdAndDelete(session._id);
+      return res.status(422).json({
+        success: false,
+        discarded: true,
+        accuracy,
+        message:
+          "Session not saved because accuracy was below the 50% completion threshold.",
       });
     }
 

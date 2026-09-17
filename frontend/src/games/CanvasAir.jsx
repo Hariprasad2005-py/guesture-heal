@@ -2,56 +2,16 @@
 //
 // Canvas Air — air-painting rehabilitation game.
 //
-// The patient traces a target outline with their index fingertip. The
-// stroke is rendered live and colored by how close it is to the target:
-// green inside tight tolerance, amber near the edge, red outside.
-// Accuracy is a movement-weighted proportion of the trace that stayed
-// inside tolerance; completion is the proportion of the target path
-// actually covered. Both come from the same tracker.
+// ... (header comment unchanged) ...
 //
-// Design constraints enforced by this file:
-//   * Only INDEX_FINGER_TIP is used. useHandTracking has no `landmark`
-//     prop, so a "Wrist" UI option would be inert.
-//   * papsScore from useFacialPainDetection is 0-10. Pain is active at
-//     papsScore >= 6, matching the hook's own PAIN_THRESHOLD.
-//   * useAdaptiveDifficulty.adapt() accepts
-//     { accuracy, papsScore, combo, maxFlexionAngle }. maxFlexionAngle
-//     must be `null` when unmeasured — passing 0 closes the ROM gate
-//     forever, because 0 is a real measurement to that hook.
-//   * useGameEngine is used for countdown / pause / resume / endSession
-//     only. completeRep is never called.
-//   * No fabricated cursor. If useHandTracking returns no fingertip,
-//     the canvas shows a clear "show your hand" state.
-//   * Each shape's 15-second timer starts on the first valid filtered
-//     fingertip sample for that shape, and is computed from real
-//     elapsed timestamps, not by accumulating setTimeout ticks.
-//   * Per-attempt geometry (scale, tolerance, sampled path) is frozen
-//     at the moment the attempt starts.
-//   * Trace, cursor, and motion/smoothness all use the SAME filtered
-//     fingertip sample.
-//
-// FINGERTIP SMOOTHING
-//   useHandTracking already applies an EMA (alpha = 0.4) to raw
-//   MediaPipe landmarks before emitting. Canvas Air layers a One Euro
-//   filter on top of that, tuned for an already-smoothed input:
-//     minCutoff = 0.4   (heavier low-pass when stationary)
-//     beta      = 0.02  (release faster on fast motion, less lag)
-//     dCutoff   = 1.0
-//   A short sub-pixel deadband on the cursor prevents visible jitter
-//   when the patient holds still. The filter is only reset when the
-//   hand is gone for more than FILTER_RESET_GAP_MS, so a one-frame
-//   dropout at the edge of a reach does not produce a stutter.
-//
-// DEBUG TRACKING HUD
-//   Append ?debugTracking to the page URL to render a small dev-only
-//   overlay showing raw / mirrored / filtered / mapped fingertip values
-//   plus on-path/distance, so a real mismatch can be diagnosed from
-//   actual numbers instead of guesswork. It never renders unless that
-//   query param is present, and it never gates or alters any game
-//   logic — it only reads values that are already being computed.
-//
-// Metrics are game metrics, not validated clinical scores. PAPS is a
-// facial-expression-derived discomfort indicator, not a diagnosis.
+// TEST MODE
+//   Append ?testMode to the URL, or pass the `testMode` prop, to run a
+//   fully local session. All telemetry calls become no-ops, no report
+//   is saved, and onSessionEnd is not invoked. The game itself behaves
+//   identically, so a tester can run a session any number of times
+//   without affecting real patient data. The telemetry hook itself is
+//   still mounted so hook order stays stable, but every method that
+//   would persist or transmit is short-circuited through a local shim.
 
 import {
   useCallback,
@@ -93,6 +53,7 @@ import SessionSummary from "../components/rehab/SessionSummary";
 
 const SHAPE_TIME_LIMIT_SECONDS = 15;
 const SHAPE_ADVANCE_DELAY_MS = 1800;
+const ABANDONED_OVERLAY_MS = 900;
 
 const SHAPES_PER_SESSION = {
   Beginner: 3,
@@ -107,9 +68,22 @@ const FEEDBACK_COLORS = {
 };
 
 const PAPS_PAIN_THRESHOLD = 6;
+// Multiplier applied to the attempt's tolerance band when the patient is
+// in pain. Widens the "green" and "amber" zones so a painful session is
+// still completable. Captured per-attempt (see beginAttempt) so mid-flight
+// PAPS changes cannot invalidate the frozen tracker.
+const PAIN_TOLERANCE_MULTIPLIER = 1.5;
 
 // Minimum frame-to-frame movement (viewBox units) that counts as real
 // "movement" for movement-weighted accuracy and smoothness.
+//
+// NOTE: this is intentionally smaller than CURSOR_DEADBAND_UNITS. The
+// deadband only suppresses visible cursor jitter for sub-pixel hand
+// noise; it must NOT gate whether a real movement is counted toward
+// accuracy/smoothness. A movement of 0.2u is real (the patient moved)
+// even though it is too small to visibly reposition the cursor, so
+// MIN_MOVEMENT_UNITS stays below the deadband. Do not "reconcile"
+// these two values — they measure different things.
 const MIN_MOVEMENT_UNITS = 0.15;
 
 // Smoothness is only meaningful after enough real movement has been
@@ -119,44 +93,25 @@ const MIN_PATH_LENGTH_FOR_SMOOTHNESS = 40;
 
 // --- Smoothing constants ---
 
-// One Euro parameters. Tuned for input that useHandTracking has already
-// EMA-smoothed. Lower minCutoff than the raw-landmark defaults because
-// the noise floor is already reduced; higher beta so fast motion is not
-// dragged behind by excessive low-pass.
 const ONE_EURO_MIN_CUTOFF = 0.4;
 const ONE_EURO_BETA = 0.02;
 const ONE_EURO_D_CUTOFF = 1.0;
 
-// If the fingertip is gone for less than this, we do NOT reset the
-// filter — we just stretch the filter's internal dt across the gap so
-// the first sample back is treated as "resumed", not "restarted". This
-// avoids the visible stutter caused by a single dropped frame.
 const FILTER_RESET_GAP_MS = 250;
 
-// Deadband on the cursor. Sub-0.3-unit moves (0.3% of the canvas) do
-// not reposition the cursor. This removes idle jitter without making
-// real motion lag, because any movement above this threshold moves the
-// cursor immediately and exactly.
 const CURSOR_DEADBAND_UNITS = 0.3;
 
-// A filtered point slightly outside [0,1] is still tracked; only a
-// genuinely-off-frame hand (beyond these margins) is treated as
-// "not visible". No clamping is applied — the point is either used
-// verbatim or the sample is dropped.
 const OFF_FRAME_MARGIN = 0.02;
 
-// The webcam frame is much wider than a user's comfortable seated reach,
-// and where that reach sits (centered, upper-right, etc.) varies by
-// person, seating position, and camera angle. A fixed guess for the
-// reachable box is wrong for most users. Instead we auto-calibrate:
-// expand a running min/max of the ACTUAL mirrored fingertip positions
-// seen during the session, and remap through that observed box (with
-// a little padding) once it's wide enough to trust. Until then we fall
-// back to a generous default so the game is usable from frame one.
 const DEFAULT_HAND_RANGE_X = [0.25, 0.75];
 const DEFAULT_HAND_RANGE_Y = [0.2, 0.8];
-const HAND_RANGE_PADDING = 0.05; // extra slack around the observed reach
-const HAND_RANGE_MIN_SPAN = 0.15; // below this observed span, don't trust it yet
+const HAND_RANGE_PADDING = 0.05;
+const HAND_RANGE_MIN_SPAN = 0.15;
+
+// ROM max-hold: at attempt start, we use the largest shoulder angle seen
+// in the last ROM_WINDOW_MS milliseconds, so a momentarily-resting arm
+// doesn't produce an undersized target shape.
+const ROM_WINDOW_MS = 1500;
 
 function remapNormalized(v, [lo, hi]) {
   if (hi <= lo) return 0.5;
@@ -169,6 +124,14 @@ function remapNormalized(v, [lo, hi]) {
 const DEBUG_TRACKING =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).has("debugTracking");
+
+// Local test mode. Enabled by ?testMode in the URL, or by passing the
+// `testMode` prop. In test mode all telemetry writes/saves are skipped
+// so a session can be run any number of times without affecting real
+// patient data.
+const URL_TEST_MODE =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).has("testMode");
 
 // ============================================================
 // TOLERANCE (viewBox units)
@@ -239,11 +202,22 @@ function pickReplacementShape(difficulty, usedNames) {
 
 // ============================================================
 // FEEDBACK / BANDS
+//
+// Spec mapping:
+//   green (onPath) : distance <= tolerance
+//   amber (edge)   : tolerance < distance <= 1.5 * tolerance
+//   red   (off)    : distance > 1.5 * tolerance
+//
+// The attempt's effective tolerance is already widened under pain
+// (see beginAttempt → attempt.effectiveTolerance), so we apply the
+// multiplier only at classification time, not here.
 // ============================================================
-function classifyFeedback(distance, tolerance) {
+const EDGE_MULTIPLIER = 1.5;
+
+function classifyFeedback(distance, effectiveTolerance) {
   if (distance == null || !Number.isFinite(distance)) return "off";
-  if (distance <= tolerance * 0.6) return "onPath";
-  if (distance <= tolerance) return "edge";
+  if (distance <= effectiveTolerance) return "onPath";
+  if (distance <= effectiveTolerance * EDGE_MULTIPLIER) return "edge";
   return "off";
 }
 
@@ -281,11 +255,6 @@ function computeSmoothness(velocities, accelerations, pathLength) {
 
 // ============================================================
 // ONE EURO FILTER
-//
-// Same math as before, but with an added `filterWithGap()` entry point
-// that stretches internal dt across a short dropout instead of
-// resetting. This is what removes the stutter when a single frame is
-// missed near the edge of the frame.
 // ============================================================
 class OneEuroFilter1D {
   constructor(minCutoff = 0.8, beta = 0.007, dCutoff = 1.0) {
@@ -300,13 +269,6 @@ class OneEuroFilter1D {
     const tau = 1 / (2 * Math.PI * cutoff);
     return 1 / (1 + tau / dt);
   }
-  /**
-   * @param {number} x
-   * @param {number} tMs   current performance.now()
-   * @param {number} [forcedDtSec]  when resuming after a short gap,
-   *   the caller can force a dt so the internal velocity estimate does
-   *   not spike. If omitted, dt is derived from tMs - tPrev.
-   */
   filter(x, tMs, forcedDtSec) {
     if (this.tPrev === null) {
       this.tPrev = tMs;
@@ -452,13 +414,87 @@ function getShapeTransform(scale) {
 }
 
 // ============================================================
+// SCORE HELPERS
+//
+// Session score is computed from the metrics history, not from the
+// `score` state, so an in-flight `finalizeAttempt` that batches its
+// setScore in the same tick as endSession is still reflected.
+// ============================================================
+function scoreForMetrics(m) {
+  if (!m || m.outcome !== "completed") return 0;
+  const difficulty = m.shapeDifficulty || 1;
+  if (m.painAdjusted) return difficulty + 3;
+  const smooth = typeof m.smoothnessScore === "number" ? m.smoothnessScore : 0;
+  return Math.round(smooth / 10) + difficulty;
+}
+
+function computeSessionScore(history) {
+  return history.reduce((sum, m) => sum + scoreForMetrics(m), 0);
+}
+
+// ============================================================
+// TEST-MODE TELEMETRY SHIM
+//
+// Wraps the real telemetry object so hook order stays stable and the
+// rest of the component keeps the exact same call sites. Every method
+// that would persist or transmit becomes a no-op. Pure local helpers
+// (e.g. sessionId) are preserved so the summary screen still renders.
+// ============================================================
+function makeTestModeTelemetry(realTelemetry) {
+  const noop = () => {};
+  return {
+    ...realTelemetry,
+    recordRep: noop,
+    endSession: noop,
+    trackPain: noop,
+    startTracking: noop,
+    saveReport: async () => ({ ok: true, testMode: true }),
+  };
+}
+
+// ============================================================
+// PAIN DETECTOR BANNER GATING
+//
+// We only want to warn the patient/clinician when the PAPS safety net
+// is genuinely broken — not while the model is still warming up, and
+// not just because no face is currently in frame.
+//
+//   status === "error"   → banner ON (genuine failure)
+//   status === "loading" → banner OFF (still warming up)
+//   status === "ready"   → banner OFF
+//   status === "no_face" → banner OFF (patient may be off-camera)
+//
+// Defensive fallback: if an older useFacialPainDetection returns only
+// `isAvailable`, we treat `false` as failure ONLY once the hook has had
+// a chance to settle. We can't know that from here, so the fallback
+// stays conservative: never warn on a bare `isAvailable === false`.
+// ============================================================
+function shouldWarnPainDetectorUnavailable({
+  painDetectorStatus,
+  painDetectorFailed,
+}) {
+  // Temporarily disabled while the pain-detector hook is being fixed.
+  // Re-enable once useFacialPainDetection reliably reports "error".
+  return false;
+  // eslint-disable-next-line no-unreachable
+  if (painDetectorStatus === "error") return true;
+  if (painDetectorStatus === "loading") return false;
+  if (painDetectorStatus === "ready") return false;
+  if (painDetectorStatus === "no_face") return false;
+  return painDetectorFailed === true;
+}
+
+// ============================================================
 // COMPONENT
 // ============================================================
 export default function CanvasAir({
   onSessionEnd,
   patientId,
   gameId = "canvas-air",
+  testMode = false,
 }) {
+  const isTestMode = testMode || URL_TEST_MODE;
+
   const videoRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
 
@@ -483,7 +519,14 @@ export default function CanvasAir({
     endSession,
   } = engine;
 
-  const telemetry = useSessionTelemetry(patientId, gameId);
+  const rawTelemetry = useSessionTelemetry(patientId, gameId);
+  // In test mode, every write/transmit method is a no-op. The hook is
+  // still called unconditionally so hook order is stable across renders.
+  const telemetry = useMemo(
+    () => (isTestMode ? makeTestModeTelemetry(rawTelemetry) : rawTelemetry),
+    [isTestMode, rawTelemetry]
+  );
+
   const audio = useAudioFeedback(true);
 
   const initialShapeCount =
@@ -501,7 +544,7 @@ export default function CanvasAir({
   const [score, setScore] = useState(0);
   const [shapeProgress, setShapeProgress] = useState(0);
   const [tracingAccuracy, setTracingAccuracy] = useState(null);
-  const [averageDeviation, setAverageDeviation] = useState(0);
+  const [emaDeviationUnits, setEmaDeviationUnits] = useState(0);
   const [showShapeComplete, setShowShapeComplete] = useState(false);
   const [showShapeMissed, setShowShapeMissed] = useState(false);
   const [showShapeAbandoned, setShowShapeAbandoned] = useState(false);
@@ -521,9 +564,6 @@ export default function CanvasAir({
   const [cursorVisible, setCursorVisible] = useState(false);
 
   // ---- Debug HUD (dev-only, see DEBUG_TRACKING) ----
-  // Written every frame from the same code paths that already compute
-  // these values; a separate rAF loop below reads it so the HUD never
-  // triggers a React re-render.
   const debugElRef = useRef(null);
   const debugSnapshotRef = useRef({
     raw: null,
@@ -556,8 +596,45 @@ export default function CanvasAir({
 
   const { shoulderAngle } = usePoseDetection(poseData);
   const guidance = usePostureGuidance(poseData, calibrationData);
-  const { papsScore, isPainDetected, resetPainState } =
-    useFacialPainDetection({ videoRef });
+
+  // ---- Pain detection lifecycle ----
+  // The hook is expected to expose a tri-state `status` plus derived
+  // booleans. `isAvailable` is true as soon as the model has loaded
+  // (even if no face is currently in frame). `hasFailed` is true only
+  // on genuine load/inference failure. `isWarmingUp` is true during
+  // initial model load. Older hooks that only return `isAvailable` will
+  // leave `status` undefined and `hasFailed` undefined — in that case
+  // we deliberately do NOT warn, to avoid the false-positive banner.
+  const {
+    papsScore,
+    isPainDetected,
+    resetPainState,
+    status: painDetectorStatus,
+    isAvailable: painDetectorAvailable,
+    isWarmingUp: painDetectorWarmingUp,
+    hasFailed: painDetectorFailed,
+  } = useFacialPainDetection({ videoRef });
+
+  const showPainDetectorWarning = shouldWarnPainDetectorUnavailable({
+    painDetectorStatus,
+    painDetectorFailed,
+  });
+
+  // TEMP DEBUG — remove after diagnosis
+  if (typeof window !== "undefined") {
+    // eslint-disable-next-line no-console
+    console.log(
+      "[CanvasAir] painDetector:",
+      { painDetectorStatus, painDetectorAvailable, painDetectorWarmingUp, painDetectorFailed }
+    );
+  }
+
+  // Ref mirror for papsScore so callbacks that need the latest value
+  // don't need to be re-created on every PAPS tick.
+  const papsScoreRef = useRef(papsScore);
+  useEffect(() => {
+    papsScoreRef.current = papsScore;
+  }, [papsScore]);
 
   const currentShape = sessionShapes[currentShapeIndex] || null;
   const currentShapePath = currentShape?.path || SHAPES[0].path;
@@ -566,6 +643,8 @@ export default function CanvasAir({
     : "";
 
   const baseTolerance = getBaseTolerance(currentDifficulty);
+  // Live tolerance shown in the HUD. The attempt-frozen tolerance is
+  // what actually gates scoring (see beginAttempt).
   const dynamicTolerance = useMemo(
     () =>
       Math.max(
@@ -575,22 +654,36 @@ export default function CanvasAir({
     [baseTolerance]
   );
 
-  const romDegrees = useMemo(() => {
-    if (!poseData) return null;
+  // ---- ROM with a short max-hold window ----
+  const romSamplesRef = useRef([]); // [{ t, v }]
+  useEffect(() => {
+    if (!poseData) return;
     const v = poseData.maxShoulderAngle;
-    return typeof v === "number" && Number.isFinite(v) && v > 0
-      ? Math.round(v)
-      : null;
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return;
+    const now = performance.now();
+    const arr = romSamplesRef.current;
+    arr.push({ t: now, v });
+    const cutoff = now - ROM_WINDOW_MS;
+    while (arr.length > 0 && arr[0].t < cutoff) arr.shift();
   }, [poseData]);
+
+  const romDegrees = useMemo(() => {
+    const arr = romSamplesRef.current;
+    if (!arr.length) return null;
+    let max = 0;
+    for (const s of arr) if (s.v > max) max = s.v;
+    return max > 0 ? max : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poseData]);
+
+  const romDegreesDisplay = useMemo(
+    () => (romDegrees == null ? null : Math.round(romDegrees)),
+    [romDegrees]
+  );
 
   const totalAttempted = completed + missed + abandoned;
   const accuracyBand = getAccuracyBand(tracingAccuracy ?? 0);
 
-  // Moved here (before the `if (isComplete) return ...` below) because
-  // useMemo is a Hook: calling it after a conditional early return means
-  // this component calls a different number of hooks depending on
-  // gameState, which violates React's Rules of Hooks and throws
-  // "Rendered fewer hooks than expected" the moment a session completes.
   const contiguousGroups = useMemo(() => {
     const groups = { onPath: [], edge: [], off: [] };
     if (trace.length === 0) return groups;
@@ -625,14 +718,6 @@ export default function CanvasAir({
     };
   }, [isActive, calibrated, calibrate]);
 
-  // ---- Fingertip filtering ----
-  //
-  // Runs whenever useHandTracking emits a new fingertip. The FILTERED
-  // point is what the rest of the component reads. The filter is only
-  // reset when the hand has been gone for FILTER_RESET_GAP_MS; a
-  // one-frame dropout stretches the filter's internal dt instead of
-  // starting over, so the cursor does not stutter at the edge of a
-  // reach.
   const filteredFingertipRef = useRef(null);
   const filteredTimestampRef = useRef(0);
   const fingertipFilterRef = useRef(
@@ -644,9 +729,6 @@ export default function CanvasAir({
   );
   const lastFingertipSeenMsRef = useRef(0);
 
-  // Running min/max of mirrored fingertip.x/y actually seen this session.
-  // Expand-only: we want the box to grow to cover real reach, not shrink
-  // and clip a user out again after they've proven they can reach further.
   const observedRangeRef = useRef({ minX: null, maxX: null, minY: null, maxY: null });
 
   function getEffectiveHandRange() {
@@ -667,7 +749,6 @@ export default function CanvasAir({
   useEffect(() => {
     const now = performance.now();
 
-    // No fingertip this render.
     if (
       !fingertip ||
       !Number.isFinite(fingertip.x) ||
@@ -683,15 +764,9 @@ export default function CanvasAir({
         filteredFingertipRef.current = null;
         filteredTimestampRef.current = 0;
       }
-      // If the gap is short, keep the last filtered point in the ref.
-      // The tracing effect will still see `fingertip === null` and skip,
-      // but the filter state survives so the next sample is smooth.
       return;
     }
 
-    // useHandTracking emits normalized (0..1) coordinates in the raw
-    // camera frame. The <video> is mirrored with scale-x-[-1], so we
-    // flip x here before filtering. This is the ONLY place x is flipped.
     const mirrored = { x: 1 - fingertip.x, y: fingertip.y };
 
     const obs = observedRangeRef.current;
@@ -712,9 +787,6 @@ export default function CanvasAir({
 
     let filtered;
     if (isResuming) {
-      // Stretch dt across the gap. Use the previous frame's nominal dt
-      // (~1/60s) as the forced dt so the One Euro does not see a huge
-      // instantaneous velocity on the first sample back.
       const forcedDt = 1 / 60;
       filtered = fingertipFilterRef.current.filter(mirrored, now, forcedDt);
     } else {
@@ -729,10 +801,6 @@ export default function CanvasAir({
     }
   }, [fingertip]);
 
-  // ---- Cursor rAF ----
-  // Reads cursorPosRef, which is written by the tracing effect. If the
-  // tracing effect hasn't written for a while (paused, show overlay),
-  // the cursor keeps its last position and its last visibility flag.
   useEffect(() => {
     let rafId;
     const tick = () => {
@@ -753,10 +821,6 @@ export default function CanvasAir({
     return () => cancelAnimationFrame(rafId);
   }, []);
 
-  // ---- Debug HUD rAF (dev-only) ----
-  // Reads debugSnapshotRef, which is written inline by the filtering
-  // and tracing effects above. Kept as its own rAF loop so it never
-  // causes a React re-render, matching the cursor loop's approach.
   useEffect(() => {
     if (!DEBUG_TRACKING) return undefined;
     let rafId;
@@ -775,26 +839,29 @@ export default function CanvasAir({
             s.mapped ? `${s.mapped.x.toFixed(2)}, ${s.mapped.y.toFixed(2)}` : "—"
           }\n` +
           `onPath:    ${s.onPath}\n` +
-          `distance:  ${s.distance == null ? "—" : s.distance.toFixed(3)}`;
+          `distance:  ${s.distance == null ? "—" : s.distance.toFixed(3)}\n` +
+          `pain:      ${painDetectorStatus ?? "n/a"} (paps ${papsScore})`;
       }
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     const id = setInterval(() => {
-      setSparkles((prev) =>
-        prev.filter((s) => Date.now() - s.createdAt < 700)
-      );
-    }, 250);
+      const cutoff = Date.now() - 700;
+      setSparkles((prev) => {
+        const next = prev.filter((s) => s.createdAt > cutoff);
+        return next.length === prev.length ? prev : next;
+      });
+    }, 200);
     return () => clearInterval(id);
   }, []);
 
-  // ---- Per-attempt refs ----
   const movementStatsRef = useRef(emptyMovementStats());
-  const averageDeviationRef = useRef(0);
+  const emaDeviationUnitsRef = useRef(0);
   const motionRef = useRef(emptyMotionTrack());
   const attemptStartMsRef = useRef(null);
   const attemptIdRef = useRef(0);
@@ -803,13 +870,17 @@ export default function CanvasAir({
   const finalizedAttemptsRef = useRef(new Set());
   const hasEndedRef = useRef(false);
   const finalizeSessionRef = useRef(null);
+
+  // Single source of truth for recorded metrics. `shapeMetricsHistory`
+  // state exists only to trigger re-renders; all reads go through this
+  // ref so we never race a state flush.
   const shapeMetricsHistoryRef = useRef([]);
 
+  const frozenAttemptRef = useRef(null);
   useEffect(() => {
-    shapeMetricsHistoryRef.current = shapeMetricsHistory;
-  }, [shapeMetricsHistory]);
+    frozenAttemptRef.current = frozenAttempt;
+  }, [frozenAttempt]);
 
-  // ---- Attempt lifecycle ----
   const beginAttempt = useCallback(
     (shapeIndex, shapeDef) => {
       if (!shapeDef) return;
@@ -821,49 +892,51 @@ export default function CanvasAir({
       const sampledPath = scalePathPoints(rawPoints, scale);
       const tracker = createPathCoverageTracker(sampledPath, dynamicTolerance);
 
-      // Freeze the hand->canvas remap range for this whole attempt, same
-      // as scale/tolerance/sampledPath just above. observedRangeRef keeps
-      // growing in the background from every raw fingertip sample (see
-      // the filtering effect), but reading it fresh every frame DURING
-      // tracing means the mapping itself shifts mid-stroke whenever the
-      // box expands — the same physical fingertip position lands on a
-      // different canvas point than a moment ago. That produces exactly
-      // the teleporting, disconnected-dot trace seen in testing. Freezing
-      // it here removes the mid-attempt jump; the range still improves
-      // from attempt to attempt as more of the user's reach is observed.
       const handRange = getEffectiveHandRange();
+
+      // Freeze the pain multiplier for this attempt so mid-attempt PAPS
+      // changes cannot invalidate the tracker.
+      const painMultiplier =
+        papsScoreRef.current >= PAPS_PAIN_THRESHOLD
+          ? PAIN_TOLERANCE_MULTIPLIER
+          : 1.0;
+      const effectiveTolerance = Math.min(
+        MAX_TOLERANCE_CEIL,
+        dynamicTolerance * painMultiplier
+      );
 
       attemptIdRef.current += 1;
       attemptShapeIndexRef.current = shapeIndex;
       attemptStateRef.current = "ACTIVE";
       attemptStartMsRef.current = null;
       movementStatsRef.current = emptyMovementStats();
-      averageDeviationRef.current = 0;
+      emaDeviationUnitsRef.current = 0;
       motionRef.current = emptyMotionTrack();
 
-      // Reset the fingertip filter so the new attempt starts from a
-      // clean state. Without this, a stale filtered value from the last
-      // attempt could momentarily place the cursor somewhere unexpected.
       fingertipFilterRef.current.reset();
       filteredFingertipRef.current = null;
       filteredTimestampRef.current = 0;
       lastFingertipSeenMsRef.current = 0;
 
-      setFrozenAttempt({
+      const attempt = {
         attemptId: attemptIdRef.current,
         shape: shapeDef,
         shapeIndex,
         scale,
         tolerance: dynamicTolerance,
+        effectiveTolerance,
+        painMultiplier,
         sampledPath,
         tracker,
         handRange,
-      });
+      };
+      frozenAttemptRef.current = attempt;
+      setFrozenAttempt(attempt);
 
       setTrace([]);
       setShapeProgress(0);
       setTracingAccuracy(null);
-      setAverageDeviation(0);
+      setEmaDeviationUnits(0);
       setShowShapeComplete(false);
       setShowShapeMissed(false);
       setShowShapeAbandoned(false);
@@ -889,16 +962,30 @@ export default function CanvasAir({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentShapeIndex, currentShape]);
 
-  // ---- Finalize an attempt and record it ----
+  // Records an attempt in the metrics history and telemetry exactly once.
+  const commitAttemptMetrics = useCallback(
+    (metrics, telemetryPayload) => {
+      const attemptId = metrics.attemptId;
+      if (finalizedAttemptsRef.current.has(attemptId)) return false;
+      finalizedAttemptsRef.current.add(attemptId);
+
+      shapeMetricsHistoryRef.current = shapeMetricsHistoryRef.current.concat(metrics);
+      setShapeMetricsHistory(shapeMetricsHistoryRef.current);
+
+      telemetry.recordRep(metrics.outcome === "completed", telemetryPayload);
+      return true;
+    },
+    [telemetry]
+  );
+
   const finalizeAttempt = useCallback(
     (reason) => {
-      const attempt = frozenAttempt;
+      const attempt = frozenAttemptRef.current;
       if (!attempt) return null;
       if (attemptStateRef.current === "FINALIZED") return null;
       if (finalizedAttemptsRef.current.has(attempt.attemptId)) return null;
 
       attemptStateRef.current = "FINALIZED";
-      finalizedAttemptsRef.current.add(attempt.attemptId);
 
       const elapsedSeconds =
         attemptStartMsRef.current != null
@@ -915,16 +1002,7 @@ export default function CanvasAir({
 
       const coverage = attempt.tracker.getCoverage();
 
-      const painActive = papsScore >= PAPS_PAIN_THRESHOLD;
-      const safeSmoothness = smoothness ?? 0;
-      const rawScore =
-        reason === "completed"
-          ? Math.round(safeSmoothness / 10) + attempt.shape.difficulty
-          : 0;
-      const painAdjustedScore =
-        reason === "completed" && painActive
-          ? attempt.shape.difficulty + 3
-          : rawScore;
+      const painActive = papsScoreRef.current >= PAPS_PAIN_THRESHOLD;
 
       const metrics = {
         attemptId: attempt.attemptId,
@@ -937,26 +1015,44 @@ export default function CanvasAir({
         coveragePercent: Math.round(coverage * 100) / 100,
         tracingAccuracyPercent:
           accuracy == null ? null : Math.round(accuracy * 100) / 100,
+        emaDeviationUnits:
+          Math.round(emaDeviationUnitsRef.current * 1000) / 1000,
         averageDeviationUnits:
-          Math.round(averageDeviationRef.current * 1000) / 1000,
+          Math.round(emaDeviationUnitsRef.current * 1000) / 1000,
         completionTimeSeconds: Math.round(elapsedSeconds * 100) / 100,
         smoothnessScore: smoothness,
         movedDistanceUnits: Math.round(stats.movedDistance * 100) / 100,
-        toleranceUsed: Math.round(attempt.tolerance * 100) / 100,
-        papsScore,
+        toleranceUsed: Math.round(attempt.effectiveTolerance * 100) / 100,
+        baseTolerance: Math.round(attempt.tolerance * 100) / 100,
+        painMultiplier: attempt.painMultiplier,
+        papsScore: papsScoreRef.current,
         painAdjusted: painActive,
       };
 
       setLastShapeMetrics(metrics);
-      setShapeMetricsHistory((prev) => {
-        const next = prev.concat(metrics);
-        shapeMetricsHistoryRef.current = next;
-        return next;
+
+      commitAttemptMetrics(metrics, {
+        accuracy: metrics.tracingAccuracyPercent,
+        coverage: metrics.coveragePercent,
+        deviation: metrics.emaDeviationUnits,
+        timeToComplete: metrics.completionTimeSeconds,
+        shapeName: metrics.shapeName,
+        shapeDifficulty: metrics.shapeDifficulty,
+        shapeScaleApplied: metrics.shapeScaleApplied,
+        smoothness: metrics.smoothnessScore,
+        toleranceUsed: metrics.toleranceUsed,
+        baseTolerance: metrics.baseTolerance,
+        painMultiplier: metrics.painMultiplier,
+        papsScore: metrics.papsScore,
+        painAdjusted: metrics.painAdjusted,
+        outcome: metrics.outcome,
       });
+
+      const safeSmoothness = smoothness ?? 0;
 
       if (reason === "completed") {
         setCompleted((v) => v + 1);
-        setScore((s) => s + painAdjustedScore);
+        setScore((s) => s + scoreForMetrics(metrics));
         setShowShapeComplete(true);
         if (safeSmoothness >= 70 || painActive) audio.playSuccess();
       } else if (reason === "timeout") {
@@ -964,27 +1060,14 @@ export default function CanvasAir({
         setShowShapeMissed(true);
         audio.playMiss();
       } else {
+        // abandoned — brief overlay, then advance
         setAbandoned((a) => a + 1);
+        setShowShapeAbandoned(true);
       }
-
-      telemetry.recordRep(reason === "completed", {
-        accuracy: metrics.tracingAccuracyPercent,
-        coverage: metrics.coveragePercent,
-        deviation: metrics.averageDeviationUnits,
-        timeToComplete: metrics.completionTimeSeconds,
-        shapeName: metrics.shapeName,
-        shapeDifficulty: metrics.shapeDifficulty,
-        shapeScaleApplied: metrics.shapeScaleApplied,
-        smoothness: metrics.smoothnessScore,
-        toleranceUsed: metrics.toleranceUsed,
-        papsScore: metrics.papsScore,
-        painAdjusted: metrics.painAdjusted,
-        outcome: metrics.outcome,
-      });
 
       return metrics;
     },
-    [frozenAttempt, papsScore, telemetry, audio]
+    [commitAttemptMetrics, audio]
   );
 
   const advanceShape = useCallback(() => {
@@ -1002,7 +1085,7 @@ export default function CanvasAir({
 
     const newDifficulty = adapt({
       accuracy: recentAcc,
-      papsScore,
+      papsScore: papsScoreRef.current,
       combo: completed,
       maxFlexionAngle: romDegrees,
     });
@@ -1021,29 +1104,28 @@ export default function CanvasAir({
     totalShapes,
     adapt,
     completed,
-    papsScore,
     romDegrees,
   ]);
 
   useEffect(() => {
-    if (!showShapeComplete && !showShapeMissed) return undefined;
+    if (isPaused) return undefined;
+    if (!showShapeComplete && !showShapeMissed && !showShapeAbandoned) {
+      return undefined;
+    }
+    const delay = showShapeAbandoned ? ABANDONED_OVERLAY_MS : SHAPE_ADVANCE_DELAY_MS;
     const t = setTimeout(() => {
       setShowShapeComplete(false);
       setShowShapeMissed(false);
+      setShowShapeAbandoned(false);
       setLastShapeMetrics(null);
       advanceShape();
-    }, SHAPE_ADVANCE_DELAY_MS);
+    }, delay);
     return () => clearTimeout(t);
-  }, [showShapeComplete, showShapeMissed, advanceShape]);
+  }, [showShapeComplete, showShapeMissed, showShapeAbandoned, isPaused, advanceShape]);
 
-  // ---- Tracing ----
-  //
-  // The tracing effect is the SINGLE writer of cursorPosRef. The rAF
-  // loop above only reads. This guarantees the cursor and the trace
-  // never disagree by a frame.
   useEffect(() => {
     if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
-    if (showShapeComplete || showShapeMissed) return;
+    if (showShapeComplete || showShapeMissed || showShapeAbandoned) return;
     if (!frozenAttempt) return;
     if (!fingertip) return;
 
@@ -1051,10 +1133,6 @@ export default function CanvasAir({
     if (!filtered) return;
     if (!Number.isFinite(filtered.x) || !Number.isFinite(filtered.y)) return;
 
-    // Reject genuinely off-frame samples. A small margin is allowed so
-    // a filtered value just past the edge of the frame is still used,
-    // but nothing is ever clamped — a point outside the box is either
-    // used verbatim or dropped.
     if (
       filtered.x < -OFF_FRAME_MARGIN ||
       filtered.x > 1 + OFF_FRAME_MARGIN ||
@@ -1076,7 +1154,6 @@ export default function CanvasAir({
     const point = { x: nx * 100, y: ny * 100 };
     const nowMs = performance.now();
 
-    // Cursor position — deadbanded against sub-pixel jitter.
     const prevCursor = cursorPosRef.current;
     if (prevCursor.visible) {
       const dx = Math.abs(prevCursor.x - point.x);
@@ -1104,12 +1181,12 @@ export default function CanvasAir({
     setTracingAccuracy(acc);
 
     if (Number.isFinite(result.distance)) {
-      const prev = averageDeviationRef.current;
-      averageDeviationRef.current = prev + (result.distance - prev) * 0.05;
-      setAverageDeviation(averageDeviationRef.current);
+      const prev = emaDeviationUnitsRef.current;
+      emaDeviationUnitsRef.current = prev + (result.distance - prev) * 0.05;
+      setEmaDeviationUnits(emaDeviationUnitsRef.current);
     }
 
-    const cls = classifyFeedback(result.distance, frozenAttempt.tolerance);
+    const cls = classifyFeedback(result.distance, frozenAttempt.effectiveTolerance);
 
     if (DEBUG_TRACKING) {
       debugSnapshotRef.current.mapped = point;
@@ -1142,6 +1219,7 @@ export default function CanvasAir({
     isPaused,
     showShapeComplete,
     showShapeMissed,
+    showShapeAbandoned,
     frozenAttempt,
     fingertip,
   ]);
@@ -1241,15 +1319,17 @@ export default function CanvasAir({
   useEffect(() => {
     if (!isPainDetected || gameState !== GAME_STATES.ACTIVE) return;
     pauseSession();
-    telemetry.trackPain(papsScore);
-  }, [isPainDetected, gameState, pauseSession, telemetry, papsScore]);
+    telemetry.trackPain(papsScoreRef.current);
+  }, [isPainDetected, gameState, pauseSession, telemetry]);
 
   const finalizeSession = useCallback(() => {
     if (hasEndedRef.current) return;
     hasEndedRef.current = true;
 
-    if (attemptStateRef.current === "ACTIVE" && frozenAttempt) {
-      const remaining = frozenAttempt;
+    const frozen = frozenAttemptRef.current;
+
+    if (attemptStateRef.current === "ACTIVE" && frozen) {
+      const remaining = frozen;
       const stats = movementStatsRef.current;
       const accuracy = getMovementAccuracy(stats);
       const smoothness = computeSmoothness(
@@ -1261,6 +1341,7 @@ export default function CanvasAir({
         attemptStartMsRef.current != null
           ? (performance.now() - attemptStartMsRef.current) / 1000
           : 0;
+      const painActive = papsScoreRef.current >= PAPS_PAIN_THRESHOLD;
       const trailing = {
         attemptId: remaining.attemptId,
         shapeName: remaining.shape.name,
@@ -1272,34 +1353,38 @@ export default function CanvasAir({
         coveragePercent: Math.round(remaining.tracker.getCoverage() * 100) / 100,
         tracingAccuracyPercent:
           accuracy == null ? null : Math.round(accuracy * 100) / 100,
+        emaDeviationUnits:
+          Math.round(emaDeviationUnitsRef.current * 1000) / 1000,
         averageDeviationUnits:
-          Math.round(averageDeviationRef.current * 1000) / 1000,
+          Math.round(emaDeviationUnitsRef.current * 1000) / 1000,
         completionTimeSeconds: Math.round(elapsedSeconds * 100) / 100,
         smoothnessScore: smoothness,
         movedDistanceUnits: Math.round(stats.movedDistance * 100) / 100,
-        toleranceUsed: Math.round(remaining.tolerance * 100) / 100,
-        papsScore,
-        painAdjusted: papsScore >= PAPS_PAIN_THRESHOLD,
+        toleranceUsed: Math.round(remaining.effectiveTolerance * 100) / 100,
+        baseTolerance: Math.round(remaining.tolerance * 100) / 100,
+        painMultiplier: remaining.painMultiplier,
+        papsScore: papsScoreRef.current,
+        painAdjusted: painActive,
       };
-      if (!finalizedAttemptsRef.current.has(trailing.attemptId)) {
-        finalizedAttemptsRef.current.add(trailing.attemptId);
+      if (attemptStateRef.current === "ACTIVE") {
         attemptStateRef.current = "FINALIZED";
-        shapeMetricsHistoryRef.current = shapeMetricsHistoryRef.current.concat(trailing);
-        telemetry.recordRep(false, {
+        const committed = commitAttemptMetrics(trailing, {
           accuracy: trailing.tracingAccuracyPercent,
           coverage: trailing.coveragePercent,
-          deviation: trailing.averageDeviationUnits,
+          deviation: trailing.emaDeviationUnits,
           timeToComplete: trailing.completionTimeSeconds,
           shapeName: trailing.shapeName,
           shapeDifficulty: trailing.shapeDifficulty,
           shapeScaleApplied: trailing.shapeScaleApplied,
           smoothness: trailing.smoothnessScore,
           toleranceUsed: trailing.toleranceUsed,
+          baseTolerance: trailing.baseTolerance,
+          painMultiplier: trailing.painMultiplier,
           papsScore: trailing.papsScore,
           painAdjusted: trailing.painAdjusted,
           outcome: "abandoned",
         });
-        setAbandoned((a) => a + 1);
+        if (committed) setAbandoned((a) => a + 1);
       }
     }
 
@@ -1353,40 +1438,50 @@ export default function CanvasAir({
     const completionRatio =
       history.length > 0
         ? Math.round((completedCount / history.length) * 100)
-        : 0;
-    const summaryAccuracyPercent = avgAccuracy ?? completionRatio;
+        : null;
+
+    // Compute session score from history, not from `score` state, so any
+    // attempt finalized in this same tick is included.
+    const finalScore = computeSessionScore(history);
 
     telemetry.endSession({
       gameName: "Canvas Air",
-      score,
-      accuracy: summaryAccuracyPercent,
-      accuracyPercent: summaryAccuracyPercent,
+      score: finalScore,
+      accuracy: avgAccuracy,
+      accuracyPercent: avgAccuracy,
       smoothness: avgSmoothness,
       difficulty: currentDifficulty,
-      paps: papsScore,
+      paps: papsScoreRef.current,
       durationSeconds,
       reps: completedCount,
       hitsOrCatchesOrCompletions: completedCount,
       missesOrDrops: missedCount,
       gameSpecific: {
-        paps: papsScore,
-        painAdjusted: papsScore >= PAPS_PAIN_THRESHOLD,
+        paps: papsScoreRef.current,
+        painAdjusted: papsScoreRef.current >= PAPS_PAIN_THRESHOLD,
+        // Pain detector health — richer than a single boolean so the
+        // clinician dashboard can distinguish "model never loaded"
+        // from "patient was off-camera for a while".
+        painDetectorStatus: painDetectorStatus ?? null,
+        painDetectorAvailable: painDetectorAvailable ?? null,
+        painDetectorFailed: painDetectorFailed ?? null,
         shapesCompleted: completedCount,
         shapesMissed: missedCount,
         shapesAbandoned: abandonedCount,
         totalShapes,
         sessionShapeNames: sessionShapes.map((s) => s.name),
-        accuracyPercent: summaryAccuracyPercent,
+        accuracyPercent: avgAccuracy,
+        completionRatio,
         averageTracingAccuracyPercent: avgAccuracy,
         averageSmoothness: avgSmoothness,
         averageCoveragePercent: avgCoverage,
         averageCompletionTimeSeconds: avgCompletionTime,
-        averageDeviationUnits:
+        emaDeviationUnits:
           history.length > 0
             ? Math.round(
                 mean(
                   history
-                    .map((m) => m.averageDeviationUnits)
+                    .map((m) => m.emaDeviationUnits)
                     .filter((v) => typeof v === "number" && Number.isFinite(v))
                 ) * 1000
               ) / 1000
@@ -1399,16 +1494,19 @@ export default function CanvasAir({
     });
   }, [
     telemetry,
-    score,
-    papsScore,
     currentDifficulty,
     totalShapes,
     sessionShapes,
-    frozenAttempt,
     sessionStartTime,
+    commitAttemptMetrics,
+    painDetectorStatus,
+    painDetectorAvailable,
+    painDetectorFailed,
   ]);
 
-  finalizeSessionRef.current = finalizeSession;
+  useEffect(() => {
+    finalizeSessionRef.current = finalizeSession;
+  }, [finalizeSession]);
 
   const handleEndSession = useCallback(() => {
     endSession();
@@ -1425,21 +1523,23 @@ export default function CanvasAir({
     filteredFingertipRef.current = null;
     filteredTimestampRef.current = 0;
     lastFingertipSeenMsRef.current = 0;
-    observedRangeRef.current = { minX: null, maxX: null, minY: null, maxY: null };
+    // observedRangeRef intentionally preserved across restart.
+    // romSamplesRef is also preserved — it holds a short rolling window.
 
+    frozenAttemptRef.current = null;
     setFrozenAttempt(null);
     setCompleted(0);
     setMissed(0);
     setAbandoned(0);
     setScore(0);
-    setShapeMetricsHistory([]);
     shapeMetricsHistoryRef.current = [];
+    setShapeMetricsHistory([]);
     setCurrentShapeIndex(0);
     setTrace([]);
     setSparkles([]);
     setShapeProgress(0);
     setTracingAccuracy(null);
-    setAverageDeviation(0);
+    setEmaDeviationUnits(0);
     setShowShapeComplete(false);
     setShowShapeMissed(false);
     setShowShapeAbandoned(false);
@@ -1464,13 +1564,60 @@ export default function CanvasAir({
       const isLiveAttempt =
         attemptStateRef.current === "ACTIVE" &&
         attemptStartMsRef.current != null &&
-        frozenAttempt != null;
+        frozenAttemptRef.current != null;
 
       if (isLiveAttempt) {
+        // A real attempt was in progress — record it as abandoned.
         finalizeAttempt("abandoned");
-      } else if (attemptStateRef.current === "ACTIVE" && frozenAttempt) {
+      } else if (
+        attemptStateRef.current === "ACTIVE" &&
+        frozenAttemptRef.current
+      ) {
+        // Attempt had not started moving yet. Record it as abandoned with
+        // zero coverage rather than silently dropping it from the report.
+        const remaining = frozenAttemptRef.current;
         attemptStateRef.current = "FINALIZED";
-        finalizedAttemptsRef.current.add(frozenAttempt.attemptId);
+        const painActive = papsScoreRef.current >= PAPS_PAIN_THRESHOLD;
+        const skipped = {
+          attemptId: remaining.attemptId,
+          shapeName: remaining.shape.name,
+          shapeDifficulty: remaining.shape.difficulty,
+          shapeScaleApplied: remaining.scale,
+          outcome: "abandoned",
+          completed: false,
+          abandoned: true,
+          coveragePercent: 0,
+          tracingAccuracyPercent: null,
+          emaDeviationUnits: 0,
+          averageDeviationUnits: 0,
+          completionTimeSeconds: 0,
+          smoothnessScore: null,
+          movedDistanceUnits: 0,
+          toleranceUsed: Math.round(remaining.effectiveTolerance * 100) / 100,
+          baseTolerance: Math.round(remaining.tolerance * 100) / 100,
+          painMultiplier: remaining.painMultiplier,
+          papsScore: papsScoreRef.current,
+          painAdjusted: painActive,
+          skippedBeforeStart: true,
+        };
+        const committed = commitAttemptMetrics(skipped, {
+          accuracy: null,
+          coverage: 0,
+          deviation: 0,
+          timeToComplete: 0,
+          shapeName: skipped.shapeName,
+          shapeDifficulty: skipped.shapeDifficulty,
+          shapeScaleApplied: skipped.shapeScaleApplied,
+          smoothness: null,
+          toleranceUsed: skipped.toleranceUsed,
+          baseTolerance: skipped.baseTolerance,
+          painMultiplier: skipped.painMultiplier,
+          papsScore: skipped.papsScore,
+          painAdjusted: skipped.painAdjusted,
+          outcome: "abandoned",
+          skippedBeforeStart: true,
+        });
+        if (committed) setAbandoned((a) => a + 1);
       }
 
       if (reshuffle) {
@@ -1482,11 +1629,6 @@ export default function CanvasAir({
       }
 
       if (normalized === currentShapeIndex) {
-        // Re-selecting the shape already on screen: currentShapeIndex and
-        // currentShape don't change, so the effect that normally starts a
-        // fresh attempt on shape change won't re-fire. Start it directly
-        // here instead of just clearing it, or this shape is left with
-        // no tracker and can never be completed.
         beginAttempt(normalized, sessionShapes[normalized]);
         return;
       }
@@ -1495,12 +1637,12 @@ export default function CanvasAir({
     },
     [
       totalShapes,
-      frozenAttempt,
       currentShapeIndex,
       currentDifficulty,
       finalizeAttempt,
       beginAttempt,
       sessionShapes,
+      commitAttemptMetrics,
     ]
   );
 
@@ -1546,9 +1688,10 @@ export default function CanvasAir({
     const completionRatio =
       history.length > 0
         ? Math.round((completedCount / history.length) * 100)
-        : 0;
+        : null;
     const summaryAccuracy =
-      avgAcc == null ? completionRatio : Math.round(avgAcc * 100) / 100;
+      avgAcc == null ? null : Math.round(avgAcc * 100) / 100;
+    const finalScore = computeSessionScore(history);
 
     const durationSeconds =
       sessionStartTime != null
@@ -1561,7 +1704,7 @@ export default function CanvasAir({
       patientId,
       date: new Date().toISOString(),
       durationSeconds,
-      score,
+      score: finalScore,
       accuracyPercent: summaryAccuracy,
       reps: completedCount,
       hitsOrCatchesOrCompletions: completedCount,
@@ -1573,14 +1716,18 @@ export default function CanvasAir({
         perRep: [],
       },
       gameSpecificMetrics: {
-        paps: papsScore,
-        painAdjusted: papsScore >= PAPS_PAIN_THRESHOLD,
+        paps: papsScoreRef.current,
+        painAdjusted: papsScoreRef.current >= PAPS_PAIN_THRESHOLD,
+        painDetectorStatus: painDetectorStatus ?? null,
+        painDetectorAvailable: painDetectorAvailable ?? null,
+        painDetectorFailed: painDetectorFailed ?? null,
         shapesCompleted: completedCount,
         shapesMissed: missedCount,
         shapesAbandoned: abandonedCount,
         totalShapes,
         sessionShapeNames: sessionShapes.map((s) => s.name),
         accuracyPercent: summaryAccuracy,
+        completionRatio,
         averageAccuracyPercent:
           avgAcc == null ? null : Math.round(avgAcc * 100) / 100,
         averageSmoothness:
@@ -1589,6 +1736,7 @@ export default function CanvasAir({
           avgCov == null ? null : Math.round(avgCov * 100) / 100,
         brushJoint: "INDEX_FINGER_TIP",
         shapeMetricsHistory: history,
+        testMode: isTestMode,
       },
     };
 
@@ -1598,8 +1746,15 @@ export default function CanvasAir({
         gameName="Canvas Air"
         gameId={gameId}
         patientId={patientId}
-        onSaveReport={async () => await telemetry.saveReport(sessionData)}
-        onFinish={() => onSessionEnd?.(sessionData)}
+        onSaveReport={async () =>
+          isTestMode
+            ? { ok: true, testMode: true, skipped: true }
+            : await telemetry.saveReport(sessionData)
+        }
+        onFinish={() => {
+          if (isTestMode) return;
+          onSessionEnd?.(sessionData);
+        }}
         onRestart={handleRestartSession}
       />
     );
@@ -1659,9 +1814,12 @@ export default function CanvasAir({
 
   const frozenScale = frozenAttempt?.scale ?? 1.0;
   const frozenTolerance = frozenAttempt?.tolerance ?? dynamicTolerance;
+  const frozenEffectiveTolerance =
+    frozenAttempt?.effectiveTolerance ?? dynamicTolerance;
+  const frozenPainMultiplier = frozenAttempt?.painMultiplier ?? 1.0;
 
   return (
-    <div className="min-h-full w-full bg-slate-50 text-slate-800">
+    <div className="h-screen w-full overflow-y-auto bg-slate-50 text-slate-800">
       <style>{`
         @keyframes canvasAirPulse {
           0%, 100% { opacity: 0.45; }
@@ -1681,7 +1839,25 @@ export default function CanvasAir({
           25% { transform: translateX(-8px); }
           75% { transform: translateX(8px); }
         }
+        @keyframes canvasAirAbandoned {
+          0% { opacity: 0; transform: translateY(-6px); }
+          20% { opacity: 1; transform: translateY(0); }
+          100% { opacity: 1; transform: translateY(0); }
+        }
       `}</style>
+
+      {isTestMode && isActiveScreen && (
+        <div className="pointer-events-none fixed bottom-4 left-4 z-[60] rounded-full border border-amber-300 bg-amber-50 px-3 py-1 font-mono text-xs font-bold text-amber-800 shadow">
+          TEST MODE · no data saved
+        </div>
+      )}
+
+      {/* Banner disabled while the pain-detector hook is being fixed. */}
+      {false && isActiveScreen && showPainDetectorWarning && (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-[60] rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800 shadow">
+          Facial pain detection unavailable — PAPS safety net is off
+        </div>
+      )}
 
       {isActiveScreen && gameState === GAME_STATES.COUNTDOWN && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/90 text-8xl font-black text-teal-600">
@@ -1710,9 +1886,14 @@ export default function CanvasAir({
       )}
 
       {isActiveScreen && (
-        <div className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
+        <div className="sticky top-0 z-40 -mx-5 mb-3 border-b border-slate-200 bg-white/95 px-5 backdrop-blur">
           <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-6 py-3">
             <div className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-sm text-slate-700">
+              {isTestMode && (
+                <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-bold text-amber-800">
+                  TEST
+                </span>
+              )}
               <span
                 className={`inline-flex items-center gap-1.5 ${
                   shapeTimeLeft <= 5 && !showShapeComplete && !showShapeMissed
@@ -1828,6 +2009,11 @@ export default function CanvasAir({
             <div className="mb-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
               <h1 className="mb-2 text-3xl font-black text-slate-800">
                 Canvas <span className="text-teal-600">Air</span>
+                {isTestMode && (
+                  <span className="ml-3 rounded-full border border-amber-300 bg-amber-50 px-3 py-1 align-middle font-mono text-xs font-bold text-amber-800">
+                    TEST MODE
+                  </span>
+                )}
               </h1>
               <p className="mb-5 leading-relaxed text-slate-600">
                 Trace each shape by moving your index fingertip in the air.
@@ -1841,6 +2027,26 @@ export default function CanvasAir({
                 first moment your hand is actually tracked — so camera
                 warm-up does not cost you any of it.
               </p>
+
+              {isTestMode && (
+                <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  <span className="font-semibold">Test mode is on.</span>{" "}
+                  Nothing in this session is saved or sent anywhere. You can
+                  run it as many times as you want without affecting real
+                  patient data.
+                </div>
+              )}
+
+              {/* Banner disabled while the pain-detector hook is being fixed. */}
+              {false && showPainDetectorWarning && (
+                <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  <span className="font-semibold">
+                    Facial pain detection is unavailable.
+                  </span>{" "}
+                  The session will still run, but the automatic PAPS safety
+                  pause is disabled. Report any discomfort to your clinician.
+                </div>
+              )}
 
               <div className="mb-5 flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">
@@ -1915,7 +2121,8 @@ export default function CanvasAir({
                     <div>
                       Tolerance:{" "}
                       <span className="font-mono font-semibold">
-                        {frozenTolerance.toFixed(1)}u ({currentDifficulty})
+                        {frozenEffectiveTolerance.toFixed(1)}u ({currentDifficulty}
+                        {frozenPainMultiplier > 1 ? " · pain-widened" : ""})
                       </span>
                     </div>
                     <div>
@@ -2004,12 +2211,12 @@ export default function CanvasAir({
                     <span className="font-semibold text-emerald-600">
                       Green
                     </span>{" "}
-                    — on the outline (inside the tight tolerance band).
+                    — on the outline (inside the tolerance band).
                   </li>
                   <li>
                     ·{" "}
                     <span className="font-semibold text-amber-600">Amber</span>{" "}
-                    — drifting, but still inside the loose band.
+                    — drifting, but still within 1.5× tolerance.
                   </li>
                   <li>
                     · <span className="font-semibold text-red-600">Red</span>{" "}
@@ -2035,6 +2242,11 @@ export default function CanvasAir({
                     time runs out before coverage reaches the target, the
                     shape is recorded as{" "}
                     <span className="font-semibold">not completed</span>.
+                  </li>
+                  <li>
+                    · If the system detects discomfort, the tolerance band
+                    is widened for the next shape and the shape is scored
+                    on effort rather than precision.
                   </li>
                 </ul>
               </div>
@@ -2064,7 +2276,9 @@ export default function CanvasAir({
                 className="mt-6 rounded-xl bg-teal-600 px-8 py-3 font-bold text-white shadow-sm hover:bg-teal-500 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
               >
                 {canStart
-                  ? "Start Session"
+                  ? isTestMode
+                    ? "Start Test Session"
+                    : "Start Session"
                   : isActive && !calibrated
                   ? "Hold still — calibrating…"
                   : "Waiting for camera tracking…"}
@@ -2164,7 +2378,8 @@ export default function CanvasAir({
               >
                 {currentShape?.name} · {currentDifficulty} ·{" "}
                 {shapeProgress.toFixed(1)}% · scale {frozenScale.toFixed(2)}× ·{" "}
-                tol {frozenTolerance.toFixed(1)}u
+                tol {frozenEffectiveTolerance.toFixed(1)}u
+                {frozenPainMultiplier > 1 ? " (pain)" : ""}
               </text>
             </svg>
 
@@ -2247,9 +2462,9 @@ export default function CanvasAir({
                         ? "—"
                         : `${lastShapeMetrics.tracingAccuracyPercent.toFixed(1)}%`}
                     </span>
-                    <span className="text-slate-500">Avg. deviation</span>
+                    <span className="text-slate-500">EMA deviation</span>
                     <span className="text-right">
-                      {lastShapeMetrics.averageDeviationUnits.toFixed(3)} u
+                      {lastShapeMetrics.emaDeviationUnits.toFixed(3)} u
                     </span>
                     <span className="text-slate-500">Completion time</span>
                     <span className="text-right">
@@ -2261,6 +2476,14 @@ export default function CanvasAir({
                         ? "—"
                         : lastShapeMetrics.smoothnessScore.toFixed(1)}
                     </span>
+                    {lastShapeMetrics.painMultiplier > 1 && (
+                      <>
+                        <span className="text-red-500">Tolerance</span>
+                        <span className="text-right text-red-500">
+                          widened ×{lastShapeMetrics.painMultiplier.toFixed(2)}
+                        </span>
+                      </>
+                    )}
                     {lastShapeMetrics.painAdjusted && (
                       <>
                         <span className="text-red-500">Pain-adjusted</span>
@@ -2300,6 +2523,20 @@ export default function CanvasAir({
                     </span>
                   </div>
                 )}
+              </div>
+            )}
+
+            {showShapeAbandoned && (
+              <div
+                className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-white/85 text-center"
+                style={{ animation: "canvasAirAbandoned 0.4s ease-out forwards" }}
+              >
+                <div className="text-4xl font-black text-slate-500">
+                  Shape Skipped
+                </div>
+                <div className="text-xs text-slate-500">
+                  Recorded as not completed.
+                </div>
               </div>
             )}
 

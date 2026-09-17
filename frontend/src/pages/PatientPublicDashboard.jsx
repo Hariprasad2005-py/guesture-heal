@@ -40,9 +40,14 @@ export default function PatientPublicDashboard() {
         return;
       }
 
-      setPatient(patientData);
-      setCurrentPatient(patientData);
-      setPublicPatientId(patientData.patientId);
+      const patientWithSessionCount = {
+  ...patientData,
+  validSessionCount: data.validSessionCount,
+};
+
+setPatient(patientWithSessionCount);
+setCurrentPatient(patientWithSessionCount);
+setPublicPatientId(patientData.patientId);
     } catch (err) {
       toast.error("Invalid Patient ID or session expired");
       navigate("/patient");
@@ -96,7 +101,7 @@ export default function PatientPublicDashboard() {
           <StatCard
             icon={Award}
             title="Sessions"
-            value={patient.totalSessions || 0}
+            value={patient.validSessionCount ?? 0}
             color="blue"
           />
           <StatCard

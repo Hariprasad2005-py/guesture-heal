@@ -101,21 +101,33 @@ export function useGameEngine({
     onRepCompleteRef.current?.(success, data);
     
     const isRepMode = totalReps > 0;
-    
-    if (isRepMode && currentRep >= totalReps) {
-      endSession();
-    } else {
-      setGameState(GAME_STATES.FEEDBACK);
-      setTimeout(() => {
-        if (gameState === GAME_STATES.COMPLETE) return;
-        setGameState(GAME_STATES.REST);
+
+    if (isRepMode) {
+      if (currentRep >= totalReps) {
+        endSession();
+      } else {
+        setGameState(GAME_STATES.FEEDBACK);
         setTimeout(() => {
           if (gameState === GAME_STATES.COMPLETE) return;
-          setCurrentRep(prev => prev + 1);
-          setGameState(GAME_STATES.ACTIVE);
-        }, restInterval);
-      }, 800);
+          setGameState(GAME_STATES.REST);
+          setTimeout(() => {
+            if (gameState === GAME_STATES.COMPLETE) return;
+            setCurrentRep(prev => prev + 1);
+            setGameState(GAME_STATES.ACTIVE);
+          }, restInterval);
+        }, 800);
+      }
     }
+    // Continuous/timer-driven games (totalReps <= 0, e.g. Rehab Slicer)
+    // deliberately stay in ACTIVE here — completeRep() is only used for
+    // telemetry/audio callbacks in that mode, and the game's own loop
+    // (not this rep state machine) paces spawning, movement and misses.
+    // Bouncing gameState to FEEDBACK/REST on every hit/miss, as the old
+    // unconditional branch did, killed RehabSlicer's requestAnimationFrame
+    // loop (gated on gameState === ACTIVE) for ~800ms + restInterval after
+    // every single slice or miss — which is why no fruit ever appeared to
+    // be falling: the loop was being stopped and restarted almost
+    // continuously.
   }, [gameState, currentRep, totalReps, restInterval, endSession]);
 
   // Countdown logic

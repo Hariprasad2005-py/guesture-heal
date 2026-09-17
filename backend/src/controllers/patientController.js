@@ -2,6 +2,7 @@
 const { validationResult } = require("express-validator");
 const mongoose = require("mongoose"); // ← Make sure this is here
 const Patient = require("../models/Patient");
+const Session = require("../models/Session");
 const { generateRehabPlan } = require("../utils/rehabPlanGenerator");
 
 // ... rest of the code ...
@@ -291,7 +292,12 @@ exports.getPublicPatient = async (req, res, next) => {
     if (!patient) {
       return res.status(404).json({ success: false, message: "Patient not found" });
     }
-    res.json({ success: true, patient });
+    const validSessionCount = await Session.countDocuments({
+      patientId: patient._id,
+      status: "completed",
+      accuracy: { $gte: Number(process.env.DAY_COMPLETION_ACCURACY_THRESHOLD ?? 0) },
+    });
+    res.json({ success: true, patient, validSessionCount });
   } catch (err) {
     next(err);
   }

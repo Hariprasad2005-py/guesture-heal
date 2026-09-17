@@ -607,6 +607,24 @@ export default function ReportsPage() {
         }
       }
 
+      // ─── 50% ACCURACY VALIDITY FILTER (client-side backstop) ───────────
+      // The live API endpoints (getReportsByPatient / getReportsByTherapist /
+      // getPublicReportsByPatient) already filter server-side. This exists
+      // only to cover the local/offline fallback path a few lines above
+      // (reportDB.getReports + normalizeLegacyLocalReport), which never
+      // goes through reportController.js and so can't be filtered there.
+      //
+      // Must run BEFORE the enrichment loop below, which coerces a missing/
+      // null performance.accuracy to displayed 0 -- filtering after that
+      // point would wrongly treat "accuracy not recorded" the same as a
+      // real 0% and exclude it too. Only a KNOWN accuracy < 50 is dropped;
+      // null/missing accuracy passes through untouched, same rule as the
+      // backend.
+      reportsData = reportsData.filter((r) => {
+        const acc = r?.performance?.accuracy;
+        return !(typeof acc === "number" && acc < 50);
+      });
+
       // ─── ENRICH REPORTS WITH THERAPIST DATA ────────────────────────────
       const patientLookupCache = new Map();
       async function lookupPatient(patientIdValue) {

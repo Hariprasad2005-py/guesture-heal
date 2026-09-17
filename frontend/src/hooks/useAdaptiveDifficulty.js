@@ -58,6 +58,11 @@ export function useAdaptiveDifficulty(initialDifficulty = "Beginner", options = 
       // session. null/undefined means "not measured yet" — treated as
       // not meeting any ROM gate, never as 0 degrees.
       maxFlexionAngle = null,
+      // Percentage of recent attempts that were misses (0-100). Optional —
+      // callers that don't track this (other games) get the previous
+      // accuracy-only behavior unchanged, since 0 never trips the new
+      // threshold below.
+      missRate = 0,
     } = {}) => {
       let index = difficultyIndexRef.current;
 
@@ -73,7 +78,11 @@ export function useAdaptiveDifficulty(initialDifficulty = "Beginner", options = 
         // the next level asks for — performance alone isn't enough,
         // matching the spec's "cloud height increases as ROM improves."
         if (romMet) index = nextIndex;
-      } else if (accuracy < 45 || papsScore > 5) {
+      } else if (accuracy < 45 || papsScore > 5 || missRate > 55) {
+        // missRate is a second, independent trigger for stepping down —
+        // a patient can have a middling accuracy but a recent run of
+        // misses (e.g. after a difficulty jump) that accuracy alone,
+        // averaged over the whole session, wouldn't catch quickly.
         index = Math.max(0, index - 1);
       }
 

@@ -19,6 +19,11 @@ export default function SkeletonOverlay({
   overallStatus = "ok",
   shoulderAngle = 0,
   containerRef,
+  // Optional wrist trajectory trail: an array of { x, y } points in 0-100
+  // percentage units (the same shape RehabSlicer's `trail` state already
+  // uses for its canvas-panel trail). Callers that don't pass this get
+  // identical rendering to before.
+  wristTrail = null,
 }) {
   const localContainerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -49,6 +54,36 @@ export default function SkeletonOverlay({
 
       const color =
         STATUS_COLORS[overallStatus] || STATUS_COLORS.ok;
+
+      // Wrist trajectory trail, drawn before the skeleton so the bones
+      // and joint dots render on top of it. wristTrail points are in
+      // 0-100 percentage units, so they're normalized to [0,1] here
+      // before reusing pointToCanvas (which already handles the same
+      // mirroring the skeleton points below rely on).
+      if (wristTrail && wristTrail.length > 1) {
+        context.save();
+        context.strokeStyle = "#22d3ee";
+        context.lineWidth = 3;
+        context.lineCap = "round";
+        context.lineJoin = "round";
+        context.globalAlpha = 0.5;
+        context.shadowBlur = 0;
+        context.beginPath();
+        wristTrail.forEach((point, index) => {
+          const canvasPoint = pointToCanvas(
+            { x: point.x / 100, y: point.y / 100 },
+            rect.width,
+            rect.height
+          );
+          if (index === 0) {
+            context.moveTo(canvasPoint.x, canvasPoint.y);
+          } else {
+            context.lineTo(canvasPoint.x, canvasPoint.y);
+          }
+        });
+        context.stroke();
+        context.restore();
+      }
 
       const bones = [
         ["leftShoulder", "rightShoulder"],
@@ -140,6 +175,7 @@ export default function SkeletonOverlay({
     overallStatus,
     shoulderAngle,
     poseData,
+    wristTrail,
   ]);
 
   return (

@@ -1,5 +1,5 @@
 // frontend/src/components/Layout.jsx
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate, NavLink, useLocation } from "react-router-dom";
 import { useAppStore } from "../store/appStore";
 import { Menu, X, LogOut, Users, Home, Activity, FileText, Gamepad2, User, UserRound, Calendar, Award, ClipboardList } from "lucide-react";
@@ -31,32 +31,35 @@ export default function Layout({ children }) {
   //  2. currentPatient is a real patient, but a DIFFERENT one than the
   //     URL says we're viewing → refetch and replace it with the right
   //     one, instead of leaving the old cached identity showing.
-  useEffect(() => {
-    if (!routePatientId || !routePatientId.startsWith("GH-") || token) return;
+  const publicSyncedIdRef = useRef(null); // declared above the effect
 
-    const cachedId = currentPatient?.patientId || publicPatientId;
-    if (cachedId === routePatientId) return; // already in sync
+useEffect(() => {
+  if (!routePatientId || !routePatientId.startsWith("GH-") || token) return;
 
-    let cancelled = false;
-    import("../utils/apiService").then(({ patientPublicApi }) => {
-      patientPublicApi
-        .getById(routePatientId)
-        .then((data) => {
-          if (cancelled || !data?.patient) return;
-          setCurrentPatient(data.patient);
-          useAppStore.getState().setPublicPatientId?.(data.patient.patientId);
-        })
-        .catch((err) => {
-          if (cancelled) return;
-          console.warn("[Layout] Failed to sync sidebar to route patient:", err);
-          setCurrentPatient(null);
-          useAppStore.getState().setPublicPatientId?.(null);
-        });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [routePatientId, currentPatient?.patientId, publicPatientId, token, setCurrentPatient]);
+  if (publicSyncedIdRef.current === routePatientId) return; // already fetched this route
+
+  let cancelled = false;
+  publicSyncedIdRef.current = routePatientId;
+  import("../utils/apiService").then(({ patientPublicApi }) => {
+    patientPublicApi
+      .getById(routePatientId)
+      .then((data) => {
+        if (cancelled || !data?.patient) return;
+        setCurrentPatient({ ...data.patient, validSessionCount: data.validSessionCount });
+        useAppStore.getState().setPublicPatientId?.(data.patient.patientId);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("[Layout] Failed to sync sidebar to route patient:", err);
+        setCurrentPatient(null);
+        useAppStore.getState().setPublicPatientId?.(null);
+        publicSyncedIdRef.current = null; // allow a retry on the next render
+      });
+  });
+  return () => {
+    cancelled = true;
+  };
+}, [routePatientId, token, setCurrentPatient]);
 
   // Determine user type
 const isPatient = (!token && (currentPatient || publicPatientId)) || (token && user?.patientId && !user?.role);  const isTherapist = token && user?.role === "therapist";
@@ -135,9 +138,9 @@ const isPatient = (!token && (currentPatient || publicPatientId)) || (token && u
             </span>
           </div>
           <div className="bg-white/70 rounded-lg p-2 text-center">
-            <span className="block text-slate-500">Sessions</span>
-            <span className="font-medium text-slate-800">{patient.totalSessions || 0}</span>
-          </div>
+  <span className="block text-slate-500">Sessions</span>
+  <span className="font-medium text-slate-800">{patient.validSessionCount ?? 0}</span>
+</div>
           <div className="bg-white/70 rounded-lg p-2 text-center">
             <span className="block text-slate-500">Accuracy</span>
             <span className="font-medium text-slate-800">{patient.averageAccuracy || 0}%</span>

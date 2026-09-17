@@ -303,7 +303,7 @@ function progressionMultiplier(day) {
 // the Patient schema / dashboard expect (exerciseId, name, sets, reps,
 // holdSeconds, description, videoUrl) — exerciseId here IS the gameId, so it
 // can be used directly to route into GameEngine (/games/:gameId).
-const GAMES_PER_DAY = 3;
+const GAMES_PER_DAY = 5;
 
 function generateRehabPlan(condition = "", painLevel = 3, affectedSide = "n/a") {
   // Previously this pulled clinical PT names from EXERCISE_LIBRARY via
