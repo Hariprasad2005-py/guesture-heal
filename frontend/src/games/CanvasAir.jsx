@@ -3,15 +3,6 @@
 // Canvas Air — air-painting rehabilitation game.
 //
 // ... (header comment unchanged) ...
-//
-// TEST MODE
-//   Append ?testMode to the URL, or pass the `testMode` prop, to run a
-//   fully local session. All telemetry calls become no-ops, no report
-//   is saved, and onSessionEnd is not invoked. The game itself behaves
-//   identically, so a tester can run a session any number of times
-//   without affecting real patient data. The telemetry hook itself is
-//   still mounted so hook order stays stable, but every method that
-//   would persist or transmit is short-circuited through a local shim.
 
 import {
   useCallback,
@@ -124,14 +115,6 @@ function remapNormalized(v, [lo, hi]) {
 const DEBUG_TRACKING =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).has("debugTracking");
-
-// Local test mode. Enabled by ?testMode in the URL, or by passing the
-// `testMode` prop. In test mode all telemetry writes/saves are skipped
-// so a session can be run any number of times without affecting real
-// patient data.
-const URL_TEST_MODE =
-  typeof window !== "undefined" &&
-  new URLSearchParams(window.location.search).has("testMode");
 
 // ============================================================
 // TOLERANCE (viewBox units)
@@ -433,26 +416,6 @@ function computeSessionScore(history) {
 }
 
 // ============================================================
-// TEST-MODE TELEMETRY SHIM
-//
-// Wraps the real telemetry object so hook order stays stable and the
-// rest of the component keeps the exact same call sites. Every method
-// that would persist or transmit becomes a no-op. Pure local helpers
-// (e.g. sessionId) are preserved so the summary screen still renders.
-// ============================================================
-function makeTestModeTelemetry(realTelemetry) {
-  const noop = () => {};
-  return {
-    ...realTelemetry,
-    recordRep: noop,
-    endSession: noop,
-    trackPain: noop,
-    startTracking: noop,
-    saveReport: async () => ({ ok: true, testMode: true }),
-  };
-}
-
-// ============================================================
 // PAIN DETECTOR BANNER GATING
 //
 // We only want to warn the patient/clinician when the PAPS safety net
@@ -491,10 +454,7 @@ export default function CanvasAir({
   onSessionEnd,
   patientId,
   gameId = "canvas-air",
-  testMode = false,
 }) {
-  const isTestMode = testMode || URL_TEST_MODE;
-
   const videoRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
 
@@ -519,13 +479,7 @@ export default function CanvasAir({
     endSession,
   } = engine;
 
-  const rawTelemetry = useSessionTelemetry(patientId, gameId);
-  // In test mode, every write/transmit method is a no-op. The hook is
-  // still called unconditionally so hook order is stable across renders.
-  const telemetry = useMemo(
-    () => (isTestMode ? makeTestModeTelemetry(rawTelemetry) : rawTelemetry),
-    [isTestMode, rawTelemetry]
-  );
+  const telemetry = useSessionTelemetry(patientId, gameId);
 
   const audio = useAudioFeedback(true);
 
@@ -1736,7 +1690,6 @@ export default function CanvasAir({
           avgCov == null ? null : Math.round(avgCov * 100) / 100,
         brushJoint: "INDEX_FINGER_TIP",
         shapeMetricsHistory: history,
-        testMode: isTestMode,
       },
     };
 
@@ -1746,13 +1699,8 @@ export default function CanvasAir({
         gameName="Canvas Air"
         gameId={gameId}
         patientId={patientId}
-        onSaveReport={async () =>
-          isTestMode
-            ? { ok: true, testMode: true, skipped: true }
-            : await telemetry.saveReport(sessionData)
-        }
+        onSaveReport={async () => await telemetry.saveReport(sessionData)}
         onFinish={() => {
-          if (isTestMode) return;
           onSessionEnd?.(sessionData);
         }}
         onRestart={handleRestartSession}
@@ -1846,12 +1794,6 @@ export default function CanvasAir({
         }
       `}</style>
 
-      {isTestMode && isActiveScreen && (
-        <div className="pointer-events-none fixed bottom-4 left-4 z-[60] rounded-full border border-amber-300 bg-amber-50 px-3 py-1 font-mono text-xs font-bold text-amber-800 shadow">
-          TEST MODE · no data saved
-        </div>
-      )}
-
       {/* Banner disabled while the pain-detector hook is being fixed. */}
       {false && isActiveScreen && showPainDetectorWarning && (
         <div className="pointer-events-none fixed bottom-4 right-4 z-[60] rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800 shadow">
@@ -1889,11 +1831,6 @@ export default function CanvasAir({
         <div className="sticky top-0 z-40 -mx-5 mb-3 border-b border-slate-200 bg-white/95 px-5 backdrop-blur">
           <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-6 py-3">
             <div className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-sm text-slate-700">
-              {isTestMode && (
-                <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-bold text-amber-800">
-                  TEST
-                </span>
-              )}
               <span
                 className={`inline-flex items-center gap-1.5 ${
                   shapeTimeLeft <= 5 && !showShapeComplete && !showShapeMissed
@@ -2009,11 +1946,6 @@ export default function CanvasAir({
             <div className="mb-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
               <h1 className="mb-2 text-3xl font-black text-slate-800">
                 Canvas <span className="text-teal-600">Air</span>
-                {isTestMode && (
-                  <span className="ml-3 rounded-full border border-amber-300 bg-amber-50 px-3 py-1 align-middle font-mono text-xs font-bold text-amber-800">
-                    TEST MODE
-                  </span>
-                )}
               </h1>
               <p className="mb-5 leading-relaxed text-slate-600">
                 Trace each shape by moving your index fingertip in the air.
@@ -2027,15 +1959,6 @@ export default function CanvasAir({
                 first moment your hand is actually tracked — so camera
                 warm-up does not cost you any of it.
               </p>
-
-              {isTestMode && (
-                <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                  <span className="font-semibold">Test mode is on.</span>{" "}
-                  Nothing in this session is saved or sent anywhere. You can
-                  run it as many times as you want without affecting real
-                  patient data.
-                </div>
-              )}
 
               {/* Banner disabled while the pain-detector hook is being fixed. */}
               {false && showPainDetectorWarning && (
@@ -2276,9 +2199,7 @@ export default function CanvasAir({
                 className="mt-6 rounded-xl bg-teal-600 px-8 py-3 font-bold text-white shadow-sm hover:bg-teal-500 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
               >
                 {canStart
-                  ? isTestMode
-                    ? "Start Test Session"
-                    : "Start Session"
+                  ? "Start Session"
                   : isActive && !calibrated
                   ? "Hold still — calibrating…"
                   : "Waiting for camera tracking…"}

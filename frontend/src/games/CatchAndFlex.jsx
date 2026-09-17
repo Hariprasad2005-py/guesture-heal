@@ -68,14 +68,6 @@ const OBJECT_TYPES = [
 // ============================================================
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-function makeLocalTestId() {
-  const uuid =
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `test-catch-flex-${uuid}`;
-}
-
 function difficultyToRadiusMultiplier(label) {
   if (label === "Advanced") return 0.8;
   if (label === "Intermediate") return 0.95;
@@ -123,7 +115,6 @@ export default function CatchAndFlex({
   onSessionEnd,
   patientId,
   gameId = "catch-flex",
-  isTestMode = false,
 }) {
   const videoRef = useRef(null);
   const [poseData, setPoseData] = useState(null);
@@ -144,9 +135,6 @@ export default function CatchAndFlex({
   const [handGestureLabel, setHandGestureLabel] = useState("unknown");
   const [basketCenterX, setBasketCenterX] = useState(50);
   const [isHandVisible, setIsHandVisible] = useState(false);
-  const [testSessionId, setTestSessionId] = useState(() =>
-    isTestMode ? makeLocalTestId() : null
-  );
 
   // ---- High-frequency refs (RAF reads only these; no setState per frame) ----
   const smoothedHandXRef = useRef(50);
@@ -656,67 +644,11 @@ export default function CatchAndFlex({
   }, [isPainDetected, gameState, pauseSession, telemetry, papsScore]);
 
   // ============================================================
-  // TEST MODE RESET
-  // ============================================================
-  const resetTestState = useCallback(() => {
-    setFruits([]);
-    setCaught(0);
-    setMissed(0);
-    setSpawned(0);
-    setStreak(0);
-    setBestStreak(0);
-    setScore(0);
-    setFlash(null);
-    setBasketTrail([]);
-    setRepData([]);
-    setReactionTimes([]);
-    setGestureStats({ correct: 0, total: 0 });
-    setHandGestureLabel("unknown");
-    setBasketCenterX(50);
-
-    smoothedHandXRef.current = 50;
-    basketCenterXRef.current = 50;
-    fruitsRef.current = [];
-    basketTrailRef.current = [];
-    handGestureRef.current = "unknown";
-    caughtRef.current = 0;
-    missedRef.current = 0;
-    spawnedRef.current = 0;
-    streakRef.current = 0;
-    bestStreakRef.current = 0;
-    scoreRef.current = 0;
-    reactionTimesRef.current = [];
-    gestureStatsRef.current = { correct: 0, total: 0 };
-    catchRadiusRef.current = BASKET_HALF * 1.05;
-    flashRef.current = null;
-
-    minAngleRef.current = null;
-    maxAngleRef.current = 0;
-    hasEndedRef.current = false;
-    painPausedRef.current = false;
-
-    metricsEngine.current = new MetricsEngine();
-    setTestSessionId(makeLocalTestId());
-  }, []);
-
-  useEffect(() => {
-    if (!isTestMode) return;
-    if (gameState === GAME_STATES.INSTRUCTIONS) {
-      resetTestState();
-    }
-  }, [isTestMode, gameState, resetTestState]);
-
-  // ============================================================
   // SESSION FINALIZATION
   // ============================================================
   const finalizeTelemetry = useCallback(() => {
     if (hasEndedRef.current) return;
     hasEndedRef.current = true;
-
-    if (isTestMode) {
-      console.info("[CatchAndFlex][TEST MODE] endSession skipped.");
-      return;
-    }
 
     const sessionStats = metricsEngine.current?.getSessionStats?.() || {};
     const rt = reactionTimesRef.current;
@@ -756,7 +688,7 @@ export default function CatchAndFlex({
         repData: sessionStats.reps || repData,
       },
     });
-  }, [telemetry, romDegrees, repData, isTestMode]);
+  }, [telemetry, romDegrees, repData]);
 
   useEffect(() => {
     if (gameState === GAME_STATES.COMPLETE) finalizeTelemetry();
@@ -780,10 +712,8 @@ export default function CatchAndFlex({
       ? Math.round((caughtRef.current / total) * 100)
       : 100;
 
-    const base = {
-      sessionId: isTestMode
-        ? testSessionId || makeLocalTestId()
-        : telemetry.sessionId,
+    return {
+      sessionId: telemetry.sessionId,
       gameId,
       patientId,
       date: new Date().toISOString(),
@@ -816,19 +746,7 @@ export default function CatchAndFlex({
         difficulty: currentDifficultyRef.current,
       },
     };
-
-    if (isTestMode) {
-      return {
-        ...base,
-        isTestMode: true,
-        sessionType: "test",
-        _note: "Test mode — not persisted to patient progress.",
-      };
-    }
-    return base;
   }, [
-    isTestMode,
-    testSessionId,
     telemetry.sessionId,
     gameId,
     patientId,
@@ -840,13 +758,6 @@ export default function CatchAndFlex({
   // ============================================================
   // SHARED UI PRIMITIVES
   // ============================================================
-  const TestModeBanner = () =>
-    isTestMode ? (
-      <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800 shadow-sm">
-        🧪 Test Mode — this session will not affect patient progress.
-      </div>
-    ) : null;
-
   const MetricChip = ({ icon: Icon, label, value, tone = "slate" }) => {
     const toneClasses = {
       slate: "bg-slate-50 text-slate-700 border-slate-200",
@@ -878,8 +789,6 @@ export default function CatchAndFlex({
     return (
       <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-slate-50 overflow-y-auto">
         <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8 pb-24">
-          <TestModeBanner />
-
           <div className="mb-6">
             <h1 className="text-3xl font-black tracking-tight text-slate-900 sm:text-4xl">
               🧺 Catch & Flex
@@ -961,13 +870,12 @@ export default function CatchAndFlex({
               <button
                 onClick={() => {
                   telemetry.startTracking();
-                  if (isTestMode) resetTestState();
                   startSession();
                 }}
                 disabled={!guidance.isReady || !isActive}
                 className="w-full rounded-2xl bg-gradient-to-r from-cyan-500 to-teal-500 px-8 py-4 text-base font-bold text-white shadow-md shadow-cyan-200 transition hover:from-cyan-400 hover:to-teal-400 disabled:cursor-not-allowed disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none"
               >
-                {isTestMode ? "Start Test Session" : "Start Session"}
+                Start Session
               </button>
             </div>
           </div>
@@ -984,17 +892,11 @@ export default function CatchAndFlex({
     return (
       <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-slate-50 overflow-y-auto">
         <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8 pb-24">
-          <TestModeBanner />
           <SessionSummary
             sessionData={sessionData}
             gameName="Catch & Flex"
             gameId={gameId}
-            onSaveReport={async () => {
-              if (isTestMode) {
-                return { ok: true, localOnly: true, isTestMode: true };
-              }
-              return await telemetry.saveReport(sessionData);
-            }}
+            onSaveReport={async () => await telemetry.saveReport(sessionData)}
             onFinish={() => {
               onSessionEnd?.(sessionData);
             }}
@@ -1010,8 +912,6 @@ export default function CatchAndFlex({
   return (
     <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-slate-50 overflow-y-auto">
       <div className="mx-auto max-w-[1500px] px-3 py-4 sm:px-6 lg:px-8 pb-12">
-        <TestModeBanner />
-
         {/* ============== TOP STATUS BAR (light theme) ============== */}
         <div className="mb-4 rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm backdrop-blur sm:p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1308,20 +1208,7 @@ export default function CatchAndFlex({
                     {handGestureLabel}
                   </span>
                 </div>
-                {isTestMode && (
-                  <div className="absolute bottom-2 right-2 rounded-md bg-white/90 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-700 shadow-sm">
-                    PAPS {papsScore}
-                  </div>
-                )}
               </div>
-
-              {/* Debug info — only in Test Mode */}
-              {isTestMode && (
-                <div className="absolute bottom-1 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900/80 px-2 py-1 font-mono text-[10px] text-white">
-                  radius {Math.round(catchRadiusRef.current)} · hand{" "}
-                  {Math.round(basketCenterX)} · fruits {fruits.length}
-                </div>
-              )}
             </div>
           </div>
         </div>
