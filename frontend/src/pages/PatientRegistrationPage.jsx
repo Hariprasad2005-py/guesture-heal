@@ -34,7 +34,6 @@ export default function PatientRegistrationPage() {
     condition: "",
     injuryType: "",
     emergencyContact: "",
-    assignedTherapist: "",
   });
 
   const handleChange = (e) => {
@@ -64,7 +63,6 @@ export default function PatientRegistrationPage() {
         condition: form.condition,
         injuryType: form.injuryType || "",
         emergencyContact: form.emergencyContact || "",
-        assignedTherapist: form.assignedTherapist || "",
       };
 
       const data = await patientPublicApi.selfRegister(payload);
@@ -306,30 +304,17 @@ export default function PatientRegistrationPage() {
                 </div>
               </div>
 
-              {/* Emergency Contact & Assigned Therapist */}
-              <div className="grid grid-cols-2 gap-4 mb-8">
-                <div>
-                  <label className={labelClass}>Emergency Contact</label>
-                  <input
-                    type="text"
-                    name="emergencyContact"
-                    value={form.emergencyContact}
-                    onChange={handleChange}
-                    placeholder="Name & Phone"
-                    className={inputClass}
-                  />
-                </div>
-                <div>
-                  <label className={labelClass}>Assigned Therapist (Optional)</label>
-                  <input
-                    type="text"
-                    name="assignedTherapist"
-                    value={form.assignedTherapist}
-                    onChange={handleChange}
-                    placeholder="Therapist name"
-                    className={inputClass}
-                  />
-                </div>
+              {/* Emergency Contact */}
+              <div className="mb-8">
+                <label className={labelClass}>Emergency Contact</label>
+                <input
+                  type="text"
+                  name="emergencyContact"
+                  value={form.emergencyContact}
+                  onChange={handleChange}
+                  placeholder="Name & Phone"
+                  className={inputClass}
+                />
               </div>
 
               <button
