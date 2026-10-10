@@ -18,6 +18,9 @@
     "@mediapipe/camera_utils": "^0.3.1675466862",
     "@mediapipe/hands": "^0.4.1675469240",
     "@mediapipe/pose": "^0.5.1675469404",
+    "dotenv": "^17.4.2",
+    "mongodb": "^7.6.0",
+    "pdfkit": "^0.20.2",
     "phaser": "^4.2.0"
   }
 }

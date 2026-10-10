@@ -13,6 +13,7 @@
   import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
   import SessionSummary from "../components/rehab/SessionSummary";
   import MetricsEngine from "../utils/metricsEngine";
+  import { researchLogger } from "../utils/researchLogger";
 
   const SESSION_SECONDS = 120;
 
@@ -238,6 +239,9 @@
     const gameStateRef = useRef(gameState);
     const isPausedRef = useRef(isPaused);
 
+    const poseDataRef = useRef(poseData);
+    poseDataRef.current = poseData;
+
     positionRef.current = position;
     velocityRef.current = velocity;
     shoulderAngleRef.current = shoulderAngle;
@@ -323,6 +327,10 @@
       const gameLoop = (timestamp) => {
         const delta = Math.min((timestamp - lastTime) / 16, 3);
         lastTime = timestamp;
+
+        // Research instrumentation (no-op unless ?research=1): this is the
+        // moment the game first reads the newest pose frame.
+        if (poseDataRef.current?.frameId) researchLogger.completeFrame(poseDataRef.current.frameId);
 
         const pos = positionRef.current;
 

@@ -1,5 +1,6 @@
 // frontend/src/hooks/useMediaPipeUpperBody.js
 import { useCallback, useEffect, useRef, useState } from "react";
+import { researchLogger } from "../utils/researchLogger";
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
@@ -111,6 +112,7 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
   const attachedVideoElRef = useRef(null);
   const frameCounterRef = useRef(0);
   const framesDeliveredRef = useRef(0);
+  const researchFrameIdRef = useRef(0);
 
   callbackRef.current = onPoseUpdate;
 
@@ -269,11 +271,21 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
           if (isNewFrame) {
             lastVideoTimeRef.current = currentVideo.currentTime;
 
+            const researchT0 = performance.now();
+            const researchFrameId = (researchFrameIdRef.current += 1);
+
             try {
-              const result = currentLandmarker.detectForVideo(currentVideo, performance.now());
+              const result = currentLandmarker.detectForVideo(currentVideo, researchT0);
               const landmarks = result?.landmarks?.[0];
+              const researchInferenceMs = performance.now() - researchT0;
 
               consecutiveErrorsRef.current = 0;
+
+              if (!landmarks) {
+                // Tracking failed on this frame: still a row, so the paper's
+                // detection rate has an honest denominator.
+                researchLogger.beginFrame(researchFrameId, researchT0, researchInferenceMs, null);
+              }
 
               if (landmarks) {
                 const raw = Object.fromEntries(
@@ -304,7 +316,10 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
                   rightElbowAngle: calcAngle(raw.rightShoulder, raw.rightElbow, raw.rightWrist),
                   maxShoulderAngle: Math.max(leftFlexion, rightFlexion),
                   timestamp: performance.now(),
+                  frameId: researchFrameId, // lets the game loop report when it consumed this frame
                 };
+
+                researchLogger.beginFrame(researchFrameId, researchT0, researchInferenceMs, data);
 
                 if (calibrationRef.current && !calibrationRef.current.done) {
                   calibrationRef.current.done = true;
@@ -359,6 +374,7 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
                 callbackRef.current?.(data);
               }
             } catch (err) {
+              researchLogger.beginFrame(researchFrameId, researchT0, performance.now() - researchT0, null);
               consecutiveErrorsRef.current += 1;
               if (import.meta.env.DEV) {
                 console.debug(

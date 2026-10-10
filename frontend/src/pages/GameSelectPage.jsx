@@ -133,6 +133,11 @@ export default function GameSelectPage() {
   // Production users never set this param, so nothing changes for them.
   const isTestMode = new URLSearchParams(window.location.search).get('test') === '1';
 
+  // RESEARCH MODE: window.__research only exists when the app was loaded with
+  // ?research=1, so this skips the daily-completion popup for data collection
+  // only. Normal users are unaffected.
+  const isResearchMode = typeof window !== 'undefined' && !!window.__research;
+
   // Sync fix: currentPatient can be empty on this page (direct nav, refresh,
   // new tab) even though we still know who the patient is via publicPatientId.
   // Re-fetch instead of silently rendering with no data, mirroring how
@@ -202,14 +207,14 @@ export default function GameSelectPage() {
 
     // Whole day already finished — don't let them re-enter through any
     // card; today's plan is done regardless of which game they tap.
-    if (isDayCompleted) {
+    if (isDayCompleted && !isResearchMode) {
       setCompletionNotice('day');
       return;
     }
 
     // This specific exercise is already done today, even though the day
     // as a whole isn't (other games in today's plan are still pending).
-    if (completedGameIds.has(gameId)) {
+    if (completedGameIds.has(gameId) && !isResearchMode) {
       setCompletionNotice('exercise');
       return;
     }
