@@ -1,3 +1,4 @@
+import { dlog } from "../utils/debug";
 // frontend/src/hooks/usePoseDetection.js
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -76,7 +77,7 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
       lastPositionRef.current = next;
       setPosition(next);
       setStatus("tracking");
-      console.log("[MP-PIPELINE][3-position] source=MOUSE (isMouseMode=true)", next);
+      dlog("[MP-PIPELINE][3-position] source=MOUSE (isMouseMode=true)", next);
     },
     [isMouseMode]
   );
@@ -193,7 +194,7 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
     // moving your hand, poseData isn't reaching this hook at all — the
     // bug is upstream (parent state wiring), not in this file.
     if (shouldLogEffect) {
-      console.log("[DEBUG-A] poseData received", {
+      dlog("[DEBUG-A] poseData received", {
         effectRun: effectRunCounterRef.current,
         timestamp: poseData?.timestamp,
         leftWrist: poseData?.raw?.leftWrist,
@@ -238,7 +239,7 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
 
     // [DEBUG-B] after visibility check
     if (shouldLog) {
-      console.log("[DEBUG-B] after visibility check", {
+      dlog("[DEBUG-B] after visibility check", {
         leftVisibility: leftVisibility.toFixed(3),
         leftPresence: raw.leftWrist?.presence, // logged only, not gated on
         leftVisible,
@@ -251,7 +252,7 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
 
   if (!leftVisible && !rightVisible) {
       if (shouldLog) {
-        console.log("[DEBUG-C] after side resolution", { selected: "none — both below threshold" });
+        dlog("[DEBUG-C] after side resolution", { selected: "none — both below threshold" });
       }
       // Apply the SAME grace period as the "no poseData.raw at all"
       // branch above, instead of instantly declaring "lost". A single
@@ -283,7 +284,7 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
 
     // [DEBUG-C] after side resolution
     if (shouldLog) {
-      console.log("[DEBUG-C] after side resolution", {
+      dlog("[DEBUG-C] after side resolution", {
         selected: side,
         raw: { x: wrist.x.toFixed(3), y: wrist.y.toFixed(3) },
         clamped: { x: clampedWrist.x.toFixed(3), y: clampedWrist.y.toFixed(3) },
@@ -307,7 +308,7 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
 
     // [DEBUG-D] before setPosition
     if (shouldLog) {
-      console.log("[DEBUG-D] before setPosition", {
+      dlog("[DEBUG-D] before setPosition", {
         target: { x: target.x.toFixed(2), y: target.y.toFixed(2) },
         previous: { x: previous.x.toFixed(2), y: previous.y.toFixed(2) },
         smoothed: { x: smoothed.x.toFixed(2), y: smoothed.y.toFixed(2) },
@@ -370,7 +371,7 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
   useEffect(() => {
     debugERunCounterRef.current += 1;
     if (debugERunCounterRef.current % LOG_EVERY_N_FRAMES === 0) {
-      console.log("[DEBUG-E] after state/render — returned position", {
+      dlog("[DEBUG-E] after state/render — returned position", {
         x: position.x.toFixed(2),
         y: position.y.toFixed(2),
       });

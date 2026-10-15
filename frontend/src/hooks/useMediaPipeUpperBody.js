@@ -1,5 +1,7 @@
+import { dlog } from "../utils/debug";
 // frontend/src/hooks/useMediaPipeUpperBody.js
 import { useCallback, useEffect, useRef, useState } from "react";
+import { researchLogger } from "../utils/researchLogger";
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
@@ -111,6 +113,7 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
   const attachedVideoElRef = useRef(null);
   const frameCounterRef = useRef(0);
   const framesDeliveredRef = useRef(0);
+  const researchFrameIdRef = useRef(0);
 
   callbackRef.current = onPoseUpdate;
 
@@ -225,7 +228,7 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
         setIsActive(true);
         setIsLoading(false);
 
-        console.log("[MP-PIPELINE][1-init] PoseLandmarker ready, detect loop starting");
+        dlog("[MP-PIPELINE][1-init] PoseLandmarker ready, detect loop starting");
 
         const detect = () => {
           if (!runningRef.current || cancelled) return;
@@ -269,11 +272,21 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
           if (isNewFrame) {
             lastVideoTimeRef.current = currentVideo.currentTime;
 
+            const researchT0 = performance.now();
+            const researchFrameId = (researchFrameIdRef.current += 1);
+
             try {
-              const result = currentLandmarker.detectForVideo(currentVideo, performance.now());
+              const result = currentLandmarker.detectForVideo(currentVideo, researchT0);
               const landmarks = result?.landmarks?.[0];
+              const researchInferenceMs = performance.now() - researchT0;
 
               consecutiveErrorsRef.current = 0;
+
+              if (!landmarks) {
+                // Tracking failed on this frame: still a row, so the paper's
+                // detection rate has an honest denominator.
+                researchLogger.beginFrame(researchFrameId, researchT0, researchInferenceMs, null);
+              }
 
               if (landmarks) {
                 const raw = Object.fromEntries(
@@ -304,7 +317,10 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
                   rightElbowAngle: calcAngle(raw.rightShoulder, raw.rightElbow, raw.rightWrist),
                   maxShoulderAngle: Math.max(leftFlexion, rightFlexion),
                   timestamp: performance.now(),
+                  frameId: researchFrameId, // lets the game loop report when it consumed this frame
                 };
+
+                researchLogger.beginFrame(researchFrameId, researchT0, researchInferenceMs, data);
 
                 if (calibrationRef.current && !calibrationRef.current.done) {
                   calibrationRef.current.done = true;
@@ -327,28 +343,28 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
                 framesDeliveredRef.current += 1;
                 frameCounterRef.current += 1;
                 if (frameCounterRef.current % LOG_EVERY_N_FRAMES === 0) {
-                  console.log("[MP-PIPELINE][1-raw-landmark] wrist raw", {
+                  dlog("[MP-PIPELINE][1-raw-landmark] wrist raw", {
                     frame: framesDeliveredRef.current,
                     leftWrist: { x: raw.leftWrist.x.toFixed(3), y: raw.leftWrist.y.toFixed(3), vis: raw.leftWrist.visibility.toFixed(2) },
                     rightWrist: { x: raw.rightWrist.x.toFixed(3), y: raw.rightWrist.y.toFixed(3), vis: raw.rightWrist.visibility.toFixed(2) },
                   });
 
-                  console.log("[MP-DIAG] video frame", {
+                  dlog("[MP-DIAG] video frame", {
                     videoCurrentTime: currentVideo.currentTime.toFixed(3),
                     videoWidth: currentVideo.videoWidth,
                     videoHeight: currentVideo.videoHeight,
                   });
-                  console.log("[MP-DIAG] left wrist", {
+                  dlog("[MP-DIAG] left wrist", {
                     x: raw.leftWrist.x.toFixed(3),
                     y: raw.leftWrist.y.toFixed(3),
                     inFrame: raw.leftWrist.x >= 0 && raw.leftWrist.x <= 1 && raw.leftWrist.y >= 0 && raw.leftWrist.y <= 1,
                   });
-                  console.log("[MP-DIAG] right wrist", {
+                  dlog("[MP-DIAG] right wrist", {
                     x: raw.rightWrist.x.toFixed(3),
                     y: raw.rightWrist.y.toFixed(3),
                     inFrame: raw.rightWrist.x >= 0 && raw.rightWrist.x <= 1 && raw.rightWrist.y >= 0 && raw.rightWrist.y <= 1,
                   });
-                  console.log("[MP-DIAG] confidence/presence", {
+                  dlog("[MP-DIAG] confidence/presence", {
                     leftVisibility: raw.leftWrist.visibility.toFixed(3),
                     leftPresence: raw.leftWrist.presence.toFixed(3),
                     rightVisibility: raw.rightWrist.visibility.toFixed(3),
@@ -359,6 +375,7 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
                 callbackRef.current?.(data);
               }
             } catch (err) {
+              researchLogger.beginFrame(researchFrameId, researchT0, performance.now() - researchT0, null);
               consecutiveErrorsRef.current += 1;
               if (import.meta.env.DEV) {
                 console.debug(

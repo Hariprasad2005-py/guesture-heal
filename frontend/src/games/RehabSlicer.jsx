@@ -13,6 +13,7 @@
   import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
   import SessionSummary from "../components/rehab/SessionSummary";
   import MetricsEngine from "../utils/metricsEngine";
+  import { researchLogger } from "../utils/researchLogger";
 
   const SESSION_SECONDS = 120;
 
@@ -238,6 +239,9 @@
     const gameStateRef = useRef(gameState);
     const isPausedRef = useRef(isPaused);
 
+    const poseDataRef = useRef(poseData);
+    poseDataRef.current = poseData;
+
     positionRef.current = position;
     velocityRef.current = velocity;
     shoulderAngleRef.current = shoulderAngle;
@@ -323,6 +327,10 @@
       const gameLoop = (timestamp) => {
         const delta = Math.min((timestamp - lastTime) / 16, 3);
         lastTime = timestamp;
+
+        // Research instrumentation (no-op unless ?research=1): this is the
+        // moment the game first reads the newest pose frame.
+        if (poseDataRef.current?.frameId) researchLogger.completeFrame(poseDataRef.current.frameId);
 
         const pos = positionRef.current;
 
@@ -586,10 +594,15 @@
                 startSession();
               }}
               disabled={!guidance.isReady || !isActive}
-              className="mt-6 rounded-xl bg-cyan-500 px-8 py-3 font-bold text-white hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500"
+              className="mt-6 rounded-xl bg-cyan-500 px-8 py-3 font-bold text-white hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300"
             >
               Start Session
             </button>
+            {(!guidance.isReady || !isActive) && (
+              <p className="mt-3 text-sm text-amber-300" role="status">
+                Start is locked: {!isActive ? "the camera is still starting." : guidance.message}
+              </p>
+            )}
           </div>
         </div>
       );
