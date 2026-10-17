@@ -12,6 +12,7 @@
   import { useAudioFeedback } from "../hooks/useAudioFeedback";
   import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
   import SessionSummary from "../components/rehab/SessionSummary";
+import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
   import MetricsEngine from "../utils/metricsEngine";
   import { researchLogger } from "../utils/researchLogger";
 
@@ -614,7 +615,8 @@
         gameId: gameId,
         patientId: patientId,
         date: new Date().toISOString(),
-        durationSeconds: SESSION_SECONDS - timeLeft,
+        durationSeconds: engine.elapsedSeconds,
+      moodChoice: engine.moodChoice,
         score: score,
         accuracyPercent: accuracy,
         romData: {
@@ -658,6 +660,7 @@
     // Active game state
     return (
       <div className="min-h-screen bg-[#0B1120] p-8 pt-24 text-white">
+        <SessionCheckpoint {...engine.checkpoint} />
         {gameState === GAME_STATES.COUNTDOWN && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-cyan-400">
             {countdown || "GO"}

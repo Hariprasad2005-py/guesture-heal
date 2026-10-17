@@ -12,6 +12,7 @@ import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
+import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 // Safety-net only. The REAL session-completion condition is finishing all
 // SESSION_TARGET_COUNT targets — see the targetIndex effect below. This
 // timer only protects against a session that somehow never resolves
@@ -1339,6 +1340,7 @@ export default function PrecisionReach({
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-[#060d1a] text-white overflow-hidden">
+      <SessionCheckpoint {...engine.checkpoint} />
       <style>{`
         @keyframes pulse-ring { 0%,100% { transform: scale(1) translate(-50%,-50%); opacity: 0.5; } 50% { transform: scale(1.22) translate(-50%,-50%); opacity: 0.9; } }
         @keyframes particleBurst {

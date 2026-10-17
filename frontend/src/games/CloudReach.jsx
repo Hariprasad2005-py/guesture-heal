@@ -22,6 +22,7 @@ import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import { healthApi } from "../utils/apiService";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
+import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import MetricsEngine from "../utils/metricsEngine";
 import ROMDisplay from "../components/rehab/ROMDisplay";
 import PainScoreIndicator from "../components/rehab/PainScoreIndicator";
@@ -1604,6 +1605,7 @@ export default function CloudReach({
         paddingBottom: "env(safe-area-inset-bottom, 0px)",
       }}
     >
+      <SessionCheckpoint {...engine.checkpoint} />
       {/* This wrapper is itself absolutely positioned and offset by
           shellHeaderOffset — it becomes the real containing block for
           every top-0/inset-0 child below, which padding could never do. */}

@@ -12,6 +12,7 @@ import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
+import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import MetricsEngine from "../utils/metricsEngine";
 
 // ============================================================
@@ -717,7 +718,8 @@ export default function CatchAndFlex({
       gameId,
       patientId,
       date: new Date().toISOString(),
-      durationSeconds: SESSION_SECONDS - timeLeft,
+      durationSeconds: engine.elapsedSeconds,
+      moodChoice: engine.moodChoice,
       score: scoreRef.current,
       accuracyPercent: finalAccuracy,
       romData: {
@@ -877,6 +879,11 @@ export default function CatchAndFlex({
               >
                 Start Session
               </button>
+              {(!guidance.isReady || !isActive) && (
+                <p className="mt-3 text-center text-sm text-amber-600" role="status">
+                  Start is locked: {!isActive ? "the camera is still starting." : guidance.message}
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -911,6 +918,7 @@ export default function CatchAndFlex({
   // ============================================================
   return (
     <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-slate-50 overflow-y-auto">
+      <SessionCheckpoint {...engine.checkpoint} />
       <div className="mx-auto max-w-[1500px] px-3 py-4 sm:px-6 lg:px-8 pb-12">
         {/* ============== TOP STATUS BAR (light theme) ============== */}
         <div className="mb-4 rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm backdrop-blur sm:p-4">

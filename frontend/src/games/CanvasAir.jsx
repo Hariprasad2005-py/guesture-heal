@@ -37,6 +37,7 @@ import {
 } from "../utils/svgPathSampler";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
+import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 
 // ============================================================
 // CONSTANTS
@@ -1768,6 +1769,7 @@ export default function CanvasAir({
 
   return (
     <div className="h-screen w-full overflow-y-auto bg-slate-50 text-slate-800">
+      <SessionCheckpoint {...engine.checkpoint} />
       <style>{`
         @keyframes canvasAirPulse {
           0%, 100% { opacity: 0.45; }
@@ -2204,6 +2206,11 @@ export default function CanvasAir({
                   ? "Hold still — calibrating…"
                   : "Waiting for camera tracking…"}
               </button>
+              {!guidance.isReady && (
+                <p className="mt-3 text-sm text-amber-600" role="status">
+                  Start is locked: {guidance.message}
+                </p>
+              )}
             </>
           )}
         </div>

@@ -1,4 +1,5 @@
 // frontend/src/games/PushWall.jsx
+import { OneEuro } from "../utils/oneEuro";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pause, Play, X } from "lucide-react";
 
@@ -11,6 +12,7 @@ import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
+import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import MetricsEngine from "../utils/metricsEngine";
 import PushDemo from "../components/rehab/PushDemo";
 import { createPushDetector, symmetryFromGap } from "../utils/pushDetector";
@@ -65,6 +67,13 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
 
   const detectorRef = useRef(createPushDetector());
   const [armAngle, setArmAngle] = useState(0);
+  const restRef = useRef({ left: null, right: null });
+  const handFiltRef = useRef({
+    left: { x: new OneEuro(0.6, 0.05), y: new OneEuro(0.6, 0.05) },
+    right: { x: new OneEuro(0.6, 0.05), y: new OneEuro(0.6, 0.05) },
+    lastL: { v: null },
+    lastR: { v: null },
+  });
   const minAngleRef = useRef(null);
   const maxAngleRef = useRef(0);
   const hasEndedRef = useRef(false);
@@ -274,8 +283,26 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
     const { raw } = poseData;
     // Elevation per arm (0 at rest). Falls back to 180 - flexion if the hook
     // did not supply it.
-    const leftElev = typeof poseData.leftElevation === "number" ? poseData.leftElevation : 180 - poseData.leftFlexion;
-    const rightElev = typeof poseData.rightElevation === "number" ? poseData.rightElevation : 180 - poseData.rightFlexion;
+    const leftRaw = typeof poseData.leftElevation === "number" ? poseData.leftElevation : 180 - poseData.leftFlexion;
+    const rightRaw = typeof poseData.rightElevation === "number" ? poseData.rightElevation : 180 - poseData.rightFlexion;
+    // Rest calibration: the camera/body never gives exactly 0 with arms down.
+    // Learn each arm's resting reading (lowest steady value) and subtract it,
+    // so "arms down" reads 0 and shoulder height still reads about 90.
+    const rest = restRef.current;
+    const learnRest = (side, v) => {
+      if (v >= 50) return;
+      if (rest[side] === null || v < rest[side]) rest[side] = v;
+      else rest[side] += 0.01 * (v - rest[side]);
+    };
+    learnRest("left", leftRaw);
+    learnRest("right", rightRaw);
+    const adjust = (v, r) => {
+      const base = Math.min(35, r ?? 0);
+      const a = Math.max(0, ((v - base) * 90) / (90 - base));
+      return a < 5 ? 0 : Math.min(180, a);
+    };
+    const leftElev = adjust(leftRaw, rest.left);
+    const rightElev = adjust(rightRaw, rest.right);
 
     // Mirror to match the mirrored camera preview (scale-x-[-1]), same
     // convention SkeletonOverlay uses for its own canvas draw.
@@ -286,7 +313,22 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
       ? { x: (1 - raw.rightWrist.x) * 100, y: raw.rightWrist.y * 100 }
       : null;
 
-    sceneRef.current?.setHandPositions(leftPct, rightPct);
+    // Steady the dots: One Euro filter plus a small dead zone so they do not
+    // shake while your hands are still, but still follow fast movement.
+    const hf = handFiltRef.current;
+    const steady = (pct, f, last) => {
+      if (!pct) { f.x.reset(); f.y.reset(); last.v = null; return null; }
+      const t = performance.now();
+      const x = f.x.filter(pct.x, t);
+      const y = f.y.filter(pct.y, t);
+      if (last.v && Math.hypot(x - last.v.x, y - last.v.y) < 0.35) return last.v;
+      last.v = { x, y };
+      return last.v;
+    };
+    sceneRef.current?.setHandPositions(
+      steady(leftPct, hf.left, hf.lastL),
+      steady(rightPct, hf.right, hf.lastR),
+    );
 
     const avgFlexion = (leftElev + rightElev) / 2;
     setArmAngle(Math.round(avgFlexion));
@@ -463,7 +505,8 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
       gameId,
       patientId,
       date: new Date().toISOString(),
-      durationSeconds: SESSION_SECONDS - timeLeft,
+      durationSeconds: engine.elapsedSeconds,
+      moodChoice: engine.moodChoice,
       score,
       accuracyPercent: accuracy,
       romData: {
@@ -503,6 +546,7 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
   // Active game state
   return (
     <div className="min-h-screen bg-[#0B1120] p-8 pt-24 text-white">
+      <SessionCheckpoint {...engine.checkpoint} />
       {gameState === GAME_STATES.COUNTDOWN && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-orange-400">
           {countdown || "GO"}

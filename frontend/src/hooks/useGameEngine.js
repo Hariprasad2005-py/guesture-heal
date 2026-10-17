@@ -12,6 +12,16 @@ export const GAME_STATES = {
   COMPLETE: 'complete'
 };
 
+// Adaptive session length. Shortly before the timer ends, the game pauses and
+// asks the patient how they feel. The PATIENT decides: add time, carry on, or
+// finish now. Nothing is changed automatically.
+export const CHECKPOINT = {
+  atSecondsLeft: 10,   // ask when this many seconds remain
+  extendSeconds: 30,   // time added by "I feel good"
+  maxExtensions: 2,    // at most this many extensions per session
+  minSessionSeconds: 40, // very short sessions (tests, warm-ups) are not interrupted
+};
+
 export function useGameEngine({
   totalReps = 10,
   restInterval = 2000,
@@ -28,6 +38,13 @@ export function useGameEngine({
   const [sessionStartTime, setSessionStartTime] = useState(null);
   const [elapsedTime, setElapsedTime] = useState(0);
 
+  const [checkpointOpen, setCheckpointOpen] = useState(false);
+  const [extendedSeconds, setExtendedSeconds] = useState(0);
+  const [moodChoice, setMoodChoice] = useState(null); // 'good' | 'ok' | 'tired' | null
+  const timeLeftRef = useRef(sessionLength);
+  const extensionsRef = useRef(0);
+  const checkpointDoneRef = useRef(false);
+
   const timerRef = useRef(null);
   const countdownRef = useRef(null);
   const repTimerRef = useRef(null);
@@ -37,6 +54,9 @@ export function useGameEngine({
   // functions that change identity every render, which was previously
   // causing the countdown effect below to restart its interval before
   // it ever ticked a full second.
+  const endSessionRef = useRef(null);
+  const checkpointOpenRef = useRef(false);
+  const sessionLengthRef = useRef(sessionLength);
   const onRepCompleteRef = useRef(onRepComplete);
   const onSessionCompleteRef = useRef(onSessionComplete);
 
@@ -48,10 +68,42 @@ export function useGameEngine({
     onSessionCompleteRef.current = onSessionComplete;
   }, [onSessionComplete]);
 
+  // One-second tick shared by the first start and every resume.
+  const tick = useCallback(() => {
+    const next = timeLeftRef.current - 1;
+    timeLeftRef.current = Math.max(0, next);
+    setTimeLeft(Math.max(0, next));
+    if (next <= 0) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+      endSessionRef.current?.();
+      return;
+    }
+    if (
+      next === CHECKPOINT.atSecondsLeft &&
+      !checkpointDoneRef.current &&
+      extensionsRef.current < CHECKPOINT.maxExtensions &&
+      sessionLengthRef.current >= CHECKPOINT.minSessionSeconds
+    ) {
+      checkpointDoneRef.current = true;
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+      setIsPaused(true);
+      setCheckpointOpen(true);
+    }
+  }, []);
+
   const startSession = useCallback(() => {
     setGameState(GAME_STATES.COUNTDOWN);
     setCountdown(3);
     setTimeLeft(sessionLength);
+    timeLeftRef.current = sessionLength;
+    sessionLengthRef.current = sessionLength;
+    extensionsRef.current = 0;
+    checkpointDoneRef.current = false;
+    setExtendedSeconds(0);
+    setMoodChoice(null);
+    setCheckpointOpen(false);
     setCurrentRep(1);
     setElapsedTime(0);
     setSessionStartTime(Date.now());
@@ -67,23 +119,14 @@ export function useGameEngine({
   }, []);
 
   const resumeSession = useCallback(() => {
+    if (checkpointOpenRef.current) return; // the checkpoint buttons decide, not Resume
     setIsPaused(false);
     setGameState(GAME_STATES.ACTIVE);
     // Restart timer
     if (timerRef.current) {
       clearInterval(timerRef.current);
     }
-    timerRef.current = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) {
-          clearInterval(timerRef.current);
-          timerRef.current = null;
-          endSession();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+    timerRef.current = setInterval(tick, 1000);
   }, []);
 
   const endSession = useCallback(() => {
@@ -92,8 +135,42 @@ export function useGameEngine({
       timerRef.current = null;
     }
     setGameState(GAME_STATES.COMPLETE);
+    setCheckpointOpen(false);
     onSessionCompleteRef.current?.();
   }, []);
+  endSessionRef.current = endSession;
+
+  useEffect(() => { checkpointOpenRef.current = checkpointOpen; }, [checkpointOpen]);
+
+  // Checkpoint answers ---------------------------------------------------
+  const closeCheckpointAndResume = useCallback(() => {
+    checkpointOpenRef.current = false;
+    setCheckpointOpen(false);
+    setIsPaused(false);
+    setGameState(GAME_STATES.ACTIVE);
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(tick, 1000);
+  }, [tick]);
+
+  const checkpointExtend = useCallback(() => {
+    setMoodChoice('good');
+    extensionsRef.current += 1;
+    checkpointDoneRef.current = false; // may ask again after this extension
+    timeLeftRef.current += CHECKPOINT.extendSeconds;
+    setTimeLeft(timeLeftRef.current);
+    setExtendedSeconds(x => x + CHECKPOINT.extendSeconds);
+    closeCheckpointAndResume();
+  }, [closeCheckpointAndResume]);
+
+  const checkpointContinue = useCallback(() => {
+    setMoodChoice('ok');
+    closeCheckpointAndResume();
+  }, [closeCheckpointAndResume]);
+
+  const checkpointFinish = useCallback(() => {
+    setMoodChoice('tired');
+    endSession();
+  }, [endSession]);
 
   const completeRep = useCallback((success, data = {}) => {
     if (gameState !== GAME_STATES.ACTIVE) return;
@@ -144,17 +221,7 @@ export function useGameEngine({
             countdownRef.current = null;
             setGameState(GAME_STATES.ACTIVE);
             // Start timer
-            timerRef.current = setInterval(() => {
-              setTimeLeft(prev => {
-                if (prev <= 1) {
-                  clearInterval(timerRef.current);
-                  timerRef.current = null;
-                  endSession();
-                  return 0;
-                }
-                return prev - 1;
-              });
-            }, 1000);
+            timerRef.current = setInterval(tick, 1000);
             return 0;
           }
           return c - 1;
@@ -168,7 +235,7 @@ export function useGameEngine({
         }
       };
     }
-  }, [gameState, endSession]);
+  }, [gameState, endSession, tick]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -184,6 +251,18 @@ export function useGameEngine({
     currentRep,
     countdown,
     timeLeft,
+    // Seconds actually played, including any time the patient added.
+    elapsedSeconds: Math.max(0, sessionLength + extendedSeconds - timeLeft),
+    extendedSeconds,
+    moodChoice,
+    checkpoint: {
+      open: checkpointOpen,
+      secondsLeft: timeLeft,
+      extendSeconds: CHECKPOINT.extendSeconds,
+      onExtend: checkpointExtend,
+      onContinue: checkpointContinue,
+      onFinish: checkpointFinish,
+    },
     isPaused,
     sessionStartTime,
     elapsedTime,

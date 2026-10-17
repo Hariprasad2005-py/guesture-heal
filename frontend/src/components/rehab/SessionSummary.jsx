@@ -8,6 +8,32 @@ import { useAppStore } from '../../store/appStore';
 // Keys already surfaced as their own dedicated stat cards above (PAPS,
 // Avg Response) when present. They're excluded from the generic Game
 // Details key/value grid below so the same number isn't shown twice.
+// Plain-language labels for game-specific metrics. Keys not listed here fall
+// back to the old auto-split of the camelCase key. Several keys had misleading
+// auto-labels (e.g. "avgSwipeSpeed" is points per swipe, not a speed).
+const METRIC_LABELS = {
+  avgSwipeSpeed: 'Points per swipe',
+  avgMovementVelocity: 'Avg slice speed (game units)',
+  missRate: 'Miss rate (%)',
+  totalSuccessfulSlices: 'Successful slices',
+  totalSwipes: 'Total swipes',
+  longestHitStreak: 'Longest hit streak',
+};
+const metricLabel = (key) =>
+  METRIC_LABELS[key] || key.replace(/([A-Z])/g, ' $1').trim();
+
+// One short, kind line with a single stat. Never negative.
+function kindMessage(d) {
+  const acc = d.accuracyPercent ?? 0;
+  const reps = d.reps ?? 0;
+  const mood = d.moodChoice ?? d.gameSpecificMetrics?.moodChoice;
+  if (mood === 'tired') return `Good call listening to your body. You still did ${reps} reps today.`;
+  if (reps <= 0) return 'Every session counts. See you next time!';
+  if (acc >= 85) return `Excellent work! ${reps} reps with ${acc}% accuracy.`;
+  if (acc >= 60) return `Great job! You finished ${reps} reps.`;
+  return `Well done for showing up. ${reps} reps completed.`;
+}
+
 const KEYS_SHOWN_AS_DEDICATED_STATS = ['paps', 'avgResponseTimeSeconds', 'bestCombo', 'longestHitStreak'];
 
 export default function SessionSummary({
@@ -141,6 +167,7 @@ export default function SessionSummary({
       <div className="text-center mb-8">
         <h1 className="text-4xl font-black mb-2">🎯 Session Complete!</h1>
         <p className="text-slate-400">{gameName || 'Rehab Game'}</p>
+        <p className="mt-3 text-lg text-emerald-300">{kindMessage(sessionData)}</p>
       </div>
 
       {/* Below-threshold discard notice */}
@@ -233,7 +260,7 @@ export default function SessionSummary({
               .map(([key, value]) => (
                 <div key={key} className="flex justify-between py-2 border-b border-slate-800 last:border-0">
                   <span className="text-slate-400 text-sm capitalize">
-                    {key.replace(/([A-Z])/g, ' $1').trim()}
+                    {metricLabel(key)}
                   </span>
                   <span className="font-medium">
                     {typeof value === 'boolean' ? (value ? 'Yes' : 'No') : (value ?? '—')}
