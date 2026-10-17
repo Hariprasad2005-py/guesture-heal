@@ -1,8 +1,14 @@
 import { dlog } from "../utils/debug";
 // frontend/src/hooks/usePoseDetection.js
 import { useCallback, useEffect, useRef, useState } from "react";
+import { OneEuro } from "../utils/oneEuro";
+import { createRestCalibrator } from "../utils/armElevation";
 
-const SMOOTHING_ALPHA = 0.3;
+// Cursor smoothing: One Euro filter (steady when still, quick when moving)
+// plus a tiny dead zone. Replaces the old fixed 0.3 blend, which lagged.
+const CURSOR_MIN_CUTOFF = 1.2;
+const CURSOR_BETA = 0.08;
+const CURSOR_DEADZONE = 0.25; // percent of the frame
 const VISIBILITY_THRESHOLD = 0.4;
 const LOST_TIMEOUT_MS = 1200;
 const NEVER_TRACKED_STATUS = "never_tracked";
@@ -52,6 +58,8 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
   const [rightShoulderAngle, setRightShoulderAngle] = useState(null);
 
   const lastPositionRef = useRef({ x: 50, y: 50 });
+  const cursorFilterRef = useRef({ x: new OneEuro(CURSOR_MIN_CUTOFF, CURSOR_BETA), y: new OneEuro(CURSOR_MIN_CUTOFF, CURSOR_BETA) });
+  const restRef = useRef(createRestCalibrator());
   const lastTimestampRef = useRef(performance.now());
   const lastPoseTimestampRef = useRef(0);
   const angleHistoryRef = useRef([]);
@@ -272,13 +280,17 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
       return;
     }
 
-    const side = resolveActiveSide(
-      raw,
-      leftVisible,
-      rightVisible,
-      poseData.leftShoulderAngle,
-      poseData.rightShoulderAngle
-    );
+    // Per-arm angle: rest-calibrated elevation (0 down, 90 shoulder height,
+    // 180 overhead) from 3D landmarks. Falls back to the old 2D angle only
+    // if the elevation is not supplied.
+    const leftA = typeof poseData.leftElevation === "number"
+      ? restRef.current.update("left", poseData.leftElevation)
+      : poseData.leftShoulderAngle;
+    const rightA = typeof poseData.rightElevation === "number"
+      ? restRef.current.update("right", poseData.rightElevation)
+      : poseData.rightShoulderAngle;
+
+    const side = resolveActiveSide(raw, leftVisible, rightVisible, leftA, rightA);
     const wrist = side === "left" ? raw.leftWrist : raw.rightWrist;
     const clampedWrist = { x: clamp01(wrist.x), y: clamp01(wrist.y) };
 
@@ -301,10 +313,12 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
     const now = performance.now();
     const dt = Math.max((now - lastTimestampRef.current) / 1000, 1 / 60);
 
-    const smoothed = {
-      x: previous.x + (target.x - previous.x) * SMOOTHING_ALPHA,
-      y: previous.y + (target.y - previous.y) * SMOOTHING_ALPHA,
-    };
+    const fx = cursorFilterRef.current.x.filter(target.x, now);
+    const fy = cursorFilterRef.current.y.filter(target.y, now);
+    const smoothed =
+      Math.hypot(fx - previous.x, fy - previous.y) < CURSOR_DEADZONE
+        ? previous
+        : { x: fx, y: fy };
 
     // [DEBUG-D] before setPosition
     if (shouldLog) {
@@ -336,31 +350,19 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
     // about which arm is active. Falls back to maxShoulderAngle only if
     // the per-side value isn't available (shouldn't normally happen once
     // useMediaPipeUpperBody has emitted per-side angles).
-    const sideAngle = side === "left" ? poseData.leftShoulderAngle : poseData.rightShoulderAngle;
+    const sideAngle = side === "left" ? leftA : rightA;
     const angle =
       typeof sideAngle === "number" && Number.isFinite(sideAngle)
         ? sideAngle
         : poseData.maxShoulderAngle || 0;
     setRawAngle(angle);
 
-    angleHistoryRef.current = [...angleHistoryRef.current, angle].slice(-5);
-    const avgAngle =
-      angleHistoryRef.current.reduce((a, b) => a + b, 0) / angleHistoryRef.current.length;
-    setSmoothAngle(avgAngle);
-    setShoulderAngle(avgAngle);
-
-    if (typeof poseData.leftShoulderAngle === "number") {
-      leftAngleHistoryRef.current = [...leftAngleHistoryRef.current, poseData.leftShoulderAngle].slice(-5);
-      const avgLeft =
-        leftAngleHistoryRef.current.reduce((a, b) => a + b, 0) / leftAngleHistoryRef.current.length;
-      setLeftShoulderAngle(avgLeft);
-    }
-    if (typeof poseData.rightShoulderAngle === "number") {
-      rightAngleHistoryRef.current = [...rightAngleHistoryRef.current, poseData.rightShoulderAngle].slice(-5);
-      const avgRight =
-        rightAngleHistoryRef.current.reduce((a, b) => a + b, 0) / rightAngleHistoryRef.current.length;
-      setRightShoulderAngle(avgRight);
-    }
+    // The angle is already filtered upstream (One Euro) and rest-calibrated,
+    // so no extra averaging here (the old 5-sample average added ~200 ms lag).
+    setSmoothAngle(angle);
+    setShoulderAngle(angle);
+    if (typeof leftA === "number") setLeftShoulderAngle(leftA);
+    if (typeof rightA === "number") setRightShoulderAngle(rightA);
   }, [poseData, isMouseMode, resolveActiveSide, hasTrackedOnce]);
 
   // [DEBUG-E] after state/render — runs once React has actually committed

@@ -13,6 +13,7 @@
   import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
   import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
+import HowToPlay from "../components/rehab/HowToPlay";
   import MetricsEngine from "../utils/metricsEngine";
   import { researchLogger } from "../utils/researchLogger";
 
@@ -558,10 +559,22 @@ import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
         <div className="min-h-screen bg-[#0B1120] p-8 text-white">
           <div className="max-w-4xl mx-auto">
             <h1 className="mb-2 text-3xl font-black">🍉 Rehab Slicer</h1>
-            <p className="mb-6 text-slate-400">
-              Slice the falling fruit with your hand movement! Each fruit must be sliced
-              before it falls off screen. One fruit at a time — accuracy matters!
-            </p>
+            <p className="mb-6 text-slate-400">Slice each falling fruit with a quick swipe of your hand.</p>
+            <HowToPlay
+              variant="slice"
+              caption="Swipe through the fruit"
+              steps={[
+                "Sit back so your shoulders show on the camera.",
+                "A fruit falls. Swipe your hand quickly through it.",
+                "Slice it before it drops off the screen. One fruit at a time.",
+              ]}
+              scoring={[
+                "Each slice scores 10 points plus a bonus that grows with your streak.",
+                "A missed fruit resets your streak.",
+                "A slow wave does not count. Use a quick, clear swipe toward the fruit.",
+              ]}
+              trains="shoulder and arm movement, and speed control."
+            />
 
             <div className="relative overflow-hidden rounded-2xl border-4 border-slate-800 aspect-video">
               <video

@@ -13,6 +13,7 @@ import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
+import HowToPlay from "../components/rehab/HowToPlay";
 import MetricsEngine from "../utils/metricsEngine";
 
 // ============================================================
@@ -795,11 +796,25 @@ export default function CatchAndFlex({
             <h1 className="text-3xl font-black tracking-tight text-slate-900 sm:text-4xl">
               🧺 Catch & Flex
             </h1>
-            <p className="mt-2 text-slate-600">
-              Move your hand left and right to guide the basket. Catch the
-              falling objects — the basket follows your hand in real time.
-            </p>
+            <p className="mt-2 text-slate-600">Guide the basket with your hand and catch what falls.</p>
           </div>
+
+          <HowToPlay
+            theme="light"
+            variant="catch"
+            caption="The basket follows your hand"
+            steps={[
+              "Sit back so your shoulders show on the camera.",
+              "Move your hand left and right so the basket sits under the falling object.",
+              "Match your hand shape to the object (see below).",
+            ]}
+            scoring={[
+              "Every catch scores points, and catches in a row build a streak.",
+              "Objects that hit the floor count as a miss.",
+              "The wrong hand shape does not count as a catch.",
+            ]}
+            trains="shoulder and arm control, plus hand opening and closing."
+          />
 
           <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">

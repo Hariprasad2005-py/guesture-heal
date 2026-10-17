@@ -38,6 +38,7 @@ import {
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
+import HowToPlay from "../components/rehab/HowToPlay";
 
 // ============================================================
 // CONSTANTS
@@ -1950,17 +1951,20 @@ export default function CanvasAir({
                 Canvas <span className="text-teal-600">Air</span>
               </h1>
               <p className="mb-5 leading-relaxed text-slate-600">
-                Trace each shape by moving your index fingertip in the air.
-                The stroke is drawn in real time: green when it is on the
-                outline, red when it is far off. Your session has{" "}
-                <span className="font-semibold text-slate-800">
-                  {sessionShapes.length} shapes
-                </span>{" "}
-                at the {currentDifficulty.toLowerCase()} level. Each shape
-                has {SHAPE_TIME_LIMIT_SECONDS} seconds, counted from the
-                first moment your hand is actually tracked — so camera
-                warm-up does not cost you any of it.
+                Trace each shape in the air with your index finger.{" "}
+                <span className="font-semibold text-slate-800">{sessionShapes.length} shapes</span>
+                {" "}at the {currentDifficulty.toLowerCase()} level, {SHAPE_TIME_LIMIT_SECONDS} seconds each.
               </p>
+              <HowToPlay
+                theme="light"
+                variant="trace"
+                caption="Follow the dotted line"
+                steps={[
+                  "Show your hand to the camera. Your index fingertip is the pen.",
+                  "Move your fingertip along the dotted shape.",
+                  "Stay on the line: green means good, red means off the line.",
+                ]}
+              />
 
               {/* Banner disabled while the pain-detector hook is being fixed. */}
               {false && showPainDetectorWarning && (

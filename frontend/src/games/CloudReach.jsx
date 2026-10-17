@@ -23,6 +23,7 @@ import { healthApi } from "../utils/apiService";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
+import HowToPlay from "../components/rehab/HowToPlay";
 import MetricsEngine from "../utils/metricsEngine";
 import ROMDisplay from "../components/rehab/ROMDisplay";
 import PainScoreIndicator from "../components/rehab/PainScoreIndicator";
@@ -1639,11 +1640,30 @@ export default function CloudReach({
 
         {/* READY_CHECK */}
         {flow === FLOW.READY_CHECK && (
-          <div className="absolute inset-0 flex flex-col items-center pt-[calc(4rem+min(52vw,360px))] sm:pt-[26rem] px-4">
+          <div className="absolute inset-0 flex flex-col items-center overflow-y-auto pb-24 pt-[calc(4rem+min(52vw,360px))] sm:pt-[26rem] px-4">
             <h1 className="mb-1 text-2xl font-bold text-[#0F172A]">Cloud Reach Therapy</h1>
             <p className="mb-4 max-w-md text-center text-sm text-[#64748B]">
-              Reach up and hold each target when you're ready to begin. This is an exercise tool, not a medical device.
+              Reach to each cloud and pop it. This is an exercise tool, not a medical device.
             </p>
+            <div className="mb-4 w-full max-w-2xl">
+              <HowToPlay
+                theme="light"
+                variant="reach"
+                caption="Reach the cloud and hold"
+                steps={[
+                  "Sit back so your shoulders and hand show on the camera.",
+                  "A cloud appears. Reach your hand to it and hold still until it pops.",
+                  "Bring your hand back to the middle circle. The next cloud appears.",
+                ]}
+                scoring={[
+                  "Hold your hand on the cloud for about half a second to pop it.",
+                  "A cloud fades after 7 seconds if you do not reach it.",
+                  "Move smoothly. If you move too fast, the game asks you to slow down.",
+                  "Higher levels use smaller clouds in more directions.",
+                ]}
+                trains="reaching in all directions, control and smooth movement."
+              />
+            </div>
 
             <div
               className={`mb-4 max-w-md rounded-xl border px-4 py-2 text-center text-sm ${guidance.overallStatus === "ok" ? "border-[#16A34A]/30 bg-[#16A34A]/10 text-[#166534]" : "border-[#D97706]/30 bg-[#D97706]/10 text-[#92400E]"

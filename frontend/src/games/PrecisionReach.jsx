@@ -13,6 +13,7 @@ import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
+import HowToPlay from "../components/rehab/HowToPlay";
 // Safety-net only. The REAL session-completion condition is finishing all
 // SESSION_TARGET_COUNT targets — see the targetIndex effect below. This
 // timer only protects against a session that somehow never resolves
@@ -1183,19 +1184,21 @@ export default function PrecisionReach({
             </p>
           </div>
 
-          <div className="mb-8 grid grid-cols-3 gap-4">
-            {[
-              { icon: "✋", step: "1 · Move", desc: "Guide your white wrist dot to the colored target using real arm motion." },
-              { icon: "⏱", step: "2 · Hold", desc: "Keep your hand steady inside the target until the ring fills completely." },
-              { icon: "🏆", step: "3 · Repeat ×5", desc: "Five targets total, one direction at a time. Accuracy and PAPS tracked throughout." },
-            ].map(({ icon, step, desc }) => (
-              <div key={step} className="flex flex-col items-center gap-3 rounded-2xl border border-cyan-500/20 bg-slate-900/60 p-5 text-center backdrop-blur">
-                <span className="text-4xl">{icon}</span>
-                <div className="text-sm font-bold text-cyan-300">{step}</div>
-                <p className="text-xs text-slate-400 leading-relaxed">{desc}</p>
-              </div>
-            ))}
-          </div>
+          <HowToPlay
+            variant="target"
+            caption="Move into the target and hold"
+            steps={[
+              "Sit back so your shoulders show on the camera.",
+              "Move your white dot into the colored target with your arm.",
+              "Hold still until the ring fills. Do this for 5 targets.",
+            ]}
+            scoring={[
+              "A target counts when you hold the dot inside it until the ring is full.",
+              "Five targets, one in each direction, so you reach every way.",
+              "PAPS is a pain-adjusted score. If discomfort is detected, the session pauses.",
+            ]}
+            trains="shoulder reach in every direction, and holding steady."
+          />
 
           <div className="mb-8 grid grid-cols-2 gap-6">
             <div>
