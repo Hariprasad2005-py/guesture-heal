@@ -7,6 +7,7 @@ import RehabSlicer from '../games/RehabSlicer';
 import CatchAndFlex from '../games/CatchAndFlex';
 import CanvasAir from '../games/CanvasAir';
 import CloudReach from '../games/CloudReach';
+import PushWall from '../games/PushWall';
 import { GAME_IDS, GAME_DISPLAY_NAMES } from '../constants/games';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 
@@ -16,6 +17,7 @@ const GAME_COMPONENTS = {
   [GAME_IDS.CATCH_FLEX]: CatchAndFlex,
   [GAME_IDS.CANVAS_AIR]: CanvasAir,
   [GAME_IDS.CLOUD_REACH]: CloudReach,
+  [GAME_IDS.PUSH_WALL]: PushWall,
 };
 
 const GameEngine = () => {
@@ -129,7 +131,8 @@ const GameEngine = () => {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 relative overflow-hidden">        <GameComponent
+      <div className="flex-1 min-h-0 relative overflow-y-auto overflow-x-hidden">
+        <GameComponent
           onSessionEnd={handleSessionEnd}
           onBack={() => navigate('/games')}
           patientId={patientId || 'guest'}

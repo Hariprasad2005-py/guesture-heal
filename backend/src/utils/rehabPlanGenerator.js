@@ -231,6 +231,11 @@ const GAMES_LIBRARY = {
     name: "Rehab Slicer",
     description: "Swipe through falling objects to build wrist/forearm mobility and coordination.",
   },
+  "push-wall": {
+    gameId: "push-wall",
+    name: "Push Wall",
+    description: "Push both arms forward together to break blocks, building shoulder flexion and left-right symmetry.",
+  },
 };
 // Clinical ROM targets for game-based rehab entries, keyed by the exact
 // session.gameType string each game records (NOT GAMES_LIBRARY's hyphenated
@@ -261,12 +266,12 @@ function getGameTargetRom(gameType, condition = "") {
 // Condition -> recommended games (per current clinical mapping).
 const CONDITION_GAMES = {
   "hand surgery recovery": ["precision-reach", "canvas-air", "catch-flex"],
-  "stroke rehabilitation": ["precision-reach", "cloud-reach", "catch-flex"],
+  "stroke rehabilitation": ["push-wall", "precision-reach", "cloud-reach"],
   "fracture recovery": ["precision-reach", "cloud-reach", "canvas-air"],
   "nerve injury rehabilitation": ["canvas-air", "catch-flex", "precision-reach"],
   "wrist rehabilitation": ["rehab-slicer", "canvas-air", "catch-flex"],
   "parkinson's": ["catch-flex", "canvas-air", "cloud-reach"],
-  "rotator cuff": ["cloud-reach", "precision-reach", "rehab-slicer"],
+  "rotator cuff": ["cloud-reach", "push-wall", "rehab-slicer"],
   // Added: general "shoulder" match (e.g. "Shoulder Impingement Syndrome")
   // was previously unmatched by any key here and silently fell through to
   // "default" — same games CONDITION_EXERCISES already assigns to its own

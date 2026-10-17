@@ -98,6 +98,20 @@ export const EXERCISES = {
     cues: ['Very slow movement', 'No pain', 'Breathe through motion'],
     difficulty: 1,
   },
+  bilateral_push: {
+    id: 'bilateral_push',
+    name: 'Bilateral Push',
+    description: 'Push both arms forward together, evenly, from the chest',
+    targetROM: 150,
+    landmarks: ['LEFT_SHOULDER', 'LEFT_ELBOW', 'LEFT_WRIST', 'RIGHT_SHOULDER', 'RIGHT_ELBOW', 'RIGHT_WRIST'],
+    joint: 'shoulder',
+    side: 'both',
+    category: 'upper_limb',
+    duration: 30,
+    targetReps: 10,
+    cues: ['Push with both arms at once', 'Keep effort even on both sides', 'Return under control'],
+    difficulty: 2,
+  },
 }
 
 export const POSE_LANDMARKS = {
@@ -226,6 +240,15 @@ export const GAME_EXERCISE_MAP = {
     targetGestures: ['point'],
     color: 'indigo',
     icon: 'Palette'
+  },
+  push_wall: {
+    id: 'push_wall',
+    name: 'Push Wall',
+    description: 'Push back an approaching wall with both arms together. Improves bilateral push strength and symmetry.',
+    exercises: ['bilateral_push', 'shoulder_flexion'],
+    targetGestures: ['bilateral_push'],
+    color: 'orange',
+    icon: 'Shield'
   },
 }
 

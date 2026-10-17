@@ -2,6 +2,7 @@ import { dlog } from "../utils/debug";
 // frontend/src/hooks/useMediaPipeUpperBody.js
 import { useCallback, useEffect, useRef, useState } from "react";
 import { researchLogger } from "../utils/researchLogger";
+import { OneEuro } from "../utils/oneEuro";
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
@@ -62,6 +63,47 @@ function calcFlexionAngle(shoulder, elbow) {
   return (Math.acos(cosine) * 180) / Math.PI;
 }
 
+// Shoulder elevation in degrees: 0 = arm hanging at the side, ~90 = raised to
+// shoulder height, ~180 = overhead. Uses MediaPipe's metric 3D "world"
+// landmarks (metres, same scale on every axis), which is more precise than
+// angles taken from the normalised image coordinates (those mix a width-scaled
+// x with a height-scaled y and a rough z). The reference "down" direction is
+// the hip->shoulder line when the hips are visible, otherwise world-vertical.
+// Falls back to the old 2D-derived value (180 - flexion) if no world data.
+function elevationFromWorld(world, side, fallbackFlexion) {
+  const fallback = Math.max(0, Math.min(180, 180 - fallbackFlexion));
+  const s = world?.[LANDMARKS[`${side}Shoulder`]];
+  const e = world?.[LANDMARKS[`${side}Elbow`]];
+  if (!s || !e) return fallback;
+
+  const arm = { x: e.x - s.x, y: e.y - s.y, z: e.z - s.z };
+  const lS = world[LANDMARKS.leftShoulder];
+  const rS = world[LANDMARKS.rightShoulder];
+  const lH = world[LANDMARKS.leftHip];
+  const rH = world[LANDMARKS.rightHip];
+  const nose = world[LANDMARKS.nose];
+
+  let down = null;
+  if (lH && rH && lS && rS && (lH.visibility ?? 0) > 0.5 && (rH.visibility ?? 0) > 0.5) {
+    down = {
+      x: (lH.x + rH.x) / 2 - (lS.x + rS.x) / 2,
+      y: (lH.y + rH.y) / 2 - (lS.y + rS.y) / 2,
+      z: (lH.z + rH.z) / 2 - (lS.z + rS.z) / 2,
+    };
+  } else if (lS && rS && nose) {
+    // World y direction is not assumed: the head is above the shoulders, so
+    // "down" is whichever way y points from the nose to the shoulder line.
+    down = { x: 0, y: (lS.y + rS.y) / 2 - nose.y >= 0 ? 1 : -1, z: 0 };
+  }
+  if (!down) return fallback;
+
+  const magA = Math.hypot(arm.x, arm.y, arm.z);
+  const magD = Math.hypot(down.x, down.y, down.z);
+  if (!magA || !magD) return fallback;
+  const cos = (arm.x * down.x + arm.y * down.y + arm.z * down.z) / (magA * magD);
+  return (Math.acos(Math.min(1, Math.max(-1, cos))) * 180) / Math.PI;
+}
+
 function pointFromLandmarks(landmarks, index) {
   const point = landmarks[index];
   return {
@@ -114,6 +156,7 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
   const frameCounterRef = useRef(0);
   const framesDeliveredRef = useRef(0);
   const researchFrameIdRef = useRef(0);
+  const elevFiltersRef = useRef({ left: new OneEuro(), right: new OneEuro() });
 
   callbackRef.current = onPoseUpdate;
 
@@ -306,9 +349,20 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
                 const leftFlexion = calcFlexionAngle(raw.leftShoulder, raw.leftElbow);
                 const rightFlexion = calcFlexionAngle(raw.rightShoulder, raw.rightElbow);
 
+                // Precise, lightly filtered shoulder elevation for each arm.
+                const world = result?.worldLandmarks?.[0];
+                const nowMs = performance.now();
+                const leftElevation = elevFiltersRef.current.left.filter(
+                  elevationFromWorld(world, "left", leftFlexion), nowMs);
+                const rightElevation = elevFiltersRef.current.right.filter(
+                  elevationFromWorld(world, "right", rightFlexion), nowMs);
+
                 const data = {
                   raw,
                   midChest,
+                  leftElevation,
+                  rightElevation,
+                  elevation: (leftElevation + rightElevation) / 2,
                   leftShoulderAngle: calcAngle(raw.leftHip, raw.leftShoulder, raw.leftElbow),
                   rightShoulderAngle: calcAngle(raw.rightHip, raw.rightShoulder, raw.rightElbow),
                   leftFlexion,

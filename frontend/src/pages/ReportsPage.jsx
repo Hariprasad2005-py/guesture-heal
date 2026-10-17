@@ -38,6 +38,7 @@ const GAME_TYPE_LABELS = {
   catch_flex: "🧺 Catch & Flex",
   canvas_air: "🎨 Canvas Air",
   cloud_reach: "☁️ Cloud Reach",
+  push_wall: "🛡️ Push Wall",
 };
 
 function formatGameType(gameType) {
@@ -424,7 +425,7 @@ export default function ReportsPage() {
   const [loadingTherapists, setLoadingTherapists] = useState(false);
 
   const isGlobalView = !patientIdFromUrl;
-  const games = ["rehab_slicer", "precision_reach", "catch_flex", "canvas_air", "cloud_reach"];
+  const games = ["rehab_slicer", "precision_reach", "catch_flex", "canvas_air", "cloud_reach", "push_wall"];
 
   // ─── ROLE HELPER ──────────────────────────────────────────────────────────
   function isAdminUser() {

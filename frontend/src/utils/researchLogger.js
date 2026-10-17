@@ -111,13 +111,17 @@ class ResearchLogger {
         // Tracked arm = the valid arm that is raised higher (the one doing
         // the exercise). If only one chain is valid, use that one.
         let side = leftOk ? 'left' : 'right';
-        if (leftOk && rightOk) side = pose.leftFlexion >= pose.rightFlexion ? 'left' : 'right';
+        // Elevation: 0 = arm at side, higher = raised. (The older flexion value is
+        // 180 at rest, so "higher flexion" used to pick the LOWER arm.)
+        const elevOf = (sd) => (typeof pose[`${sd}Elevation`] === 'number'
+          ? pose[`${sd}Elevation`] : 180 - pose[`${sd}Flexion`]);
+        if (leftOk && rightOk) side = elevOf('left') >= elevOf('right') ? 'left' : 'right';
         const wrist = side === 'left' ? r.leftWrist : r.rightWrist;
         row.tracked_side = side;
 
         // ROM: shoulder flexion angle (deg) of the tracked arm this frame.
         // Per-session ROM is computed by the analysis script (P95 - P5).
-        row.ROM = Number((side === 'left' ? pose.leftFlexion : pose.rightFlexion).toFixed(2));
+        row.ROM = Number(elevOf(side).toFixed(2));
 
         // BS: bilateral asymmetry = |left wrist y - right wrist y| in
         // normalized image units (0 = perfectly level). Only meaningful when

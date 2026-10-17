@@ -40,6 +40,7 @@ const GAME_ICON_MAP = {
   [GAME_IDS.CATCH_FLEX]: ShoppingBasket,
   [GAME_IDS.CANVAS_AIR]: Palette,
   [GAME_IDS.CLOUD_REACH]: Cloud,
+  [GAME_IDS.PUSH_WALL]: Shield,
 };
 
 // --- Presentation-only metadata (does not touch game data/constants) ---
@@ -49,6 +50,7 @@ const EXERCISE_TAG = {
   [GAME_IDS.CLOUD_REACH]: 'Range of Motion',
   [GAME_IDS.CATCH_FLEX]: 'Coordination',
   [GAME_IDS.CANVAS_AIR]: 'Fine Motor',
+  [GAME_IDS.PUSH_WALL]: 'Bilateral Strength',
 };
 
 const DIFFICULTY = {
@@ -57,6 +59,7 @@ const DIFFICULTY = {
   [GAME_IDS.CLOUD_REACH]: 'Easy',
   [GAME_IDS.CATCH_FLEX]: 'Medium',
   [GAME_IDS.CANVAS_AIR]: 'Medium',
+  [GAME_IDS.PUSH_WALL]: 'Medium',
 };
 
 const DIFFICULTY_DOT = { Easy: 'bg-emerald-500', Medium: 'bg-amber-500' };
@@ -67,6 +70,7 @@ const ACCENT_COLOR = {
   [GAME_IDS.CLOUD_REACH]: '#10B981',
   [GAME_IDS.CATCH_FLEX]: '#8B5CF6',
   [GAME_IDS.CANVAS_AIR]: '#EC4899',
+  [GAME_IDS.PUSH_WALL]: '#F97316',
 };
 
 const GAMES = [
@@ -104,6 +108,13 @@ const GAMES = [
     description: GAME_DESCRIPTIONS[GAME_IDS.CLOUD_REACH],
     icon: GAME_ICON_MAP[GAME_IDS.CLOUD_REACH],
     ...GAME_COLORS[GAME_IDS.CLOUD_REACH],
+  },
+  {
+    id: GAME_IDS.PUSH_WALL,
+    name: GAME_DISPLAY_NAMES[GAME_IDS.PUSH_WALL],
+    description: GAME_DESCRIPTIONS[GAME_IDS.PUSH_WALL],
+    icon: GAME_ICON_MAP[GAME_IDS.PUSH_WALL],
+    ...GAME_COLORS[GAME_IDS.PUSH_WALL],
   },
 ];
 

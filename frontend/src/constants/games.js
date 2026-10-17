@@ -5,6 +5,7 @@ export const GAME_IDS = {
   CATCH_FLEX: 'catch-flex',
   CANVAS_AIR: 'canvas-air',
   CLOUD_REACH: 'cloud-reach',
+  PUSH_WALL: 'push-wall',
 };
 
 export const GAME_TYPE_MAP = {
@@ -13,6 +14,7 @@ export const GAME_TYPE_MAP = {
   'catch-flex': 'catch_flex',
   'canvas-air': 'canvas_air',
   'cloud-reach': 'cloud_reach',
+  'push-wall': 'push_wall',
 };
 
 export const GAME_DISPLAY_NAMES = {
@@ -21,6 +23,7 @@ export const GAME_DISPLAY_NAMES = {
   'catch-flex': 'Catch & Flex',
   'canvas-air': 'Canvas Air',
   'cloud-reach': 'Cloud Reach',
+  'push-wall': 'Push Wall',
 };
 
 export const GAME_ICONS = {
@@ -29,6 +32,7 @@ export const GAME_ICONS = {
   'catch-flex': 'ShoppingBasket',
   'canvas-air': 'Palette',
   'cloud-reach': 'Cloud',
+  'push-wall': 'Shield',
 };
 
 export const GAME_COLORS = {
@@ -37,6 +41,7 @@ export const GAME_COLORS = {
   'catch-flex': { bg: 'bg-purple-50', text: 'text-purple-600' },
   'canvas-air': { bg: 'bg-rose-50', text: 'text-rose-600' },
   'cloud-reach': { bg: 'bg-cyan-50', text: 'text-cyan-600' },
+  'push-wall': { bg: 'bg-orange-50', text: 'text-orange-600' },
 };
 
 export const GAME_DESCRIPTIONS = {
@@ -45,4 +50,5 @@ export const GAME_DESCRIPTIONS = {
   'catch-flex': 'Move your hand to steer the basket and catch falling fruit.',
   'canvas-air': 'Trace shapes with your fingertip to improve fine motor control.',
   'cloud-reach': 'Reach and pop clouds to improve shoulder elevation and arm strength.',
+  'push-wall': 'Push back the approaching wall with both arms together to build bilateral strength and symmetry.',
 };
