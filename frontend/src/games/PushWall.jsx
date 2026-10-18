@@ -56,6 +56,8 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
   const [roundTarget, setRoundTarget] = useState(ROUND_SIZES[0]);
   const [roundDots, setRoundDots] = useState([]); // 'hit' | 'miss' per resolved wall
   const [roundBanner, setRoundBanner] = useState(null);
+  const [levelIdx, setLevelIdx] = useState(0);
+  const levelIdxRef = useRef(0);
   const roundTargetRef = useRef(ROUND_SIZES[0]);
   const roundHitsRef = useRef(0);
   const roundMissesRef = useRef(0);
@@ -195,6 +197,14 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
       note = nextIdx > idx ? "Smooth and even - stepping up" : "Top level - keep it up";
     }
 
+    // Level (look, wall speed, number of blocks): up after a smooth round,
+    // down after a hard one.
+    const struggled = pain > 5 || hitRate < 0.5;
+    const smooth = !struggled && hitRate >= 0.85 && avgSym >= 0.7 && pain < 3;
+    const nextLevel = Math.max(0, Math.min(4, levelIdxRef.current + (smooth ? 1 : struggled ? -1 : 0)));
+    levelIdxRef.current = nextLevel;
+    setLevelIdx(nextLevel);
+
     const nextTarget = ROUND_SIZES[nextIdx];
     roundsCompletedRef.current += 1;
     highestRoundSizeRef.current = Math.max(highestRoundSizeRef.current, nextTarget);
@@ -270,6 +280,10 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
       difficultyName: currentDifficulty,
     });
   }, [settings, currentDifficulty]);
+
+  useEffect(() => {
+    sceneRef.current?.setLevel(levelIdx);
+  }, [levelIdx]);
 
   // Mirror pause state into the scene.
   useEffect(() => {
@@ -449,7 +463,7 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
               <li>Each wall you push back scores by block type: wood 10, stone 20, gold 40.</li>
               <li>Both arms level gives a PERFECT SYMMETRY bonus. Every 3 pushes in a row raises your multiplier (up to x3).</li>
               <li>A wall that reaches the red line is a breach and resets your combo.</li>
-              <li>Each round is 4 pushes. Do them smoothly and the next round grows to 6, then 8.</li>
+              <li>Each round is 4 pushes. Do them smoothly and the next round grows to 6, then 8. Smooth rounds also raise the LEVEL: a new look, a faster wall and more blocks.</li>
               <li>Cyan dot = left hand, orange dot = right hand. The line between them is green when your arms are level.</li>
             </ul>
             <div className="mt-3 text-slate-500">Trains: shoulder raising with both arms, and left-right symmetry.</div>
@@ -579,7 +593,7 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
           <span>🛡 Pushes: {pushes}</span>
           <span>🦾 Arms: {armAngle}°</span>
           <span className="flex items-center gap-2 text-cyan-300">
-            🏁 Round {roundNumber}
+            🏁 Round {roundNumber} · Level {levelIdx + 1}
             <span className="flex items-center gap-1">
               {Array.from({ length: roundTarget }).map((_, i) => (
                 <span

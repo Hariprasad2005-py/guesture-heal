@@ -211,17 +211,10 @@ export default function GameSelectPage() {
       return;
     }
 
-    // Whole day already finished — don't let them re-enter through any
-    // card; today's plan is done regardless of which game they tap.
-    if (isDayCompleted) {
-      setCompletionNotice('day');
-      return;
-    }
-
-    // This specific exercise is already done today, even though the day
-    // as a whole isn't (other games in today's plan are still pending).
-    if (completedGameIds.has(gameId)) {
-      setCompletionNotice('exercise');
+    // Already done today (this exercise or the whole plan): do not block.
+    // GameEngine asks "play again?" and enforces the daily limit per game.
+    if (isDayCompleted || completedGameIds.has(gameId)) {
+      navigate(`/game/${gameId}?replay=1`);
       return;
     }
 

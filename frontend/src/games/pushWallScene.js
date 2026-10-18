@@ -25,6 +25,20 @@ const TIERS = [
   { name: "gold", color: 0xe8b93a, highlight: 0xffe28a, value: 40, massMul: 1.9 },
 ];
 
+// Five looks, one per level. Each level also adds blocks and speeds the wall up.
+const LEVEL_THEMES = [
+  { name: "Midnight Gate", bands: [[11, 17, 32], [30, 27, 75], [72, 26, 70]], ambient: "star", ambientColor: 0xffffff, line: 0xef4444,
+    tiers: { wood: [0xb98a52, 0xd9b48a], stone: [0x8a94a6, 0xb7c0d1], gold: [0xe8b93a, 0xffe28a] }, blocks: 5, speedMul: 1.0 },
+  { name: "Frost Wall", bands: [[8, 24, 48], [20, 70, 110], [150, 205, 230]], ambient: "snow", ambientColor: 0xe0f2fe, line: 0x38bdf8,
+    tiers: { wood: [0x7dd3fc, 0xe0f2fe], stone: [0x93c5fd, 0xdbeafe], gold: [0xa5f3fc, 0xffffff] }, blocks: 6, speedMul: 1.12 },
+  { name: "Ember Forge", bands: [[30, 8, 8], [110, 24, 16], [220, 90, 20]], ambient: "ember", ambientColor: 0xfb923c, line: 0xfacc15,
+    tiers: { wood: [0xea580c, 0xfdba74], stone: [0x78716c, 0xd6d3d1], gold: [0xf59e0b, 0xfde68a] }, blocks: 7, speedMul: 1.25 },
+  { name: "Storm Keep", bands: [[10, 8, 30], [50, 24, 100], [30, 90, 120]], ambient: "storm", ambientColor: 0xc4b5fd, line: 0xa78bfa,
+    tiers: { wood: [0x6d28d9, 0xa78bfa], stone: [0x475569, 0x94a3b8], gold: [0xfacc15, 0xfef08a] }, blocks: 8, speedMul: 1.4 },
+  { name: "Golden Vault", bands: [[40, 24, 4], [120, 80, 10], [230, 180, 60]], ambient: "spark", ambientColor: 0xfef08a, line: 0xffffff,
+    tiers: { wood: [0xd97706, 0xfbbf24], stone: [0xb45309, 0xf59e0b], gold: [0xfff3b0, 0xffffff] }, blocks: 9, speedMul: 1.55 },
+];
+
 function tierForDifficulty(difficultyName) {
   if (difficultyName === "Advanced") {
     // weighted toward stone/gold
@@ -55,6 +69,9 @@ export class PushWallScene extends Phaser.Scene {
     this._spawnTimer = null;
     this._comboGlow = 0; // 0..1, drives background pulse intensity
     this._bgLinesGroup = [];
+    this._bgObjs = [];
+    this._level = 0;
+    this._storm = null;
   }
 
   // ---------------- Phaser lifecycle ----------------
@@ -127,7 +144,7 @@ export class PushWallScene extends Phaser.Scene {
     const dt = deltaMs / 1000;
 
     // Advance each wave downward at a speed derived from difficulty.
-    const fallSpeed = 40 + (this._difficultySettings.speed || 0.35) * 220;
+    const fallSpeed = (40 + (this._difficultySettings.speed || 0.35) * 220) * LEVEL_THEMES[this._level].speedMul;
 
     for (const wave of this._waves) {
       if (wave.cleared) {
@@ -165,34 +182,87 @@ export class PushWallScene extends Phaser.Scene {
     }
   }
 
-  // Layered vertical gradient (navy -> indigo -> plum) plus twinkling stars.
-  // Built from plain rectangles/circles so it needs no image assets.
+  // Layered vertical gradient plus ambient motion. The look depends on the
+  // current level (see LEVEL_THEMES). Plain shapes only, no image assets.
   _buildBackdrop() {
-    const top = [11, 17, 32];
-    const mid = [30, 27, 75];
-    const bottom = [72, 26, 70];
+    for (const o of this._bgObjs) {
+      this.tweens.killTweensOf(o);
+      o.destroy();
+    }
+    this._bgObjs = [];
+    if (this._storm) { this._storm.remove(); this._storm = null; }
+    const th = LEVEL_THEMES[this._level];
+    const [top, mid, bottom] = th.bands;
     const BANDS = 24;
     for (let i = 0; i < BANDS; i++) {
       const t = i / (BANDS - 1);
       const c = t < 0.6 ? lerpRgb(top, mid, t / 0.6) : lerpRgb(mid, bottom, (t - 0.6) / 0.4);
       const color = (c[0] << 16) | (c[1] << 8) | c[2];
-      this.add
-        .rectangle(GAME_W / 2, (i + 0.5) * (GAME_H / BANDS), GAME_W, GAME_H / BANDS + 1, color, 1)
-        .setDepth(-10);
+      this._bgObjs.push(
+        this.add.rectangle(GAME_W / 2, (i + 0.5) * (GAME_H / BANDS), GAME_W, GAME_H / BANDS + 1, color, 1).setDepth(-10)
+      );
     }
-    for (let i = 0; i < 42; i++) {
-      const star = this.add
-        .circle(Math.random() * GAME_W, Math.random() * GAME_H * 0.78, Math.random() * 1.4 + 0.5, 0xffffff, 0.2 + Math.random() * 0.5)
-        .setDepth(-9);
-      this.tweens.add({
-        targets: star,
-        alpha: 0.08,
-        duration: 900 + Math.random() * 1800,
-        yoyo: true,
-        repeat: -1,
-        delay: Math.random() * 1500,
+    const kind = th.ambient;
+    const count = kind === "star" ? 42 : 30;
+    for (let i = 0; i < count; i++) {
+      const x = Math.random() * GAME_W;
+      const r = Math.random() * 1.4 + 0.6;
+      if (kind === "star" || kind === "spark" || kind === "storm") {
+        const o = this.add.circle(x, Math.random() * GAME_H * 0.78, kind === "spark" ? r + 0.8 : r, th.ambientColor, 0.2 + Math.random() * 0.5).setDepth(-9);
+        this._bgObjs.push(o);
+        this.tweens.add({ targets: o, alpha: 0.08, duration: 900 + Math.random() * 1800, yoyo: true, repeat: -1, delay: Math.random() * 1500 });
+      } else {
+        const falling = kind === "snow";
+        const o = this.add.circle(x, falling ? -10 : GAME_H + 10, r + 0.8, th.ambientColor, 0.5 + Math.random() * 0.4).setDepth(-9);
+        this._bgObjs.push(o);
+        this.tweens.add({
+          targets: o,
+          y: falling ? GAME_H + 10 : -10,
+          x: x + (Math.random() * 60 - 30),
+          duration: 4000 + Math.random() * 5000,
+          repeat: -1,
+          delay: Math.random() * 4000,
+        });
+      }
+    }
+    if (kind === "storm") {
+      const flash = this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0xffffff, 0).setDepth(-8);
+      this._bgObjs.push(flash);
+      this._storm = this.time.addEvent({
+        delay: 2600,
+        loop: true,
+        callback: () => {
+          if (this._paused) return;
+          this.tweens.add({ targets: flash, alpha: 0.28, duration: 70, yoyo: true, repeat: 1 });
+        },
       });
     }
+    if (this._impactLine) {
+      this._impactLine.setFillStyle(th.line, 0.55);
+      this._impactGlow.setFillStyle(th.line, 0.06);
+    }
+  }
+
+  setLevel(index) {
+    const i = Math.max(0, Math.min(LEVEL_THEMES.length - 1, index | 0));
+    if (i === this._level) return;
+    this._level = i;
+    this._buildBackdrop();
+    const th = LEVEL_THEMES[i];
+    const t = this.add
+      .text(GAME_W / 2, GAME_H * 0.3, `LEVEL ${i + 1}\n${th.name}`, {
+        fontFamily: "Inter, system-ui, sans-serif",
+        fontSize: "44px",
+        fontStyle: "bold",
+        align: "center",
+        color: "#ffffff",
+        stroke: "#0b1120",
+        strokeThickness: 8,
+      })
+      .setOrigin(0.5)
+      .setDepth(60)
+      .setAlpha(0);
+    this.tweens.add({ targets: t, alpha: 1, y: GAME_H * 0.26, duration: 350, yoyo: true, hold: 1100, onComplete: () => t.destroy() });
   }
 
   // ---------------- wave lifecycle ----------------
@@ -211,8 +281,11 @@ export class PushWallScene extends Phaser.Scene {
 
     const settings = this._difficultySettings;
     const tier = tierForDifficulty(settings.difficultyName);
-    const blockSize = Math.max(36, Math.min(64, (settings.objectSize || 100) * 0.42));
-    const blockCount = 4;
+    const th = LEVEL_THEMES[this._level];
+    const blockCount = th.blocks;
+    const sizeByWidth = (GAME_W - 100) / blockCount - 10;
+    const blockSize = Math.max(32, Math.min(64, (settings.objectSize || 100) * 0.42, sizeByWidth));
+    const [tierColor, tierHighlight] = th.tiers[tier.name];
     const spacing = blockSize + 10;
     const totalWidth = blockCount * spacing;
     const startX = GAME_W / 2 - totalWidth / 2 + spacing / 2;
@@ -221,16 +294,16 @@ export class PushWallScene extends Phaser.Scene {
     for (let i = 0; i < blockCount; i++) {
       const x = startX + i * spacing;
       // Soft additive halo behind each block (colour = tier) for a glowing look.
-      const glow = this.add.rectangle(x, SPAWN_Y, blockSize + 16, blockSize + 16, tier.color, 0.22);
+      const glow = this.add.rectangle(x, SPAWN_Y, blockSize + 16, blockSize + 16, tierColor, 0.22);
       glow.setBlendMode(Phaser.BlendModes.ADD);
-      const rect = this.add.rectangle(x, SPAWN_Y, blockSize, blockSize, tier.color, 1);
+      const rect = this.add.rectangle(x, SPAWN_Y, blockSize, blockSize, tierColor, 1);
       rect.setStrokeStyle(2, 0x0b1120, 0.4);
       const highlight = this.add.rectangle(
         x,
         SPAWN_Y - blockSize * 0.28,
         blockSize * 0.82,
         blockSize * 0.22,
-        tier.highlight,
+        tierHighlight,
         0.55
       );
       this.physics.add.existing(rect);

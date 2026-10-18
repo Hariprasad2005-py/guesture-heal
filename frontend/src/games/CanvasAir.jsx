@@ -93,9 +93,11 @@ const MIN_PATH_LENGTH_FOR_SMOOTHNESS = 40;
 // "Balanced" (default) reacts faster while staying calm when you hold still;
 // "Quick" follows the fingertip almost one-to-one.
 const STEADINESS = {
-  steady: { label: "Steady", minCutoff: 0.6, beta: 0.03 },
-  balanced: { label: "Balanced", minCutoff: 1.3, beta: 0.09 },
-  quick: { label: "Quick", minCutoff: 2.4, beta: 0.16 },
+  // tau = how slowly the drawing dot follows the fingertip (seconds).
+  // Bigger = slower, calmer dot that is easier to control.
+  steady: { label: "Steady", minCutoff: 0.6, beta: 0.03, tau: 0.38 },
+  balanced: { label: "Balanced", minCutoff: 1.3, beta: 0.09, tau: 0.24 },
+  quick: { label: "Quick", minCutoff: 2.4, beta: 0.16, tau: 0.1 },
 };
 const ONE_EURO_MIN_CUTOFF = STEADINESS.balanced.minCutoff;
 const ONE_EURO_BETA = STEADINESS.balanced.beta;
@@ -538,6 +540,8 @@ export default function CanvasAir({
   const [startProgress, setStartProgress] = useState(0);
   const phaseRef = useRef("goto");
   const startHoldRef = useRef(null);
+  const penRef = useRef(null); // slow-follow position of the drawing dot
+  const steadinessRef = useRef("balanced");
   const [setCount, setSetCount] = useState(1);
   const [setPrompt, setSetPrompt] = useState(false);
   const [levelBanner, setLevelBanner] = useState({ visible: false, text: "" });
@@ -718,6 +722,7 @@ export default function CanvasAir({
   // Apply the chosen steadiness to the live filter.
   useEffect(() => {
     const p = STEADINESS[steadiness] || STEADINESS.balanced;
+    steadinessRef.current = steadiness;
     const f = fingertipFilterRef.current;
     f.fx.minCutoff = p.minCutoff;
     f.fy.minCutoff = p.minCutoff;
@@ -907,6 +912,7 @@ export default function CanvasAir({
       attemptStartMsRef.current = null;
       phaseRef.current = "goto";
       startHoldRef.current = null;
+      penRef.current = null;
       setPhase("goto");
       setStartProgress(0);
       movementStatsRef.current = emptyMovementStats();
@@ -1147,8 +1153,21 @@ export default function CanvasAir({
     const { rangeX, rangeY } = frozenAttempt.handRange;
     const nx = remapNormalized(filtered.x, rangeX);
     const ny = remapNormalized(filtered.y, rangeY);
-    const point = { x: nx * 100, y: ny * 100 };
+    const target = { x: nx * 100, y: ny * 100 };
     const nowMs = performance.now();
+    // The drawing dot glides toward the fingertip instead of jumping to it,
+    // so small shakes are ignored and the line is easier to control.
+    const tau = (STEADINESS[steadinessRef.current] || STEADINESS.balanced).tau;
+    const pen = penRef.current;
+    let point;
+    if (!pen) {
+      point = target;
+    } else {
+      const dt = Math.min(0.1, Math.max(0.001, (nowMs - pen.t) / 1000));
+      const a = 1 - Math.exp(-dt / tau);
+      point = { x: pen.x + (target.x - pen.x) * a, y: pen.y + (target.y - pen.y) * a };
+    }
+    penRef.current = { x: point.x, y: point.y, t: nowMs };
 
     const prevCursor = cursorPosRef.current;
     if (prevCursor.visible) {
@@ -2483,7 +2502,7 @@ export default function CanvasAir({
                       </button>
                     ))}
                   </div>
-                  <p className="mt-1 text-xs text-slate-500">Steady = smoother line. Quick = follows your finger right away. Balanced is a good start.</p>
+                  <p className="mt-1 text-xs text-slate-500">The dot glides after your finger. Steady = slowest and calmest dot. Balanced = gentle. Quick = follows right away.</p>
                 </div>
               </div>
 

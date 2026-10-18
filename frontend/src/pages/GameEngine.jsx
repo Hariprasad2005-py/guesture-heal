@@ -7,6 +7,7 @@ import RehabSlicer from '../games/RehabSlicer';
 import CatchAndFlex from '../games/CatchAndFlex';
 import CanvasAir from '../games/CanvasAir';
 import CloudReach from '../games/CloudReach';
+import PushWall from '../games/PushWall';
 import { GAME_IDS, GAME_DISPLAY_NAMES } from '../constants/games';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { ConfirmReplayModal, DoneForTodayModal } from '../components/rehab/ReplayModals';
@@ -24,6 +25,7 @@ const GAME_COMPONENTS = {
   [GAME_IDS.CATCH_FLEX]: CatchAndFlex,
   [GAME_IDS.CANVAS_AIR]: CanvasAir,
   [GAME_IDS.CLOUD_REACH]: CloudReach,
+  [GAME_IDS.PUSH_WALL]: PushWall,
 };
 
 const GameEngine = () => {
@@ -72,7 +74,8 @@ const GameEngine = () => {
       return;
     }
     const pid = patientId || 'guest';
-    const plays = getPlaysToday(pid, gameId);
+    const markedDone = new URLSearchParams(window.location.search).get('replay') === '1';
+    const plays = Math.max(getPlaysToday(pid, gameId), markedDone ? 1 : 0);
     setPlayedToday(plays);
     if (plays >= MAX_PLAYS_PER_GAME_PER_DAY) setGate('blocked');
     else if (plays >= 1) setGate('confirm');
@@ -174,7 +177,7 @@ const GameEngine = () => {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 relative overflow-hidden">
+      <div className="flex-1 min-h-0 relative overflow-y-auto overflow-x-hidden">
         {gate === 'confirm' && (
           <ConfirmReplayModal
             gameName={gameName}

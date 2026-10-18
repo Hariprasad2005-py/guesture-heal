@@ -92,17 +92,17 @@ const DIFFICULTY_SETTINGS = {
 // Five levels. The patient moves up after 3 reaches in a row and down after
 // 2 misses in a row. Each level also changes the backdrop (see THEMES).
 const LEVELS = [
-  { key: "L1", name: "Level 1", arc: 0.6, cloudSize: 100, dwellMs: 400, lifetimeMs: 8000, zonePool: ["center", "upper-center", "left", "right"] },
-  { key: "L2", name: "Level 2", arc: 0.75, cloudSize: 86, dwellMs: 450, lifetimeMs: 7500, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right"] },
-  { key: "L3", name: "Level 3", arc: 0.9, cloudSize: 74, dwellMs: 500, lifetimeMs: 7000, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right", "lower-left", "lower-right"] },
-  { key: "L4", name: "Level 4", arc: 1.0, cloudSize: 62, dwellMs: 600, lifetimeMs: 6000, zonePool: "ALL" },
-  { key: "L5", name: "Level 5", arc: 1.1, cloudSize: 52, dwellMs: 700, lifetimeMs: 5000, zonePool: "ALL" },
+  { key: "L1", name: "Level 1", arc: 0.6, cloudSize: 100, dwellMs: 400, lifetimeMs: 12000, zonePool: ["center", "upper-center", "left", "right"] },
+  { key: "L2", name: "Level 2", arc: 0.75, cloudSize: 86, dwellMs: 450, lifetimeMs: 11000, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right"] },
+  { key: "L3", name: "Level 3", arc: 0.9, cloudSize: 74, dwellMs: 500, lifetimeMs: 10000, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right", "lower-left", "lower-right"] },
+  { key: "L4", name: "Level 4", arc: 1.0, cloudSize: 62, dwellMs: 600, lifetimeMs: 9000, zonePool: "ALL" },
+  { key: "L5", name: "Level 5", arc: 1.1, cloudSize: 52, dwellMs: 700, lifetimeMs: 8000, zonePool: "ALL" },
 ];
 const CONTINUE_EXTRA_REPS = 5;
 const CONTINUE_EXTRA_SECONDS = 60;
 const MAX_EXTENSIONS = 2;
 const TARGET_HIT_RADIUS_PERCENT = 9;
-const CLOUD_LIFETIME_SECONDS = 7;
+const CLOUD_LIFETIME_SECONDS = 11;
 const REST_INTERVAL_MS = 1500;
 const MIN_REACH_MOVEMENT = 4;
 const MAX_SAFE_SPEED = 55;

@@ -38,7 +38,7 @@ const GAME_TYPE_LABELS = {
   catch_flex: "🧺 Catch & Flex",
   canvas_air: "🎨 Canvas Air",
   cloud_reach: "☁️ Cloud Reach",
-  push_wall: "🛡️ Push Wall",
+  push_wall: "🧱 Push Wall",
 };
 
 function formatGameType(gameType) {
