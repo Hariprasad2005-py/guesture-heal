@@ -15,7 +15,6 @@ import useHandTracking from "../hooks/useHandTracking";
 import usePoseDetection from "../hooks/usePoseDetection";
 import usePostureGuidance from "../hooks/usePostureGuidance";
 import useFacialPainDetection from "../hooks/useFacialPainDetection";
-import useAdaptiveDifficulty from "../hooks/useAdaptiveDifficulty";
 import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
 import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
@@ -24,6 +23,8 @@ import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import HowToPlay from "../components/rehab/HowToPlay";
+import { createCloudReachGame } from "./cloudReachScene";
+import { OneEuro } from "../utils/oneEuro";
 import MetricsEngine from "../utils/metricsEngine";
 import ROMDisplay from "../components/rehab/ROMDisplay";
 import PainScoreIndicator from "../components/rehab/PainScoreIndicator";
@@ -33,13 +34,13 @@ import SessionProgress from "../components/rehab/SessionProgress";
 // THERAPIST-CONFIGURABLE SETTINGS
 // ==================================================================
 const DEFAULT_ROM_CONFIG = {
-  minHeightPercent: 35,
-  maxHeightPercent: 75,
-  leftBoundaryPercent: 15,
-  rightBoundaryPercent: 85,
-  neutralZoneRadiusPercent: 8,
+  minHeightPercent: 14,
+  maxHeightPercent: 76,
+  leftBoundaryPercent: 8,
+  rightBoundaryPercent: 84,
+  neutralZoneRadiusPercent: 7,
   neutralX: 50,
-  neutralY: 65,
+  neutralY: 68,
 };
 
 const DEFAULT_SESSION_CONFIG = { mainSeconds: 180, targetReps: 15 };
@@ -88,6 +89,18 @@ const DIFFICULTY_SETTINGS = {
   },
 };
 
+// Five levels. The patient moves up after 3 reaches in a row and down after
+// 2 misses in a row. Each level also changes the backdrop (see THEMES).
+const LEVELS = [
+  { key: "L1", name: "Level 1", arc: 0.6, cloudSize: 100, dwellMs: 400, lifetimeMs: 8000, zonePool: ["center", "upper-center", "left", "right"] },
+  { key: "L2", name: "Level 2", arc: 0.75, cloudSize: 86, dwellMs: 450, lifetimeMs: 7500, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right"] },
+  { key: "L3", name: "Level 3", arc: 0.9, cloudSize: 74, dwellMs: 500, lifetimeMs: 7000, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right", "lower-left", "lower-right"] },
+  { key: "L4", name: "Level 4", arc: 1.0, cloudSize: 62, dwellMs: 600, lifetimeMs: 6000, zonePool: "ALL" },
+  { key: "L5", name: "Level 5", arc: 1.1, cloudSize: 52, dwellMs: 700, lifetimeMs: 5000, zonePool: "ALL" },
+];
+const CONTINUE_EXTRA_REPS = 5;
+const CONTINUE_EXTRA_SECONDS = 60;
+const MAX_EXTENSIONS = 2;
 const TARGET_HIT_RADIUS_PERCENT = 9;
 const CLOUD_LIFETIME_SECONDS = 7;
 const REST_INTERVAL_MS = 1500;
@@ -164,27 +177,53 @@ function zoneToPosition(zone, rom) {
   };
 }
 
-function spawnCloud(difficulty, rom, forceCenter) {
-  const settings = DIFFICULTY_SETTINGS[difficulty] || DIFFICULTY_SETTINGS.Beginner;
+// Which zones can appear at this level. With one arm selected, only the
+// clouds on that arm's side (plus the middle) are used.
+function levelPool(levelIndex, armChoice, forceCenter) {
+  const lv = LEVELS[Math.max(0, Math.min(LEVELS.length - 1, levelIndex))];
+  const ids = lv.zonePool === "ALL" ? REACH_ZONES.map((z) => z.id) : lv.zonePool;
+  let pool = forceCenter
+    ? REACH_ZONES.filter((z) => z.id === "center" || z.id === "upper-center")
+    : REACH_ZONES.filter((z) => ids.includes(z.id));
+  if (armChoice === "left") pool = pool.filter((z) => z.xFrac <= 0.52);
+  if (armChoice === "right") pool = pool.filter((z) => z.xFrac >= 0.48);
+  return pool.length ? pool : [REACH_ZONES[0]];
+}
 
-  let pool;
-  if (forceCenter) {
-    pool = REACH_ZONES.filter((z) => z.id === "center" || z.id === "upper-center");
-  } else {
-    pool = REACH_ZONES.filter((z) => settings.zonePool.includes(z.id));
-  }
+// Higher levels stretch the clouds further from the resting hand, so the arc
+// of movement gets wider (level 1 = short, level 5 = full and then some).
+function scaledPosition(zone, rom, scale) {
+  const p = zoneToPosition(zone, rom);
+  const nx = rom.neutralX;
+  const ny = rom.neutralY;
+  return {
+    x: clamp(nx + (p.x - nx) * scale, EDGE_SAFE_MARGIN_PERCENT, 100 - EDGE_SAFE_MARGIN_PERCENT),
+    y: clamp(ny + (p.y - ny) * scale, EDGE_SAFE_MARGIN_PERCENT, 100 - EDGE_SAFE_MARGIN_PERCENT),
+  };
+}
 
+function spawnCloud(levelIndex, rom, forceCenter, armChoice = "both", lastHand = "right") {
+  const lv = LEVELS[Math.max(0, Math.min(LEVELS.length - 1, levelIndex))];
+  const pool = levelPool(levelIndex, armChoice, forceCenter);
   const zone = pool[Math.floor(Math.random() * pool.length)] || REACH_ZONES[0];
-  const pos = zoneToPosition(zone, rom);
+  const pos = scaledPosition(zone, rom, lv.arc);
+  // Which hand must be used for this cloud.
+  let hand;
+  if (armChoice === "left" || armChoice === "right") hand = armChoice;
+  else if (pos.x < 44) hand = "left";
+  else if (pos.x > 56) hand = "right";
+  else hand = lastHand === "left" ? "right" : "left";
 
   return {
     id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
     x: pos.x,
     y: pos.y,
-    size: settings.cloudSize,
-    dwellMs: settings.dwellMs,
+    size: lv.cloudSize,
+    dwellMs: lv.dwellMs,
+    lifetimeMs: lv.lifetimeMs,
     zoneId: zone.id,
     zoneLabel: zone.label,
+    hand,
     popped: false,
     holdStart: null,
     createdAt: Date.now(),
@@ -388,12 +427,27 @@ export default function CloudReach({
 
   const ROM = useMemo(() => ({ ...DEFAULT_ROM_CONFIG, ...romConfig }), [romConfig]);
   const SESSION = useMemo(() => ({ ...DEFAULT_SESSION_CONFIG, ...sessionConfig }), [sessionConfig]);
+  // The patient can choose to keep going at the end (see requestFinish).
+  const [extraReps, setExtraReps] = useState(0);
+  const [extraSeconds, setExtraSeconds] = useState(0);
+  const targetReps = SESSION.targetReps + extraReps;
+  const mainSeconds = SESSION.mainSeconds + extraSeconds;
+  const [level, setLevel] = useState(1);
+  const levelRef = useRef(1);
+  const okStreakRef = useRef(0);
+  const missStreakRef = useRef(0);
+  const [continuePrompt, setContinuePrompt] = useState(false);
+  const promptOpenRef = useRef(false);
+  const promptStartedAtRef = useRef(0);
+  const extensionsRef = useRef(0);
+  const stageSizeRef = useRef({ w: 800, h: 600 });
 
   const [flow, setFlow] = useState(FLOW.READY_CHECK);
   const [showDebug, setShowDebug] = useState(debugModeDefault);
-  const [findStartMsg, setFindStartMsg] = useState("Place your hand in the starting area.");
+  const [findStartMsg, setFindStartMsg] = useState("Show your arm and hand to the camera.");
   const [cloud, setCloud] = useState(null);
   const [repPhase, setRepPhase] = useState(REP_PHASE.WAITING);
+  // (kept in a ref so the stage can be updated without waiting for a re-render)
   const [popped, setPopped] = useState(0);
   const [missed, setMissed] = useState(0);
   const [combo, setCombo] = useState(0);
@@ -440,7 +494,7 @@ export default function CloudReach({
   const lastTrailPushRef = useRef(0);
   const repStartTimeRef = useRef(null);
   const handLostFramesRef = useRef(0);
-  const HAND_LOST_PAUSE_FRAMES = 20;
+  const HAND_LOST_PAUSE_FRAMES = 75; // about 2.5 seconds without any usable reading
   const stableFrameStartRef = useRef(null);
   const prevHandForStabilityRef = useRef(null);
   const minAngleRef = useRef(null);
@@ -476,6 +530,7 @@ export default function CloudReach({
   // through this ref guarantees "End Session" (and every other trigger)
   // always runs against current data.
   const finishSessionRef = useRef(() => { });
+  const requestFinishRef = useRef(() => { });
   // True when the session was ended via the "End Session" button rather
   // than by completing all reps / running out of time. Read inside
   // finishSession() to skip the celebratory completion popup and go
@@ -495,14 +550,19 @@ export default function CloudReach({
 
   const { isActive } = useMediaPipeUpperBody({ videoRef, onPoseUpdate: setPoseData });
 
-  const { fingertip, isReady: handTrackingReady, error: handTrackingError } = useHandTracking({
+  // The separate finger-tracking model was removed: it ran a second model on
+  // every frame (extra lag) and mapped the raw camera frame to the screen, so
+  // the dot did not line up with the clouds. The dot now comes from the pose
+  // wrist, measured relative to the shoulder (see getHandPosition).
+  const { error: handTrackingError } = useHandTracking({
     videoRef,
     numHands: 1,
     debug: debugHandTracking,
-    enabled: flow !== FLOW.DONE,
+    enabled: false,
   });
 
   const { shoulderAngle, activeSide } = usePoseDetection(poseData);
+  const handTrackingReady = isActive;
   const guidance = usePostureGuidance(poseData);
 
   // WRIST relative to SHOULDER, per spec. Positive dz = wrist is forward
@@ -526,12 +586,15 @@ export default function CloudReach({
   useEffect(() => {
     papsScoreRef.current = papsScore;
   }, [papsScore]);
-  const { currentDifficulty, adapt } = useAdaptiveDifficulty();
+  const currentDifficulty = level <= 2 ? "Beginner" : level === 3 ? "Intermediate" : "Advanced";
   const telemetry = useSessionTelemetry(patientId, gameId);
   const audio = useAudioFeedback(true);
 
   const engine = useGameEngine({
-    sessionLength: SESSION.mainSeconds,
+    // The game runs its own clock (mainSeconds) and its own "keep going?"
+    // prompt, so the engine timer is just a long safety net.
+    sessionLength: 3600,
+    adaptiveCheckpoint: false,
     onRepComplete: () => { },
     onSessionComplete: () => finishSessionRef.current(),
   });
@@ -540,19 +603,147 @@ export default function CloudReach({
   // ==================================================================
   // HAND POSITION
   // ==================================================================
+  // Shoulder-relative reach mapping. The wrist's offset from its own shoulder
+  // is divided by the shoulder width, so it does not matter how far from the
+  // camera the patient sits or where they sit in the frame: reaching up and
+  // out always lands on the clouds. x is mirrored like the camera preview.
+  const handFilterRef = useRef({
+    x: new OneEuro(1.2, 0.1), y: new OneEuro(1.2, 0.1),
+    ex: new OneEuro(1.2, 0.1), ey: new OneEuro(1.2, 0.1),
+  });
+  const armRef = useRef(null);
+  const repPhaseRef = useRef(REP_PHASE.WAITING);
+  repPhaseRef.current = repPhase;
+  const [armChoice, setArmChoice] = useState("both"); // which arm(s) the patient plays with
+  const armChoiceRef = useRef("both");
+  armChoiceRef.current = armChoice;
+  const sideLockRef = useRef(null); // locks the reaching arm while a reach is under way
+  const activeSideRef = useRef("left");
+  activeSideRef.current = activeSide;
+  if (repPhase === REP_PHASE.REACHING || repPhase === REP_PHASE.DWELLING) {
+    if (!sideLockRef.current) sideLockRef.current = activeSideRef.current;
+  } else {
+    sideLockRef.current = null;
+  }
+  const lastHandRef = useRef("right");
+  const assignedHandRef = useRef(null); // the hand the current cloud asks for
+  const usedSideRef = useRef("left");
+  const lastGoodRef = useRef(null); // last good hand reading, used to coast through short dropouts
+  // Sitting too close crops the arms out of the picture (wrist and elbow fall off the frame).
+  const sittingTooClose = useMemo(() => {
+    const r = poseData?.raw;
+    if (!r?.leftShoulder || !r?.rightShoulder) return false;
+    return Math.abs(r.leftShoulder.x - r.rightShoulder.x) > 0.36;
+  }, [poseData]);
   const getHandPosition = useCallback(() => {
-    if (!fingertip || !handTrackingReady) return null;
-    return {
-      x: (1 - fingertip.x) * 100,
-      y: fingertip.y * 100,
-      confidence: typeof fingertip.confidence === "number" ? fingertip.confidence : null,
-    };
-  }, [fingertip, handTrackingReady]);
+    const raw = poseData?.raw;
+    if (!raw) return null;
+    const choice = armChoiceRef.current;
+    const side =
+      choice === "left" || choice === "right"
+        ? choice
+        : assignedHandRef.current || sideLockRef.current || activeSide;
+    usedSideRef.current = side;
+    const wrist = raw[side === "left" ? "leftWrist" : "rightWrist"];
+    const elbow = raw[side === "left" ? "leftElbow" : "rightElbow"];
+    const sh = raw[side === "left" ? "leftShoulder" : "rightShoulder"];
+    const lS = raw.leftShoulder;
+    const rS = raw.rightShoulder;
+    if (!sh || !lS || !rS || (sh.visibility ?? 0) < 0.25) return coast();
+    // PREFERRED: 3D body positions (metres). Unlike picture coordinates they are
+    // still estimated when the wrist or elbow is outside the camera picture, and
+    // they do not depend on how close the patient sits.
+    const W3 = poseData.world;
+    const wsh = W3?.[side === "left" ? "leftShoulder" : "rightShoulder"];
+    const wwr = W3?.[side === "left" ? "leftWrist" : "rightWrist"];
+    const wel = W3?.[side === "left" ? "leftElbow" : "rightElbow"];
+    const wl = W3?.leftShoulder;
+    const wr = W3?.rightShoulder;
+    const whipL = W3?.leftHip;
+    const whipR = W3?.rightHip;
+    let dx;
+    let dy;
+    let edx = null;
+    let edy = null;
+    let wristOk = false;
+    let elbowOk = false;
+    if (wsh && wwr && wl && wr) {
+      // Which way is "left" and "down" in world space? Take it from the picture.
+      const signX = Math.sign((wl.x - wr.x) * (lS.x - rS.x)) || 1;
+      let signY = 1;
+      if (whipL && whipR) signY = Math.sign((whipL.y + whipR.y) / 2 - (wl.y + wr.y) / 2) || 1;
+      const shoulderWidth = Math.max(0.15, Math.hypot(wl.x - wr.x, wl.y - wr.y, wl.z - wr.z));
+      dx = (signX * (wwr.x - wsh.x)) / shoulderWidth;
+      dy = (signY * (wwr.y - wsh.y)) / shoulderWidth;
+      wristOk = true;
+      if (wel) {
+        elbowOk = true;
+        edx = (signX * (wel.x - wsh.x)) / shoulderWidth;
+        edy = (signY * (wel.y - wsh.y)) / shoulderWidth;
+      }
+    } else {
+      // FALLBACK: picture coordinates.
+      const wristVis = wrist && (wrist.visibility ?? 0) >= 0.12;
+      const elbowVis = elbow && (elbow.visibility ?? 0) >= 0.25;
+      let wx;
+      let wy;
+      if (wristVis) {
+        wx = wrist.x; wy = wrist.y;
+      } else if (elbowVis) {
+        wx = elbow.x + (elbow.x - sh.x) * 0.9;
+        wy = elbow.y + (elbow.y - sh.y) * 0.9;
+      } else {
+        return coast();
+      }
+      const v = videoRef.current;
+      const aspect = v?.videoWidth && v?.videoHeight ? v.videoWidth / v.videoHeight : 16 / 9;
+      const unit = Math.max(0.05, Math.abs(lS.x - rS.x)) * aspect;
+      dx = ((wx - sh.x) * aspect) / unit;
+      dy = (wy - sh.y) / unit;
+      wristOk = wristVis;
+      if (elbowVis) {
+        elbowOk = true;
+        edx = ((elbow.x - sh.x) * aspect) / unit;
+        edy = (elbow.y - sh.y) / unit;
+      }
+    }
+    // Wider reach range: a comfortable reach (about 1.2 shoulder widths out, or
+    // about 0.9 up) already reaches the edge clouds. Up and down use separate gains.
+    const mapY = (d) => 40 + (d < 0 ? d * 26 : d * 16);
+    const now = performance.now();
+    const x = handFilterRef.current.x.filter(clamp(50 - dx * 30, 0, 100), now);
+    const y = handFilterRef.current.y.filter(clamp(mapY(dy), 0, 100), now);
+    if (elbowOk) {
+      armRef.current = {
+        shoulder: { x: 50, y: 40 },
+        elbow: {
+          x: handFilterRef.current.ex.filter(clamp(50 - edx * 30, 0, 100), now),
+          y: handFilterRef.current.ey.filter(clamp(mapY(edy), 0, 100), now),
+        },
+      };
+    } else {
+      armRef.current = { shoulder: { x: 50, y: 40 }, elbow: { x: (50 + x) / 2, y: (40 + y) / 2 + 6 } };
+    }
+    const out = { x, y, confidence: wristOk ? 0.9 : 0.3 };
+    lastGoodRef.current = { pos: out, t: now };
+    return out;
+
+    // Short dropouts (under 0.4 s) keep the last good position instead of
+    // flagging the hand as lost.
+    function coast() {
+      const g = lastGoodRef.current;
+      if (g && performance.now() - g.t < 400) return g.pos;
+      return null;
+    }
+  }, [poseData, activeSide]);
 
   useEffect(() => {
     const pos = getHandPosition();
     const valid = pos && pos.x >= 0 && pos.x <= 100 && pos.y >= 0 && pos.y <= 100;
     if (valid) {
+      // Update the stage immediately (before React re-renders) for the lowest delay.
+      stageSceneRef.current?.setArm?.(armRef.current);
+      stageSceneRef.current?.setHand?.(pos, repPhaseRef.current === REP_PHASE.DWELLING, usedSideRef.current);
       setHandPosition(pos);
       setIsHandVisible(true);
       handLostFramesRef.current = 0;
@@ -617,7 +808,7 @@ export default function CloudReach({
     if (flow !== FLOW.FIND_START) return;
     if (!handPosition || !isHandVisible) {
       stableFrameStartRef.current = null;
-      setFindStartMsg("Place your hand in the starting area.");
+      setFindStartMsg("Show your arm and hand to the camera.");
       return;
     }
     const prev = prevHandForStabilityRef.current;
@@ -659,7 +850,7 @@ export default function CloudReach({
       const secs = Math.floor((Date.now() - sessionStartTimeRef.current) / 1000);
       setElapsedMain(secs);
 
-      const progress = Math.min(100, (secs / SESSION.mainSeconds) * 100);
+      const progress = Math.min(100, (secs / mainSeconds) * 100);
       setBiometrics((prev) => ({
         ...prev,
         sessionProgress: progress,
@@ -689,15 +880,14 @@ export default function CloudReach({
         }
       }
 
-      if (secs >= SESSION.mainSeconds) clearInterval(mainTimerRef.current);
     }, 1000);
     return () => clearInterval(mainTimerRef.current);
-  }, [flow, SESSION.mainSeconds, repData]);
+  }, [flow, mainSeconds, repData]);
 
   useEffect(() => {
     if (flow !== FLOW.PLAYING) return;
-    if (elapsedMain >= SESSION.mainSeconds || repetitionsCompleted >= SESSION.targetReps) {
-      finishSessionRef.current();
+    if (elapsedMain >= mainSeconds || repetitionsCompleted >= targetReps) {
+      requestFinishRef.current();
       // Safety net: finishSession should reach setFlow(FLOW.DONE)
       // synchronously, but if anything inside it ever hangs, this
       // guarantees the screen can't stay stuck on PLAYING indefinitely.
@@ -908,6 +1098,15 @@ export default function CloudReach({
 
       try { audio.playSuccess(); } catch (err) { console.error("[CloudReach] audio failed:", err); }
 
+      stageSceneRef.current?.popAt?.(cloudRef.x, cloudRef.y);
+      missStreakRef.current = 0;
+      okStreakRef.current += 1;
+      if (okStreakRef.current >= 3 && levelRef.current < LEVELS.length && (papsScoreRef.current ?? 0) < 3) {
+        okStreakRef.current = 0;
+        levelRef.current += 1;
+        setLevel(levelRef.current);
+        stageSceneRef.current?.levelUp?.(`Level ${levelRef.current}: wider reach!`);
+      }
       setFlash({ type: "pop", key: Date.now() });
       setTimeout(() => setFlash(null), 400);
 
@@ -920,8 +1119,8 @@ export default function CloudReach({
       // this line (recordRep updated it above, synchronously), so this
       // ends the session in the same call stack as the final rep —
       // no setTimeout, no waiting for the next render.
-      if (repDataRef.current.length >= SESSION.targetReps) {
-        finishSessionRef.current();
+      if (repDataRef.current.length >= targetReps) {
+        requestFinishRef.current();
         return;
       }
 
@@ -969,8 +1168,8 @@ export default function CloudReach({
   // ==================================================================
   const spawnNextTarget = useCallback(
     (firstTarget = false) => {
-      if (repetitionsCompleted >= SESSION.targetReps) {
-        finishSessionRef.current();
+      if (repetitionsCompleted >= targetReps) {
+        requestFinishRef.current();
         return;
       }
 
@@ -979,7 +1178,9 @@ export default function CloudReach({
       peakReachDepthRef.current = 0;
       startPositionRef.current = handPosition ? { ...handPosition } : startPositionRef.current;
 
-      const newCloud = spawnCloud(currentDifficulty, ROM, firstTarget);
+      const newCloud = spawnCloud(levelRef.current - 1, ROM, firstTarget, armChoiceRef.current, lastHandRef.current);
+      lastHandRef.current = newCloud.hand;
+      assignedHandRef.current = newCloud.hand;
 
       setCloud(newCloud);
       setRepPhase(REP_PHASE.TARGET_VISIBLE);
@@ -993,17 +1194,26 @@ export default function CloudReach({
         setCombo(0);
         setStreakCount(0);
         recordRep("missed", newCloud);
+        stageSceneRef.current?.missPuff?.();
+        okStreakRef.current = 0;
+        missStreakRef.current += 1;
+        if (missStreakRef.current >= 2 && levelRef.current > 1) {
+          missStreakRef.current = 0;
+          levelRef.current -= 1;
+          setLevel(levelRef.current);
+          showMilestone("A little easier. Take your time.");
+        }
         setFlash({ type: "miss", key: Date.now() });
         setTimeout(() => setFlash(null), 400);
         setFeedbackMsg("No rush — let's try the next one.");
         setRepetitionsCompleted((r) => r + 1);
 
-        if (repDataRef.current.length >= SESSION.targetReps) {
-          finishSessionRef.current();
+        if (repDataRef.current.length >= targetReps) {
+          requestFinishRef.current();
           return;
         }
         startRest();
-      }, CLOUD_LIFETIME_SECONDS * 1000);
+      }, newCloud.lifetimeMs || CLOUD_LIFETIME_SECONDS * 1000);
     },
     [repetitionsCompleted, SESSION, currentDifficulty, ROM, handPosition, clearExpiryTimer, recordRep, startRest]
   );
@@ -1031,7 +1241,10 @@ export default function CloudReach({
     }
 
     const distToCloud = Math.hypot(handPosition.x - cloud.x, handPosition.y - cloud.y);
-    const inZone = distToCloud < TARGET_HIT_RADIUS_PERCENT;
+    const stage = stageSizeRef.current;
+    const inZone =
+      Math.hypot(((handPosition.x - cloud.x) * stage.w) / 100, ((handPosition.y - cloud.y) * stage.h) / 100) <
+      cloud.size * 0.8 * (stage.h / 600);
 
     if (wristRelative && wristRelative.dz > peakReachDepthRef.current) {
       peakReachDepthRef.current = wristRelative.dz;
@@ -1091,28 +1304,6 @@ export default function CloudReach({
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
   }, []);
-
-  // ==================================================================
-  // ADAPTIVE DIFFICULTY
-  // ==================================================================
-  useEffect(() => {
-    if (flow !== FLOW.PLAYING || isPaused) return;
-    const timer = setInterval(() => {
-      adapt({
-        accuracy,
-        papsScore,
-        combo: bestCombo,
-        smoothness: recentSmoothness,
-        fatigueLevel: biometrics.fatigueLevel,
-        // maxAngleRef tracks best-observed shoulder flexion this session,
-        // already excluded from counting while pain is detected (see the
-        // PAPS-gated ROM tracking effect above). 0 here means "no valid
-        // sample yet," which correctly fails every ROM gate.
-        maxFlexionAngle: maxAngleRef.current || null,
-      });
-    }, 12000);
-    return () => clearInterval(timer);
-  }, [flow, isPaused, adapt, accuracy, papsScore, bestCombo, recentSmoothness, biometrics.fatigueLevel]);
 
   useEffect(() => {
     if (flow !== FLOW.PLAYING) return;
@@ -1342,7 +1533,7 @@ export default function CloudReach({
         gameSpecificMetrics: {
           totalAttempts: metrics.attemptedReps,
           incompleteReps: metrics.incompleteReps,
-          targetReps: SESSION.targetReps,
+          targetReps: targetReps,
           bestCombo,
           longestHitStreak: bestCombo,
           bestStreak: metrics.bestStreak,
@@ -1393,7 +1584,7 @@ export default function CloudReach({
     gameSpecific: {
       totalAttempts: metrics.attemptedReps,
       incompleteReps: metrics.incompleteReps,
-      targetReps: SESSION.targetReps,
+      targetReps: targetReps,
       bestCombo,
       longestHitStreak: bestCombo,
       bestStreak: metrics.bestStreak,
@@ -1511,7 +1702,7 @@ export default function CloudReach({
     setElapsedMain(0);
     setEndingSession(false);
     setFeedbackMsg(REACH_PROMPT);
-    setFindStartMsg("Place your hand in the starting area.");
+    setFindStartMsg("Show your arm and hand to the camera.");
     setStreakCount(0);
     setBestStreak(0);
     setBiometrics({
@@ -1592,10 +1783,102 @@ export default function CloudReach({
     );
 
   // ==================================================================
+  // "KEEP GOING?" PROMPT
+  // ==================================================================
+  // When the planned reps or time run out, ask the patient instead of just
+  // stopping. They can add 5 clouds and 1 minute (up to twice), or finish.
+  requestFinishRef.current = () => {
+    if (hasEndedRef.current || promptOpenRef.current) return;
+    if (extensionsRef.current >= MAX_EXTENSIONS) {
+      finishSessionRef.current();
+      return;
+    }
+    promptOpenRef.current = true;
+    promptStartedAtRef.current = Date.now();
+    clearExpiryTimer();
+    setContinuePrompt(true);
+    requestPause("continue");
+  };
+
+  const handleContinueYes = () => {
+    extensionsRef.current += 1;
+    // the wall clock kept running while the prompt was open: give that time back
+    if (sessionStartTimeRef.current) sessionStartTimeRef.current += Date.now() - promptStartedAtRef.current;
+    promptOpenRef.current = false;
+    setExtraReps((r) => r + CONTINUE_EXTRA_REPS);
+    setExtraSeconds((x) => x + CONTINUE_EXTRA_SECONDS);
+    setContinuePrompt(false);
+    releasePause("continue");
+    setCloud(null);
+    startRest();
+  };
+
+  const handleContinueNo = () => {
+    promptOpenRef.current = false;
+    setContinuePrompt(false);
+    releasePause("continue");
+    finishSessionRef.current();
+  };
+
+  // ==================================================================
+  // PHASER STAGE BRIDGE
+  // ==================================================================
+  const stageGameRef = useRef(null);
+  const stageSceneRef = useRef(null);
+  const attachStage = useCallback((el) => {
+    if (!el) {
+      if (stageGameRef.current) {
+        stageGameRef.current.destroy(true);
+        stageGameRef.current = null;
+        stageSceneRef.current = null;
+      }
+      return;
+    }
+    if (stageGameRef.current) return;
+    const game = createCloudReachGame(el);
+    stageGameRef.current = game;
+    game.events.once("ready", () => {
+      const sc = game.scene.keys["CloudReachScene"];
+      stageSceneRef.current = sc;
+      sc.onSize = (w, h) => { stageSizeRef.current = { w, h }; };
+      stageSizeRef.current = { w: sc.scale.width, h: sc.scale.height };
+    });
+  }, []);
+  useEffect(() => () => {
+    if (stageGameRef.current) { stageGameRef.current.destroy(true); stageGameRef.current = null; stageSceneRef.current = null; }
+  }, []);
+
+  useEffect(() => {
+    const sc = stageSceneRef.current;
+    if (!sc?.setTarget) return;
+    const sp = startPositionRef.current;
+    sc.setTheme?.(levelRef.current - 1);
+    sc.setHome(sp.x, sp.y, ROM.neutralZoneRadiusPercent);
+    const show = cloud && !cloud.popped && repPhase !== REP_PHASE.RESTING;
+    sc.setTarget(show ? { x: cloud.x, y: cloud.y, size: cloud.size, label: cloud.zoneLabel, hand: cloud.hand, holding: !!cloud.holdStart } : null);
+    // The reach arc for this level
+    sc.setArc?.(
+      { x: 50, y: 40 },
+      levelPool(levelRef.current - 1, armChoiceRef.current, false).map((z) => scaledPosition(z, ROM, LEVELS[levelRef.current - 1].arc))
+    );
+    sc.setHold(show ? holdProgress : 0);
+  });
+
+  useEffect(() => {
+    const sc = stageSceneRef.current;
+    if (!sc?.setHand) return;
+    sc.setHand(handPosition && isHandVisible ? handPosition : null, repPhase === REP_PHASE.DWELLING, usedSideRef.current);
+  }, [handPosition, isHandVisible, repPhase]);
+
+  useEffect(() => {
+    stageSceneRef.current?.setPaused?.(isPaused);
+  }, [isPaused]);
+
+  // ==================================================================
   // RENDER
   // ==================================================================
   const cameraLarge = flow === FLOW.READY_CHECK || flow === FLOW.FIND_START || flow === FLOW.COUNTDOWN;
-  const repLabel = `Rep ${String(Math.min(repetitionsCompleted + 1, SESSION.targetReps)).padStart(2, "0")} / ${String(SESSION.targetReps).padStart(2, "0")}`;
+  const repLabel = `Rep ${String(Math.min(repetitionsCompleted + 1, targetReps)).padStart(2, "0")} / ${String(targetReps).padStart(2, "0")}`;
 
   return (
     <div
@@ -1606,7 +1889,16 @@ export default function CloudReach({
         paddingBottom: "env(safe-area-inset-bottom, 0px)",
       }}
     >
-      <SessionCheckpoint {...engine.checkpoint} />
+      <SessionCheckpoint
+        open={continuePrompt}
+        title="Great reaching! Want to keep going?"
+        subtitle={`${popped} clouds reached so far. You choose.`}
+        extendLabel={`😊 Yes, ${CONTINUE_EXTRA_REPS} more clouds`}
+        continueLabel={null}
+        finishLabel="✅ I'm done for today"
+        onExtend={handleContinueYes}
+        onFinish={handleContinueNo}
+      />
       {/* This wrapper is itself absolutely positioned and offset by
           shellHeaderOffset — it becomes the real containing block for
           every top-0/inset-0 child below, which padding could never do. */}
@@ -1614,11 +1906,12 @@ export default function CloudReach({
         {/* PERSISTENT CAMERA */}
         <div
           className={
-            cameraLarge
+            flow === FLOW.READY_CHECK
+              ? "absolute left-3 top-3 w-[92%] md:w-[44%] aspect-video rounded-2xl overflow-hidden border border-[#E2E8F0] shadow-sm z-10"
+              : cameraLarge
               ? "absolute inset-x-0 top-0 mx-auto mt-4 sm:mt-8 w-[92%] sm:w-[640px] max-w-full aspect-video rounded-2xl overflow-hidden border border-[#E2E8F0] shadow-sm z-10"
-              : "absolute right-2 sm:right-4 w-36 h-24 sm:w-64 sm:h-44 rounded-lg overflow-hidden border border-[#E2E8F0] shadow-md z-20"
+              : "absolute right-2 bottom-2 sm:right-4 sm:bottom-4 w-36 h-24 sm:w-52 sm:h-36 rounded-xl overflow-hidden border-2 border-white/80 shadow-lg z-40"
           }
-          style={!cameraLarge ? { top: headerHeight + 8 } : undefined}
         >
           <video ref={videoRef} autoPlay playsInline muted className="w-full h-full scale-x-[-1] object-cover" />
           <SkeletonOverlay poseData={poseData} overallStatus={guidance.overallStatus} shoulderAngle={shoulderAngle} />
@@ -1640,7 +1933,7 @@ export default function CloudReach({
 
         {/* READY_CHECK */}
         {flow === FLOW.READY_CHECK && (
-          <div className="absolute inset-0 flex flex-col items-center overflow-y-auto pb-24 pt-[calc(4rem+min(52vw,360px))] sm:pt-[26rem] px-4">
+          <div className="absolute inset-y-0 right-0 left-0 md:left-[47%] flex flex-col items-center overflow-y-auto pb-24 pt-[calc(4rem+min(52vw,360px))] md:pt-6 px-4">
             <h1 className="mb-1 text-2xl font-bold text-[#0F172A]">Cloud Reach Therapy</h1>
             <p className="mb-4 max-w-md text-center text-sm text-[#64748B]">
               Reach to each cloud and pop it. This is an exercise tool, not a medical device.
@@ -1652,19 +1945,35 @@ export default function CloudReach({
                 caption="Reach the cloud and hold"
                 steps={[
                   "Sit back so your shoulders and hand show on the camera.",
-                  "A cloud appears. Reach your hand to it and hold still until it pops.",
+                  "A cloud appears and tells you which hand to use (blue = left, orange = right). Reach to it and hold still until it pops.",
                   "Bring your hand back to the middle circle. The next cloud appears.",
                 ]}
                 scoring={[
                   "Hold your hand on the cloud for about half a second to pop it.",
                   "A cloud fades after 7 seconds if you do not reach it.",
                   "Move smoothly. If you move too fast, the game asks you to slow down.",
-                  "Higher levels use smaller clouds in more directions.",
+                  "Each level widens the arc: clouds appear further up, down and out, and get smaller.",
                 ]}
                 trains="reaching in all directions, control and smooth movement."
               />
             </div>
 
+            <div className="mb-4 flex flex-col items-center gap-2">
+              <div className="text-sm font-semibold text-[#334155]">Which arm will you use?</div>
+              <div className="inline-flex overflow-hidden rounded-xl border border-[#CBD5E1] bg-white shadow-sm">
+                {[["both", "Both arms"], ["left", "Left arm only"], ["right", "Right arm only"]].map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setArmChoice(id)}
+                    className={`px-4 py-2 text-sm font-semibold ${armChoice === id ? "bg-[#0F766E] text-white" : "text-[#334155] hover:bg-[#F1F5F9]"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="max-w-xs text-center text-xs text-[#64748B]">With both arms, each cloud tells you which hand to use. Pick one arm if you only use one.</div>
+            </div>
             <div
               className={`mb-4 max-w-md rounded-xl border px-4 py-2 text-center text-sm ${guidance.overallStatus === "ok" ? "border-[#16A34A]/30 bg-[#16A34A]/10 text-[#166534]" : "border-[#D97706]/30 bg-[#D97706]/10 text-[#92400E]"
                 }`}
@@ -1685,12 +1994,7 @@ export default function CloudReach({
         {flow === FLOW.FIND_START && (
           <div className="absolute inset-0 flex flex-col items-center pt-[calc(4rem+min(52vw,360px))] sm:pt-[26rem] px-4">
             <div className={`text-xl font-semibold mb-2 ${findStartMsg === "Ready!" ? "text-[#16A34A]" : "text-[#0F766E]"}`}>{findStartMsg}</div>
-            {handPosition && (
-              <div
-                className="fixed w-7 h-7 rounded-full border-4 border-[#2563EB] bg-[#2563EB]/15 shadow-sm pointer-events-none z-20"
-                style={{ left: `${handPosition.x}%`, top: `${handPosition.y}%`, transform: "translate(-50%, -50%)", transition: "left 0.05s, top 0.05s" }}
-              />
-            )}
+            <div className="mt-1 max-w-md text-center text-sm text-[#64748B]">Rest your arm comfortably in front of you. Your starting spot is saved when you hold still.</div>
           </div>
         )}
 
@@ -1722,65 +2026,46 @@ export default function CloudReach({
               </div>
             )}
 
-            {/* TOP HEADER */}
-            <div ref={headerRef} className="absolute top-0 left-0 right-0 z-30 bg-white/95 backdrop-blur border-b border-[#E2E8F0] px-3 sm:px-6 py-2 sm:py-3">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="min-w-0">
-                  <div className="text-sm sm:text-lg font-semibold text-[#0F172A] truncate">Cloud Reach Therapy</div>
-                  <div className="text-[10px] sm:text-xs text-[#64748B]">
-                    {repLabel} · {formatTime(Math.max(0, SESSION.mainSeconds - elapsedMain))}
-                    <span className="ml-2 text-[#0F766E] font-medium">{(DIFFICULTY_SETTINGS[currentDifficulty] || DIFFICULTY_SETTINGS.Beginner).label}</span>
-                    {streakCount >= 3 && <span className="ml-2 text-[#D97706] font-medium">Streak {streakCount}</span>}
-                  </div>
-                </div>
-                <div className="flex gap-2 flex-shrink-0">
-                  <button
-                    onClick={handleEndSessionClick}
-                    disabled={endingSession}
-                    title="End Session"
-                    aria-label="End Session"
-                    className="flex items-center gap-1.5 rounded-lg bg-[#DC2626] px-2.5 py-2 text-white hover:bg-[#B91C1C] active:bg-[#991B1B] disabled:opacity-60 text-xs sm:text-sm font-semibold border border-[#DC2626]/30"
-                  >
-                    <LogOut size={16} />
-                    <span className="hidden sm:inline">End Session</span>
-                  </button>
-                  <button
-                    onClick={() => setShowDebug((d) => !d)}
-                    className={`rounded-lg p-2 border ${showDebug ? "bg-[#0F766E]/10 border-[#0F766E]/30 text-[#0F766E]" : "bg-white border-[#E2E8F0] text-[#475569] hover:bg-[#F1F5F9]"}`}
-                    title="Toggle debug"
-                  >
-                    <Bug size={16} />
-                  </button>
-                  <button onClick={() => (isPaused ? resumeSession() : pauseSession())} className="rounded-lg bg-white border border-[#E2E8F0] p-2 text-[#475569] hover:bg-[#F1F5F9]">
-                    {isPaused ? <Play size={16} /> : <Pause size={16} />}
-                  </button>
-                </div>
+            {/* SLIM TOP BAR: floats over the stage so the game gets the whole screen */}
+            <div ref={headerRef} className="pointer-events-none absolute left-0 right-0 top-0 z-30 flex flex-wrap items-center justify-between gap-2 px-3 py-2 sm:px-4">
+              <div className="pointer-events-auto flex flex-wrap items-center gap-2 text-xs sm:text-sm font-semibold">
+                <span className="rounded-full bg-white/90 px-3 py-1.5 text-[#0F172A] shadow-sm border border-[#E2E8F0]">☁️ Cloud Reach</span>
+                <span className="rounded-full bg-[#0F766E] px-3 py-1.5 text-white shadow-sm">{LEVELS[level - 1].name}</span>
+                <span className="rounded-full bg-white/90 px-3 py-1.5 text-[#0F172A] shadow-sm border border-[#E2E8F0]">{repLabel}</span>
+                <span className="rounded-full bg-white/90 px-3 py-1.5 font-mono text-[#0F172A] shadow-sm border border-[#E2E8F0]">⏱ {formatTime(Math.max(0, mainSeconds - elapsedMain))}</span>
+                <span className="rounded-full bg-white/90 px-3 py-1.5 shadow-sm border border-[#E2E8F0]">
+                  <span className="text-[#16A34A]">✓ {popped}</span>
+                  <span className="mx-1 text-[#CBD5E1]">|</span>
+                  <span className="text-[#DC2626]">✗ {missed}</span>
+                </span>
+                <span className="rounded-full bg-white/90 px-3 py-1.5 text-[#0F172A] shadow-sm border border-[#E2E8F0]">
+                  {papsScore < 3 ? "😊 Comfortable" : papsScore < 7 ? "😐 Take care" : "😣 Rest"}
+                </span>
+                {streakCount >= 3 && <span className="rounded-full bg-[#FEF3C7] px-3 py-1.5 text-[#92400E] shadow-sm border border-[#FDE68A]">🔥 Streak {streakCount}</span>}
               </div>
-
-              <div className="mt-3 flex flex-wrap items-start gap-3">
-                <PainScoreIndicator papsScore={papsScore} threshold={7} />
-                <ROMDisplay angle={romDegrees} label="Shoulder ROM" />
-                <div className="flex items-center gap-2 bg-white rounded-2xl border border-[#D6E4EF] shadow-sm px-4 py-2.5 min-h-[52px]">
-                  <span className="text-lg font-semibold text-[#16A34A]">Hits: {popped}</span>
-                  <span className="text-[#CBD5E1]">|</span>
-                  <span className="text-lg font-semibold text-[#DC2626]">Misses: {missed}</span>
-                </div>
-                <div className="flex-1 min-w-[220px]">
-                  <SessionProgress
-                    repsCompleted={repetitionsCompleted}
-                    totalReps={SESSION.targetReps}
-                    secondsRemaining={Math.max(0, SESSION.mainSeconds - elapsedMain)}
-                  />
-                </div>
+              <div className="pointer-events-auto flex flex-shrink-0 gap-2">
+                <button
+                  onClick={handleEndSessionClick}
+                  disabled={endingSession}
+                  title="End Session"
+                  aria-label="End Session"
+                  className="flex items-center gap-1.5 rounded-full bg-[#DC2626] px-3 py-2 text-white shadow-sm hover:bg-[#B91C1C] disabled:opacity-60 text-xs sm:text-sm font-semibold"
+                >
+                  <LogOut size={16} />
+                  <span className="hidden sm:inline">End</span>
+                </button>
+                <button onClick={() => setShowDebug((d) => !d)} className={`rounded-full p-2 shadow-sm border ${showDebug ? "bg-[#0F766E]/10 border-[#0F766E]/30 text-[#0F766E]" : "bg-white/90 border-[#E2E8F0] text-[#475569]"}`} title="Toggle debug">
+                  <Bug size={16} />
+                </button>
+                <button onClick={() => (isPaused ? resumeSession() : pauseSession())} className="rounded-full bg-white/90 border border-[#E2E8F0] p-2 text-[#475569] shadow-sm hover:bg-white">
+                  {isPaused ? <Play size={16} /> : <Pause size={16} />}
+                </button>
               </div>
-
-              <BiometricsPanel />
             </div>
 
             {/* GAME AREA */}
             <div
-              className="absolute left-0 right-0 bottom-0 overflow-y-auto bg-gradient-to-b from-[#EFF6FF] via-[#E0F2FE] to-[#F8FAFC]"
-              style={{ top: headerHeight, minHeight: 240 }}
+              className="absolute inset-0 overflow-hidden bg-gradient-to-b from-[#EFF6FF] via-[#E0F2FE] to-[#F8FAFC]"
             >
               {flash && (
                 <div
@@ -1801,85 +2086,25 @@ export default function CloudReach({
                 </div>
               )}
 
-              <div
-                className="absolute rounded-full border border-[#0F766E]/25 bg-[#0F766E]/5 pointer-events-none"
-                style={{
-                  left: `${clamp(startPositionRef.current?.x ?? ROM.neutralX, ROM.neutralZoneRadiusPercent + EDGE_SAFE_MARGIN_PERCENT, 100 - ROM.neutralZoneRadiusPercent - EDGE_SAFE_MARGIN_PERCENT)}%`,
-                  // Clamp display only — never let the start-zone ring's edge
-                  // (center ± radius) render close enough to the game area's
-                  // boundary to get visually clipped, on any screen size.
-                  // Hit-detection math elsewhere still uses the real,
-                  // unclamped startPositionRef value.
-                  top: `${clamp(startPositionRef.current?.y ?? ROM.neutralY, ROM.neutralZoneRadiusPercent + EDGE_SAFE_MARGIN_PERCENT, 100 - ROM.neutralZoneRadiusPercent - EDGE_SAFE_MARGIN_PERCENT)}%`,
-                  width: `${ROM.neutralZoneRadiusPercent * 2}%`,
-                  height: `${ROM.neutralZoneRadiusPercent * 2}%`,
-                  transform: "translate(-50%, -50%)",
-                }}
-              />
+              {/* Phaser stage: sky, clouds, hand cursor, hold ring, pop effects */}
+              <div ref={attachStage} className="absolute inset-0" style={{ zIndex: 1 }} />
 
-              {cloud && repPhase !== REP_PHASE.RESTING && (
-                <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ zIndex: 4 }}>
-                  <line
-                    x1={`${startPositionRef.current.x}%`}
-                    y1={`${startPositionRef.current.y}%`}
-                    x2={`${cloud.x}%`}
-                    y2={`${cloud.y}%`}
-                    stroke="rgba(15,23,42,0.15)"
-                    strokeWidth={2}
-                    strokeDasharray="4 6"
-                  />
-                </svg>
-              )}
-
-              <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ zIndex: 5 }}>
-                {trail.length > 1 &&
-                  trail.slice(1).map((p, i) => {
-                    const prev = trail[i];
-                    const opacity = ((i + 1) / trail.length) * 0.5;
-                    return <line key={i} x1={`${prev.x}%`} y1={`${prev.y}%`} x2={`${p.x}%`} y2={`${p.y}%`} stroke="#2563EB" strokeWidth={2} strokeOpacity={opacity} strokeLinecap="round" />;
-                  })}
-                {repPhase !== REP_PHASE.WAITING && startPositionRef.current && (
-                  <circle cx={`${startPositionRef.current.x}%`} cy={`${startPositionRef.current.y}%`} r={5} fill="none" stroke="rgba(15,23,42,0.35)" strokeWidth={2} />
-                )}
-              </svg>
-
-              {cloud && !cloud.popped && repPhase !== REP_PHASE.RESTING && (
-                <div
-                  className="absolute select-none"
-                  style={{
-                    left: `${cloud.x}%`,
-                    top: `${cloud.y}%`,
-                    transform: "translate(-50%, -50%)",
-                    zIndex: 8,
-                  }}
-                >
-                  <CloudSVG sizePx={cloud.size} active={!!cloud.holdStart} holdProgress={holdProgress} />
-                  {cloud.holdStart && (
-                    <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 w-3/4 h-1.5 bg-[#0F766E]/15 rounded-full overflow-hidden">
-                      <div className="h-full bg-[#0F766E] rounded-full transition-all duration-100" style={{ width: `${Math.min(100, holdProgress)}%` }} />
-                    </div>
-                  )}
-                  <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-[8px] font-medium text-[#64748B] whitespace-nowrap bg-white/80 px-1.5 py-0.5 rounded">
-                    {cloud.zoneLabel}
-                  </div>
-                </div>
-              )}
-
-              {handPosition && isHandVisible && (
-                <div
-                  className="absolute pointer-events-none"
-                  style={{ left: `${handPosition.x}%`, top: `${handPosition.y}%`, transform: "translate(-50%, -50%)", transition: "left 0.05s, top 0.05s", zIndex: 9 }}
-                >
-                  <div
-                    className={`rounded-full border-4 ${repPhase === REP_PHASE.DWELLING ? "border-[#0F766E] bg-[#0F766E]/20" : "border-[#2563EB] bg-[#2563EB]/15"}`}
-                    style={{ width: 28, height: 28, boxShadow: repPhase === REP_PHASE.DWELLING ? "0 0 14px 4px rgba(15,118,110,.25)" : "0 0 10px 3px rgba(37,99,235,.2)" }}
-                  />
-                </div>
-              )}
-
-              <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-center px-4 max-w-[92%] z-10">
+              <div className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 text-center px-4 max-w-[92%] z-10">
                 <div className="text-sm sm:text-base text-[#0F172A]/90 bg-white/80 backdrop-blur rounded-lg px-3 py-1.5 border border-[#E2E8F0]">{feedbackMsg}</div>
+                {cloud && !cloud.popped && repPhase !== REP_PHASE.RESTING && cloud.hand && (
+                  <div
+                    className="mb-1 inline-block rounded-full px-4 py-1.5 text-sm sm:text-base font-extrabold text-white shadow-md"
+                    style={{ background: cloud.hand === "left" ? "#0891B2" : "#EA580C" }}
+                  >
+                    {cloud.hand === "left" ? "✋ Use your LEFT hand" : "Use your RIGHT hand ✋"}
+                  </div>
+                )}
                 {handLostPause && <div className="mt-1 text-xs text-[#D97706]">{NO_HAND_MESSAGE}</div>}
+                {sittingTooClose && !handLostPause && (
+                  <div className="mt-1 rounded-lg bg-[#FEF3C7] px-3 py-1 text-xs font-semibold text-[#92400E] border border-[#FDE68A]">
+                    Sit a little further back so your arms stay in the camera picture.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1891,7 +2116,7 @@ export default function CloudReach({
         {flow === FLOW.DONE && showCompletionPopup && (
           <SessionCompletionPopup
             metrics={sessionScore}
-            targetReps={SESSION.targetReps}
+            targetReps={targetReps}
             onViewReport={() => setShowCompletionPopup(false)}
           />
         )}
@@ -1945,7 +2170,7 @@ export default function CloudReach({
                 fallback={
                   <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-[#F8FAFC] px-6 text-center">
                     <div className="text-xl font-semibold text-[#0F172A]">
-                      Session complete — {metrics.successfulReps}/{SESSION.targetReps} reps
+                      Session complete — {metrics.successfulReps}/{targetReps} reps
                     </div>
                     <div className="text-sm text-[#64748B] max-w-sm">The detailed report couldn't be displayed.</div>
                     <button onClick={() => onSessionEnd?.(sessionData)} className="rounded-lg bg-[#2563EB] px-6 py-2 font-semibold text-white hover:bg-[#1D4ED8]">

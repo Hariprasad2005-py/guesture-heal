@@ -156,7 +156,7 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
   const frameCounterRef = useRef(0);
   const framesDeliveredRef = useRef(0);
   const researchFrameIdRef = useRef(0);
-  const elevFiltersRef = useRef({ left: new OneEuro(), right: new OneEuro() });
+  const elevFiltersRef = useRef({ left: new OneEuro(0.8, 0.12), right: new OneEuro(0.8, 0.12) });
 
   callbackRef.current = onPoseUpdate;
 
@@ -357,8 +357,21 @@ export function useMediaPipeUpperBody({ videoRef, onPoseUpdate, enabled = true }
                 const rightElevation = elevFiltersRef.current.right.filter(
                   elevationFromWorld(world, "right", rightFlexion), nowMs);
 
+                // 3D joint positions in metres (centred on the hips). These are
+                // estimated even when a wrist or elbow is outside the camera
+                // picture, so reach games can use them instead of image coordinates.
+                let worldPts = null;
+                if (world) {
+                  worldPts = {};
+                  for (const k of ["leftShoulder", "rightShoulder", "leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftHip", "rightHip"]) {
+                    const w = world[LANDMARKS[k]];
+                    if (w) worldPts[k] = { x: w.x, y: w.y, z: w.z, visibility: w.visibility ?? 0 };
+                  }
+                }
+
                 const data = {
                   raw,
+                  world: worldPts,
                   midChest,
                   leftElevation,
                   rightElevation,

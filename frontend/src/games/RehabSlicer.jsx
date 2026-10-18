@@ -14,6 +14,10 @@
   import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import HowToPlay from "../components/rehab/HowToPlay";
+import GameShell, { StageTopBar, CameraPip, HandBanner } from "../components/rehab/GameShell";
+import ArmPicker from "../components/rehab/ArmPicker";
+import { InkBackdrop } from "../components/rehab/GameBackdrops";
+import LevelBanner from "../components/rehab/LevelBanner";
   import MetricsEngine from "../utils/metricsEngine";
   import { researchLogger } from "../utils/researchLogger";
 
@@ -51,22 +55,72 @@ import HowToPlay from "../components/rehab/HowToPlay";
     { minHits: 12, directions: ["horizontal", "vertical", "diagonal"] },
   ];
 
+  // Five levels. Each one is harder: more slice directions, faster, smaller.
+  const LEVELS = [
+    { minHits: 0, directions: ["horizontal"], sizeMul: 1.15, speedMul: 0.9, text: "Level 1: side to side" },
+    { minHits: 5, directions: ["horizontal", "vertical"], sizeMul: 1.0, speedMul: 1.0, text: "Level 2: up and down too" },
+    { minHits: 12, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.95, speedMul: 1.1, text: "Level 3: diagonals" },
+    { minHits: 20, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.85, speedMul: 1.25, text: "Level 4: faster fruit" },
+    { minHits: 30, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.75, speedMul: 1.4, text: "Level 5: smaller and faster" },
+  ];
+
+  const DIRECTION_HINT = {
+    horizontal: { arrow: "↔", text: "Swipe side to side" },
+    vertical: { arrow: "↕", text: "Swipe up and down" },
+    diagonal: { arrow: "⤢", text: "Swipe across, diagonally" },
+  };
+
+  // Which hand each fruit asks for when both arms are in use.
+  function assignHand(x, armChoice, last) {
+    if (armChoice === "left" || armChoice === "right") return armChoice;
+    if (x < 44) return "left";
+    if (x > 56) return "right";
+    return last === "left" ? "right" : "left";
+  }
+
   const FRUIT_EMOJI = ["🍎", "🍊", "🍋", "🍇", "🍉", "🍓", "🥝", "🍑"];
+
+  // Juice colour for the splash when each fruit is sliced.
+  const JUICE = {
+    "🍎": "#ef4444", "🍊": "#fb923c", "🍋": "#facc15", "🍇": "#a855f7",
+    "🍉": "#f43f5e", "🍓": "#fb7185", "🥝": "#84cc16", "🍑": "#fdba74",
+  };
+
+  // The two halves of a sliced fruit fly apart along the cut line.
+  // cut = angle of the blade (deg): horizontal swipe = flat cut, etc.
+  const CUT_ANGLE = { horizontal: 0, vertical: 90, diagonal: 45 };
+  function halfClip(angleDeg, side) {
+    // a big half-plane through the centre, rotated by the cut angle
+    const a = (angleDeg * Math.PI) / 180;
+    const nx = -Math.sin(a), ny = Math.cos(a); // normal to the cut line
+    const sgn = side === 0 ? 1 : -1;
+    const pts = [[-1, -1], [1, -1], [1, 1], [-1, 1]]
+      .map(([x, y]) => [x, y]);
+    // build polygon of points on the chosen side of the line (in -1..1 space)
+    const out = [];
+    const L = 3;
+    const dx = Math.cos(a), dy = Math.sin(a);
+    out.push([-dx * L, -dy * L], [dx * L, dy * L], [dx * L + sgn * nx * L, dy * L + sgn * ny * L], [-dx * L + sgn * nx * L, -dy * L + sgn * ny * L]);
+    void pts;
+    return `polygon(${out.map(([x, y]) => `${50 + x * 50}% ${50 + y * 50}%`).join(",")})`;
+  }
 
   function pickSliceDirection(allowedDirections) {
     const pool = allowedDirections && allowedDirections.length ? allowedDirections : ["horizontal"];
     return pool[Math.floor(Math.random() * pool.length)];
   }
 
-  function spawnBall(speed, difficulty, allowedDirections, hitboxScale = OBJECT_HITBOX_SCALE) {
+  function spawnBall(speed, difficulty, allowedDirections, hitboxScale = OBJECT_HITBOX_SCALE, sizeMul = 1, speedMul = 1, armChoice = "both", lastHand = "right") {
     const sizeMap = { Beginner: 110, Intermediate: 100, Advanced: 90 };
-    const size = sizeMap[difficulty] || 40;
+    const size = Math.round((sizeMap[difficulty] || 40) * sizeMul);
+    const spawnX = 15 + Math.random() * 70;
     const requiredDirection = pickSliceDirection(allowedDirections);
     return {
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-      x: 15 + Math.random() * 70,
+      x: spawnX,
       y: -10,
-      speed: speed || 0.4,
+      hand: assignHand(spawnX, armChoice, lastHand),
+      speed: (speed || 0.4) * speedMul,
       emoji: FRUIT_EMOJI[Math.floor(Math.random() * FRUIT_EMOJI.length)],
       sliced: false,
       missed: false,
@@ -121,10 +175,20 @@ import HowToPlay from "../components/rehab/HowToPlay";
     const [combo, setCombo] = useState(0);
     const [bestCombo, setBestCombo] = useState(0);
     const [flash, setFlash] = useState(null);
+    const [effects, setEffects] = useState([]);
+    const lastPointsRef = useRef(10);
     const [trail, setTrail] = useState([]);
     const [score, setScore] = useState(0);
     const [repData, setRepData] = useState([]);
     const [movementStage, setMovementStage] = useState(MOVEMENT_STAGES[0].directions);
+    const [armChoice, setArmChoice] = useState("both");
+    const [levelBanner, setLevelBanner] = useState({ visible: false, text: "" });
+    const lastHandRef = useRef("right");
+    const armChoiceRef = useRef("both");
+    armChoiceRef.current = armChoice;
+    const levelIndex = LEVELS.reduce((acc, l, i) => (hits >= l.minHits ? i : acc), 0);
+    const levelRef = useRef(0);
+    levelRef.current = levelIndex;
 
     const wristHistoryRef = useRef([]);
     const sliceVelocitiesRef = useRef([]);
@@ -141,7 +205,8 @@ import HowToPlay from "../components/rehab/HowToPlay";
       onPoseUpdate: setPoseData,
     });
 
-    const { position, velocity, shoulderAngle, activeSide } = usePoseDetection(poseData);
+    const forcedSide = armChoice !== "both" ? armChoice : ball && !ball.sliced ? ball.hand : "auto";
+    const { position, velocity, shoulderAngle, activeSide } = usePoseDetection(poseData, { preferredSide: forcedSide });
     const guidance = usePostureGuidance(poseData);
     const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
     const { currentDifficulty, settings, adapt } = useAdaptiveDifficulty();
@@ -264,14 +329,21 @@ import HowToPlay from "../components/rehab/HowToPlay";
 
     const spawnNextBall = useCallback(() => {
       clearSpawnTimer();
-      setBall(
-        spawnBall(
-          settings.speed || 0.4,
-          currentDifficulty,
-          movementStage,
-          settings.hitboxScale || OBJECT_HITBOX_SCALE
-        )
+      const lvl = LEVELS[levelRef.current] || LEVELS[0];
+      const nextBall = spawnBall(
+        settings.speed || 0.4,
+        currentDifficulty,
+        lvl.directions,
+        settings.hitboxScale || OBJECT_HITBOX_SCALE,
+        lvl.sizeMul,
+        lvl.speedMul,
+        armChoiceRef.current,
+        lastHandRef.current
       );
+      lastHandRef.current = nextBall.hand;
+      // a new fruit may mean a different hand: forget the old swipe path
+      wristHistoryRef.current = [];
+      setBall(nextBall);
       // settings.hitboxScale falls back to the constant above until
       // useAdaptiveDifficulty (not attached) is extended to expose a
       // per-patient value, e.g. for limited-ROM profiles.
@@ -304,9 +376,15 @@ import HowToPlay from "../components/rehab/HowToPlay";
     // requirements as the patient accumulates successful hits, per spec
     // ("do not introduce complex movements immediately").
     useEffect(() => {
-      const stage = [...MOVEMENT_STAGES].reverse().find((s) => hits >= s.minHits);
-      setMovementStage((stage || MOVEMENT_STAGES[0]).directions);
-    }, [hits]);
+      setMovementStage(LEVELS[levelIndex].directions);
+    }, [levelIndex]);
+
+    useEffect(() => {
+      if (levelIndex === 0) return undefined;
+      setLevelBanner({ visible: true, text: LEVELS[levelIndex].text });
+      const t = setTimeout(() => setLevelBanner((b) => ({ ...b, visible: false })), 2600);
+      return () => clearTimeout(t);
+    }, [levelIndex]);
 
     // --- Main game loop ---------------------------------------------------
     // This effect now depends ONLY on [gameState, isPaused, clearSpawnTimer]
@@ -370,6 +448,7 @@ import HowToPlay from "../components/rehab/HowToPlay";
               ? Math.max(1, comboRef.current * 0.6)
               : comboRef.current;
             const pointsEarned = 10 + Math.round(multiplier * 2);
+            lastPointsRef.current = pointsEarned;
 
             setHits((h) => h + 1);
             setScore((s) => s + pointsEarned);
@@ -469,6 +548,27 @@ import HowToPlay from "../components/rehab/HowToPlay";
         spawnNextBall();
       }
     }, [gameState, ball, isPaused, spawnNextBall]);
+
+    // Slice effects: two fruit halves, juice splash and a points popup.
+    useEffect(() => {
+      if (!ball || !ball.sliced) return undefined;
+      const id = `fx-${ball.id}`;
+      const fx = {
+        id, x: ball.x, y: ball.y, size: ball.size, emoji: ball.emoji,
+        color: JUICE[ball.emoji] || "#fde047",
+        cut: CUT_ANGLE[ball.requiredDirection] ?? 0,
+        points: lastPointsRef.current,
+        drops: Array.from({ length: 10 }, (_, i) => ({
+          a: (i / 10) * 360 + Math.random() * 25,
+          d: 40 + Math.random() * 70,
+          r: 4 + Math.random() * 7,
+        })),
+      };
+      setEffects((list) => [...list.slice(-3), fx]);
+      setTimeout(() => setEffects((list) => list.filter((e) => e.id !== id)), 900);
+      return undefined;
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [ball?.id, ball?.sliced]);
 
     // Clear flash after animation
     useEffect(() => {
@@ -576,6 +676,13 @@ import HowToPlay from "../components/rehab/HowToPlay";
               trains="shoulder and arm movement, and speed control."
             />
 
+            <div className="mb-4 space-y-3 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div>
+                <div className="mb-1.5 text-sm font-semibold text-slate-200">Which arm will you use?</div>
+                <ArmPicker value={armChoice} onChange={setArmChoice} />
+              </div>
+            </div>
+
             <div className="relative overflow-hidden rounded-2xl border-4 border-slate-800 aspect-video">
               <video
                 ref={videoRef}
@@ -670,19 +777,22 @@ import HowToPlay from "../components/rehab/HowToPlay";
       );
     }
 
-    // Active game state
+    // Active game state — full-screen themed stage
+    const lightTheme = true;
+    const hint = ball ? DIRECTION_HINT[ball.requiredDirection] : null;
+    const fruitHand = armChoice === "both" && ball && !ball.sliced ? ball.hand : null;
     return (
-      <div className="min-h-screen bg-[#0B1120] p-8 pt-24 text-white">
+      <GameShell backdrop={<InkBackdrop />}>
         <SessionCheckpoint {...engine.checkpoint} />
         {gameState === GAME_STATES.COUNTDOWN && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-cyan-400">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 text-8xl font-black text-cyan-300">
             {countdown || "GO"}
           </div>
         )}
 
         {isPainDetected && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
-            <div className="rounded-2xl bg-slate-900 p-8 text-center max-w-md">
+            <div className="max-w-md rounded-2xl bg-slate-900 p-8 text-center">
               <h2 className="mb-3 text-xl font-bold text-red-400">Discomfort Detected</h2>
               <p className="mb-6 text-slate-300">Please rest before resuming.</p>
               <button
@@ -698,117 +808,182 @@ import HowToPlay from "../components/rehab/HowToPlay";
           </div>
         )}
 
-        {/* Top bar */}
-        <div className="fixed left-0 right-0 top-0 z-40 flex justify-between border-b border-slate-800 bg-slate-950/90 px-8 py-4 backdrop-blur">
-          <div className="flex gap-5 font-mono text-sm overflow-x-auto">
-            <span>⏱ {timeLeft}s</span>
-            <span>🎯 Score: {score}</span>
-            <span>✅ Hits: {hits}</span>
-            <span>❌ Misses: {misses}</span>
-            <span>🔥 Combo: {combo}</span>
-            <span>📊 Acc: {accuracy}%</span>
-            <span className="text-cyan-400">{currentDifficulty}</span>
+        <StageTopBar
+          isPaused={isPaused}
+          onPause={pauseSession}
+          onResume={resumeSession}
+          onEnd={endSession}
+        >
+          {[
+            ["⏱", `${timeLeft}s`, ""],
+            ["🎯", score, "text-yellow-200"],
+            ["✅", hits, "text-emerald-200"],
+            ["❌", misses, "text-rose-200"],
+            ["🔥", combo, "text-orange-200"],
+          ].map(([ic, v, c]) => (
+            <span key={ic} className={`inline-flex items-center gap-1 rounded-full border border-white/20 bg-white/10 px-3 py-1 ${c}`}>
+              <span>{ic}</span>
+              <span className="tabular-nums">{v}</span>
+            </span>
+          ))}
+          <span className="rounded-full bg-amber-400 px-3 py-1 font-black text-slate-900">Level {levelIndex + 1}</span>
+        </StageTopBar>
+
+        <LevelBanner text={levelBanner.text} visible={levelBanner.visible} />
+        <HandBanner hand={fruitHand} />
+
+        {flash && (
+          <div
+            key={flash.key}
+            className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-5xl font-black drop-shadow-[0_2px_0_rgba(255,255,255,.8)] ${
+              flash.type === "hit" ? "text-emerald-600" : "text-red-600"
+            }`}
+            style={{ animation: "slicer-flash 450ms ease-out forwards" }}
+          >
+            {flash.type === "hit" ? (flash.label === "GREAT" ? "🔥 GREAT!" : "✅ GOOD!") : "❌ MISS"}
           </div>
-          <div className="flex gap-2 flex-shrink-0">
-            <button
-              onClick={() => (isPaused ? resumeSession() : pauseSession())}
-              className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
-            >
-              {isPaused ? <Play size={18} /> : <Pause size={18} />}
-            </button>
-            <button onClick={endSession} className="rounded-lg bg-red-950 p-2 hover:bg-red-900">
-              <X size={18} />
-            </button>
-          </div>
-        </div>
+        )}
 
-        {/* Game area */}
-        <div className="flex h-[calc(100vh-140px)] gap-6">
-          {/* Camera view */}
-          <div className="relative w-[38%] overflow-hidden rounded-2xl border-4 border-slate-800 flex-shrink-0">
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full scale-x-[-1] object-cover"
-            />
-            <SkeletonOverlay
-              poseData={poseData}
-              overallStatus={guidance.overallStatus}
-              shoulderAngle={shoulderAngle}
-            />
-            <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
-              {Math.round(shoulderAngle)}° | {activeSide}
-            </div>
-          </div>
+        {/* soft vignette so the fruit pops */}
+        <div className="pointer-events-none absolute inset-0" style={{ background: "radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(2,6,23,0.28) 100%)" }} />
 
-          {/* Game canvas */}
-          <div className="relative w-[62%] overflow-hidden rounded-2xl border-4 border-slate-800 bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900">
-                      {flash && (
-              <div
-                key={flash.key}
-                className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-4xl font-black ${
-                  flash.type === "hit" ? "text-emerald-400" : "text-red-400"
-                }`}
-                style={{ animation: "slicer-flash 450ms ease-out forwards" }}
-              >
-                {flash.type === "hit"
-                  ? flash.label === "GREAT"
-                    ? "🔥 GREAT!"
-                    : "✅ GOOD!"
-                  : "❌ MISS"}
-              </div>
-            )}
+        {/* glowing blade trail: older points are thinner and fainter */}
+        <svg viewBox="0 0 100 100" className="pointer-events-none absolute inset-0 h-full w-full" preserveAspectRatio="none">
+          {trail.slice(1).map((pt, k) => {
+            const prev = trail[k];
+            const f = (k + 1) / trail.length;
+            const col = fruitHand === "left" ? "#0e7490" : fruitHand === "right" ? "#c2410c" : "#be123c";
+            return (
+              <g key={k} opacity={0.15 + f * 0.8}>
+                <line x1={prev.x} y1={prev.y} x2={pt.x} y2={pt.y} stroke={col} strokeWidth={3 + f * 10} strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+                <line x1={prev.x} y1={prev.y} x2={pt.x} y2={pt.y} stroke="#fff" strokeWidth={1 + f * 4} strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+              </g>
+            );
+          })}
+        </svg>
 
-            <svg
-              viewBox="0 0 100 100"
-              className="pointer-events-none absolute inset-0 w-full h-full"
-              preserveAspectRatio="none"
-            >
-              <polyline
-                points={trail.map((p) => `${p.x},${p.y}`).join(" ")}
-                fill="none"
-                stroke="#22d3ee"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                opacity="0.6"
-              />
-            </svg>
-
-            {ball && !ball.sliced && (
-              <div
-                className="absolute select-none transition-transform"
-                style={{
-                  left: `${ball.x}%`,
-                  top: `${ball.y}%`,
-                  transform: "translate(-50%, -50%)",
-                  fontSize: `${ball.size}px`,
-                  filter: ball.missed
-                    ? "grayscale(1) sepia(1) saturate(6) hue-rotate(-40deg) brightness(0.85)"
-                    : "drop-shadow(0 0 12px rgba(255,255,255,.35))",
-                  opacity: ball.missed ? 0.7 : 1,
-                }}
-              >
-                {ball.emoji}
-              </div>
-            )}
-
+        {ball && !ball.sliced && (
+          <div
+            className="absolute select-none"
+            style={{ left: `${ball.x}%`, top: `${ball.y}%`, transform: "translate(-50%, -50%)" }}
+          >
+            {/* soft glow + ground shadow */}
             <div
-              className="absolute w-6 h-6 rounded-full border-4 border-cyan-400 bg-cyan-200/40 shadow-[0_0_14px_4px_rgba(34,211,238,.4)] pointer-events-none"
+              className="absolute left-1/2 top-1/2 rounded-full"
               style={{
-                left: `${position.x}%`,
-                top: `${position.y}%`,
-                transform: "translate(-50%, -50%)",
-                transition: "left 0.05s, top 0.05s",
+                width: ball.size * 1.5, height: ball.size * 1.5, transform: "translate(-50%, -50%)",
+                background: `radial-gradient(circle, ${JUICE[ball.emoji] || "#fde047"}55 0%, transparent 65%)`,
               }}
             />
+            <div
+              style={{
+                position: "relative",
+                fontSize: `${ball.size}px`,
+                lineHeight: 1,
+                transform: `rotate(${Math.round(ball.y * 3.2) % 360}deg)`,
+                filter: ball.missed
+                  ? "grayscale(1) brightness(0.8)"
+                  : "drop-shadow(0 10px 12px rgba(0,0,0,.35)) drop-shadow(0 0 10px rgba(255,255,255,.5))",
+                opacity: ball.missed ? 0.55 : 1,
+                transition: "opacity .3s",
+              }}
+            >
+              {ball.emoji}
+            </div>
+            {hint && !ball.missed && (
+              <div
+                className="absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border-2 border-white/80 px-3 py-0.5 font-black text-white shadow-lg"
+                style={{
+                  top: "100%",
+                  marginTop: 4,
+                  fontSize: Math.max(18, Math.round(ball.size * 0.3)),
+                  background: fruitHand === "left" ? "#0891b2" : fruitHand === "right" ? "#ea580c" : "#334155",
+                }}
+              >
+                {hint.arrow}
+              </div>
+            )}
+          </div>
+        )}
 
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-slate-500 text-xs">
-              Move your hand to slice the fruit
+        {/* slice effects: halves, juice, points */}
+        {effects.map((fx) => (
+          <div key={fx.id} className="pointer-events-none absolute" style={{ left: `${fx.x}%`, top: `${fx.y}%`, width: 0, height: 0 }}>
+            {[0, 1].map((side) => (
+              <div
+                key={side}
+                style={{
+                  position: "absolute",
+                  left: -fx.size / 2, top: -fx.size / 2, width: fx.size, height: fx.size,
+                  fontSize: fx.size, lineHeight: 1, textAlign: "center",
+                  clipPath: halfClip(fx.cut, side),
+                  animation: `slicer-half-${side} 800ms cubic-bezier(.2,.7,.4,1) forwards`,
+                  "--cut": `${fx.cut}deg`,
+                  filter: "drop-shadow(0 6px 8px rgba(0,0,0,.35))",
+                }}
+              >
+                {fx.emoji}
+              </div>
+            ))}
+            {/* blade flash along the cut */}
+            <div
+              style={{
+                position: "absolute", left: -fx.size, top: -2, width: fx.size * 2, height: 4, borderRadius: 4,
+                background: "linear-gradient(90deg, transparent, #fff, transparent)",
+                transform: `rotate(${fx.cut}deg)`, animation: "slicer-blade 360ms ease-out forwards",
+              }}
+            />
+            {fx.drops.map((d, k) => (
+              <span
+                key={k}
+                style={{
+                  position: "absolute", left: -d.r / 2, top: -d.r / 2, width: d.r, height: d.r, borderRadius: "50%",
+                  background: fx.color, boxShadow: `0 0 8px ${fx.color}`,
+                  "--dx": `${Math.cos((d.a * Math.PI) / 180) * d.d}px`,
+                  "--dy": `${Math.sin((d.a * Math.PI) / 180) * d.d + 20}px`,
+                  animation: "slicer-drop 700ms ease-out forwards",
+                }}
+              />
+            ))}
+            <div
+              style={{
+                position: "absolute", left: 0, top: -fx.size * 0.6, transform: "translateX(-50%)",
+                fontWeight: 900, fontSize: 28, color: "#fff", whiteSpace: "nowrap",
+                textShadow: `0 2px 0 ${fx.color}, 0 0 14px ${fx.color}`,
+                animation: "slicer-points 900ms ease-out forwards",
+              }}
+            >
+              +{fx.points}
             </div>
           </div>
+        ))}
+
+        <div
+          className="pointer-events-none absolute h-8 w-8 rounded-full border-4 bg-white/50"
+          style={{
+            left: `${position.x}%`,
+            top: `${position.y}%`,
+            transform: "translate(-50%, -50%)",
+            borderColor: fruitHand === "left" ? "#22d3ee" : fruitHand === "right" ? "#f97316" : "#22d3ee",
+            boxShadow: "0 0 14px 4px rgba(255,255,255,.45)",
+          }}
+        />
+
+        <div
+          className={`pointer-events-none absolute bottom-3 left-3 max-w-[55%] rounded-lg px-3 py-1.5 text-xs font-semibold sm:text-sm ${
+            lightTheme ? "bg-slate-900/70 text-white" : "bg-black/50 text-white"
+          }`}
+        >
+          {hint ? `${hint.arrow} ${hint.text} through the fruit` : "Slice the fruit with a quick swipe"}
         </div>
+
+        <CameraPip
+          videoRef={videoRef}
+          poseData={poseData}
+          guidance={guidance}
+          shoulderAngle={shoulderAngle}
+          label={`${Math.round(shoulderAngle)}° ${activeSide}`}
+        />
 
         <style>{`
           @keyframes slicer-flash {
@@ -816,7 +991,28 @@ import HowToPlay from "../components/rehab/HowToPlay";
             25% { opacity: 1; transform: scale(1.1); }
             100% { opacity: 0; transform: scale(1); }
           }
+          @keyframes slicer-half-0 {
+            0% { transform: translate(0,0) rotate(0deg); opacity: 1; }
+            100% { transform: translate(-26px, -70px) rotate(-38deg); opacity: 0; }
+          }
+          @keyframes slicer-half-1 {
+            0% { transform: translate(0,0) rotate(0deg); opacity: 1; }
+            100% { transform: translate(26px, 70px) rotate(38deg); opacity: 0; }
+          }
+          @keyframes slicer-blade {
+            0% { opacity: 1; transform: scaleX(.2) rotate(var(--cut, 0deg)); }
+            100% { opacity: 0; transform: scaleX(1.2) rotate(var(--cut, 0deg)); }
+          }
+          @keyframes slicer-drop {
+            0% { transform: translate(0,0) scale(1); opacity: 1; }
+            100% { transform: translate(var(--dx), var(--dy)) scale(.2); opacity: 0; }
+          }
+          @keyframes slicer-points {
+            0% { transform: translate(-50%, 0) scale(.6); opacity: 0; }
+            20% { transform: translate(-50%, -8px) scale(1.15); opacity: 1; }
+            100% { transform: translate(-50%, -60px) scale(1); opacity: 0; }
+          }
         `}</style>
-      </div>
+      </GameShell>
     );
   }

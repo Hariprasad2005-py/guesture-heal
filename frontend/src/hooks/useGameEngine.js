@@ -28,7 +28,9 @@ export function useGameEngine({
   sessionLength = 60,
   onRepComplete,
   onSessionComplete,
-  autoStart = false
+  autoStart = false,
+  // Set false for games that run their own "continue?" prompt (rep-based games).
+  adaptiveCheckpoint = true,
 } = {}) {
   const [gameState, setGameState] = useState(GAME_STATES.INSTRUCTIONS);
   const [currentRep, setCurrentRep] = useState(0);
@@ -42,6 +44,8 @@ export function useGameEngine({
   const [extendedSeconds, setExtendedSeconds] = useState(0);
   const [moodChoice, setMoodChoice] = useState(null); // 'good' | 'ok' | 'tired' | null
   const timeLeftRef = useRef(sessionLength);
+  const adaptiveRef = useRef(adaptiveCheckpoint);
+  adaptiveRef.current = adaptiveCheckpoint;
   const extensionsRef = useRef(0);
   const checkpointDoneRef = useRef(false);
 
@@ -80,6 +84,7 @@ export function useGameEngine({
       return;
     }
     if (
+      adaptiveRef.current &&
       next === CHECKPOINT.atSecondsLeft &&
       !checkpointDoneRef.current &&
       extensionsRef.current < CHECKPOINT.maxExtensions &&
@@ -161,6 +166,13 @@ export function useGameEngine({
     setExtendedSeconds(x => x + CHECKPOINT.extendSeconds);
     closeCheckpointAndResume();
   }, [closeCheckpointAndResume]);
+
+  // Add playing time (used by games with their own continue prompt).
+  const addSeconds = useCallback((seconds) => {
+    timeLeftRef.current += seconds;
+    setTimeLeft(timeLeftRef.current);
+    setExtendedSeconds((x) => x + seconds);
+  }, []);
 
   const checkpointContinue = useCallback(() => {
     setMoodChoice('ok');
@@ -254,6 +266,7 @@ export function useGameEngine({
     // Seconds actually played, including any time the patient added.
     elapsedSeconds: Math.max(0, sessionLength + extendedSeconds - timeLeft),
     extendedSeconds,
+    addSeconds,
     moodChoice,
     checkpoint: {
       open: checkpointOpen,

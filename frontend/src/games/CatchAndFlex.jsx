@@ -11,6 +11,10 @@ import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
 import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
+import GameShell, { StageTopBar, CameraPip } from "../components/rehab/GameShell";
+import ArmPicker from "../components/rehab/ArmPicker";
+import { OrchardBackdrop } from "../components/rehab/GameBackdrops";
+import LevelBanner from "../components/rehab/LevelBanner";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import HowToPlay from "../components/rehab/HowToPlay";
@@ -48,7 +52,21 @@ const GESTURE_CLOSED_RATIO = 0.55;
 // Basket lerp factor per pose-frame. Higher = snappier, lower = smoother.
 // 0.65 feels nearly 1:1 with the hand while still smoothing out
 // MediaPipe landmark noise. This is tuned for the full-width game board.
-const BASKET_LERP = 0.5;
+const BASKET_LERP = 0.85;
+
+// The hand only has to travel the middle part of the camera picture to
+// cover the whole board, so a smaller sweep reaches the edges.
+const REACH_MIN = 12;
+const REACH_MAX = 88;
+
+// Five levels, picked by how many objects have been caught.
+const LEVELS = [
+  { minCaught: 0, gestureMix: 0, speedMul: 0.9, radiusMul: 1.15, spawnMul: 1.1, text: "Level 1: catch the fruit" },
+  { minCaught: 6, gestureMix: 0.35, speedMul: 1.0, radiusMul: 1.05, spawnMul: 1.0, text: "Level 2: open and closed hand" },
+  { minCaught: 14, gestureMix: 0.5, speedMul: 1.1, radiusMul: 1.0, spawnMul: 0.95, text: "Level 3: more shapes" },
+  { minCaught: 24, gestureMix: 0.55, speedMul: 1.25, radiusMul: 0.88, spawnMul: 0.9, text: "Level 4: faster, smaller basket" },
+  { minCaught: 36, gestureMix: 0.6, speedMul: 1.4, radiusMul: 0.78, spawnMul: 0.8, text: "Level 5: top speed" },
+];
 
 // State sync throttle — we only push ref values into React state at ~30 fps
 // and only if they actually changed. Prevents the RAF loop from causing
@@ -76,17 +94,11 @@ function difficultyToRadiusMultiplier(label) {
   return 1.15;
 }
 
-function spawnObject({ speed, sizePx, difficultyLabel, gestureAvailable }) {
-  let pool;
-  if (!gestureAvailable || difficultyLabel === "Beginner") {
-    pool = OBJECT_TYPES.filter((t) => t.requiredGesture === "any");
-  } else if (difficultyLabel === "Intermediate") {
-    pool = OBJECT_TYPES.filter(
-      (t) => t.requiredGesture === "any" || Math.random() < 0.4
-    );
-  } else {
-    pool = OBJECT_TYPES;
-  }
+function spawnObject({ speed, sizePx, gestureMix = 0, gestureAvailable }) {
+  const wantGesture = gestureAvailable && Math.random() < gestureMix;
+  const pool = OBJECT_TYPES.filter((t) =>
+    wantGesture ? t.requiredGesture !== "any" : t.requiredGesture === "any"
+  );
   const selected = pool[Math.floor(Math.random() * pool.length)] || OBJECT_TYPES[4];
   const emoji = selected.emoji || FRUITS[Math.floor(Math.random() * FRUITS.length)];
 
@@ -137,6 +149,8 @@ export default function CatchAndFlex({
   const [handGestureLabel, setHandGestureLabel] = useState("unknown");
   const [basketCenterX, setBasketCenterX] = useState(50);
   const [isHandVisible, setIsHandVisible] = useState(false);
+  const [armChoice, setArmChoice] = useState("both");
+  const [levelBanner, setLevelBanner] = useState({ visible: false, text: "" });
 
   // ---- High-frequency refs (RAF reads only these; no setState per frame) ----
   const smoothedHandXRef = useRef(50);
@@ -178,7 +192,7 @@ export default function CatchAndFlex({
   });
 
   const { position, shoulderAngle, activeSide, status: poseStatus } =
-    usePoseDetection(poseData);
+    usePoseDetection(poseData, { preferredSide: armChoice === "both" ? "auto" : armChoice });
   const guidance = usePostureGuidance(poseData);
   const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({
     videoRef,
@@ -199,7 +213,7 @@ export default function CatchAndFlex({
     // which matches the mirrored video preview you see on the tile.
     // Do NOT invert here — that produces a basket on the opposite side
     // from your hand.
-    const target = clamp(position.x, 0, 100);
+    const target = clamp(((position.x - REACH_MIN) / (REACH_MAX - REACH_MIN)) * 100, 0, 100);
 
     const prev = smoothedHandXRef.current;
     const isInitialising = prev === 50 && smoothedHandXRef.current === 50;
@@ -220,7 +234,7 @@ export default function CatchAndFlex({
     setIsHandVisible(visible);
     if (visible) {
       // Snap on reacquire so the basket doesn't glide from its last spot.
-      const target = clamp(position.x, 0, 100);
+      const target = clamp(((position.x - REACH_MIN) / (REACH_MAX - REACH_MIN)) * 100, 0, 100);
       smoothedHandXRef.current = target;
       basketCenterXRef.current = clamp(target, BASKET_HALF, 100 - BASKET_HALF);
       setBasketCenterX(basketCenterXRef.current);
@@ -280,7 +294,8 @@ export default function CatchAndFlex({
     const leftVis = (leftWrist?.visibility ?? 0) + (leftIndex?.visibility ?? 0);
     const rightVis = (rightWrist?.visibility ?? 0) + (rightIndex?.visibility ?? 0);
 
-    const useLeft = leftVis >= rightVis;
+    // Read the hand shape from the SAME arm that is moving the basket.
+    const useLeft = armChoice === "left" ? true : armChoice === "right" ? false : activeSide === "left";
     const wrist = useLeft ? leftWrist : rightWrist;
     const index = useLeft ? leftIndex : rightIndex;
     const shoulder = useLeft ? leftShoulder : rightShoulder;
@@ -312,7 +327,7 @@ export default function CatchAndFlex({
       handGestureRef.current = label;
       setHandGestureLabel(label);
     }
-  }, [poseData]);
+  }, [poseData, activeSide, armChoice]);
 
   // ============================================================
   // DERIVED METRICS
@@ -357,6 +372,16 @@ export default function CatchAndFlex({
     endSession,
   } = engine;
 
+  const levelIndex = LEVELS.reduce((acc, l, i) => (caught >= l.minCaught ? i : acc), 0);
+  const levelRef = useRef(0);
+  levelRef.current = levelIndex;
+  useEffect(() => {
+    if (levelIndex === 0) return undefined;
+    setLevelBanner({ visible: true, text: LEVELS[levelIndex].text });
+    const t = setTimeout(() => setLevelBanner((b) => ({ ...b, visible: false })), 2600);
+    return () => clearTimeout(t);
+  }, [levelIndex]);
+
   // ============================================================
   // CATCH RADIUS — derived from visual basket
   // ============================================================
@@ -364,8 +389,8 @@ export default function CatchAndFlex({
     const base = BASKET_HALF * 1.05;
     const mult = difficultyToRadiusMultiplier(currentDifficulty);
     const papsBonus = 1 + (papsScore || 0) / 200;
-    catchRadiusRef.current = clamp(base * mult * papsBonus, 8, 22);
-  }, [currentDifficulty, papsScore]);
+    catchRadiusRef.current = clamp(base * mult * papsBonus * LEVELS[levelIndex].radiusMul, 7, 22);
+  }, [currentDifficulty, papsScore, levelIndex]);
 
   // ============================================================
   // ROM TRACKING
@@ -557,7 +582,8 @@ export default function CatchAndFlex({
       }
       return;
     }
-    const interval = settings.spawnRate || 2200;
+    const lvl = LEVELS[levelIndex];
+    const interval = Math.round((settings.spawnRate || 2200) * lvl.spawnMul);
 
     spawnTimerRef.current = setInterval(() => {
       const active = fruitsRef.current.filter(
@@ -565,10 +591,11 @@ export default function CatchAndFlex({
       ).length;
       if (active >= MAX_OBJECTS_ON_SCREEN) return;
 
+      const lv = LEVELS[levelRef.current];
       const obj = spawnObject({
-        speed: settings.speed,
+        speed: (settings.speed || 0.35) * lv.speedMul,
         sizePx: settings.objectSize,
-        difficultyLabel: currentDifficultyRef.current,
+        gestureMix: lv.gestureMix,
         gestureAvailable: handGestureRef.current !== "unknown",
       });
       fruitsRef.current = [...fruitsRef.current, obj];
@@ -587,6 +614,7 @@ export default function CatchAndFlex({
     settings.spawnRate,
     settings.speed,
     settings.objectSize,
+    levelIndex,
   ]);
 
   // ============================================================
@@ -846,6 +874,14 @@ export default function CatchAndFlex({
             </div>
           </div>
 
+          <div className="mb-6 space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div>
+              <div className="mb-1.5 text-sm font-semibold text-slate-700">Which arm will you use?</div>
+              <ArmPicker value={armChoice} onChange={setArmChoice} dark={false} hint={false} />
+              <p className="mt-1 text-xs text-slate-500">With both arms, the arm you raise moves the basket.</p>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <div className="relative aspect-video overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
               <video
@@ -932,310 +968,158 @@ export default function CatchAndFlex({
   // RENDER: ACTIVE GAME
   // ============================================================
   return (
-    <div className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-slate-50 overflow-y-auto">
+    <GameShell backdrop={<OrchardBackdrop />}>
       <SessionCheckpoint {...engine.checkpoint} />
-      <div className="mx-auto max-w-[1500px] px-3 py-4 sm:px-6 lg:px-8 pb-12">
-        {/* ============== TOP STATUS BAR (light theme) ============== */}
-        <div className="mb-4 rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm backdrop-blur sm:p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <MetricChip icon={Timer} label="Time" value={`${timeLeft}s`} tone="cyan" />
-              <MetricChip icon={Target} label="Caught" value={caught} tone="emerald" />
-              <MetricChip icon={X} label="Missed" value={missed} tone="red" />
-              <MetricChip icon={Activity} label="Accuracy" value={`${accuracy}%`} tone="blue" />
-              <MetricChip icon={Flame} label="Streak" value={streak} tone="amber" />
-              <MetricChip
-                icon={Zap}
-                label="Avg React"
-                value={
-                  avgReactionTime > 0
-                    ? `${(avgReactionTime / 1000).toFixed(2)}s`
-                    : "—"
-                }
-                tone="slate"
-              />
-              <MetricChip icon={Activity} label="ROM" value={`${romDegrees}°`} tone="cyan" />
-              <MetricChip
-                icon={Target}
-                label="Difficulty"
-                value={currentDifficulty}
-                tone="slate"
-              />
-            </div>
 
-            <div className="flex gap-2">
-              <button
-                onClick={() => (isPaused ? resumeSession() : pauseSession())}
-                className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50"
-                aria-label={isPaused ? "Resume" : "Pause"}
-              >
-                {isPaused ? <Play size={16} /> : <Pause size={16} />}
-                <span className="hidden sm:inline">
-                  {isPaused ? "Resume" : "Pause"}
-                </span>
-              </button>
-              <button
-                onClick={endSession}
-                className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-bold text-red-700 shadow-sm transition hover:bg-red-100"
-                aria-label="End session"
-              >
-                <X size={16} />
-                <span className="hidden sm:inline">End</span>
-              </button>
-            </div>
+      <StageTopBar isPaused={isPaused} onPause={pauseSession} onResume={resumeSession} onEnd={endSession}>
+        <span>⏱ {timeLeft}s</span>
+        <span>🎯 {score}</span>
+        <span>✅ {caught}</span>
+        <span>❌ {missed}</span>
+        <span>🔥 {streak}</span>
+        <span className="text-amber-300">Level {levelIndex + 1}</span>
+      </StageTopBar>
+
+      <LevelBanner text={levelBanner.text} visible={levelBanner.visible} />
+
+      {gameState === GAME_STATES.COUNTDOWN && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+          <div className="text-[10rem] font-black text-cyan-300">{countdown || "GO"}</div>
+        </div>
+      )}
+
+      {isPainDetected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-amber-200 bg-white p-8 text-center text-slate-900 shadow-2xl">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-100 text-3xl">⚠️</div>
+            <h2 className="mb-2 text-xl font-bold">Discomfort Detected</h2>
+            <p className="mb-6 text-sm text-slate-600">Take a short rest before resuming. The session is paused.</p>
+            <button
+              onClick={() => {
+                resetPainState();
+                painPausedRef.current = false;
+                resumeSession();
+              }}
+              className="w-full rounded-2xl bg-cyan-500 px-6 py-3 font-bold text-white hover:bg-cyan-400"
+            >
+              Resume When Ready
+            </button>
           </div>
         </div>
+      )}
 
-        {/* ============== COUNTDOWN OVERLAY ============== */}
-        {gameState === GAME_STATES.COUNTDOWN && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/85 backdrop-blur-sm">
-            <div className="text-[10rem] font-black text-cyan-600 drop-shadow-sm">
-              {countdown || "GO"}
-            </div>
-          </div>
-        )}
-
-        {/* ============== PAIN OVERLAY (light theme) ============== */}
-        {isPainDetected && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm">
-            <div className="w-full max-w-md rounded-3xl border border-amber-200 bg-white p-8 text-center shadow-2xl">
-              <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-100 text-3xl">
-                ⚠️
-              </div>
-              <h2 className="mb-2 text-xl font-bold text-slate-900">
-                Discomfort Detected
-              </h2>
-              <p className="mb-6 text-sm text-slate-600">
-                Take a short rest before resuming. The session is paused.
-              </p>
-              <button
-                onClick={() => {
-                  resetPainState();
-                  painPausedRef.current = false;
-                  resumeSession();
-                }}
-                className="w-full rounded-2xl bg-cyan-500 px-6 py-3 font-bold text-white shadow-md shadow-cyan-200 transition hover:bg-cyan-400"
-              >
-                Resume When Ready
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ============== MAIN LAYOUT ==============
-            The game board takes the full width. The camera preview is a
-            small floating tile pinned to the top-right corner of the
-            board (see below). */}
-        <div className="relative">
-          {/* GAME BOARD CARD (full width) */}
-          <div className="relative w-full overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-b from-sky-50/60 via-white to-sky-50/60 shadow-sm">
-            <div className="relative h-[520px] sm:h-[560px] lg:h-[calc(100vh-260px)] lg:min-h-[520px]">
-              {/* Catch zone band */}
-              <div
-                className="pointer-events-none absolute left-0 right-0 border-y border-dashed border-cyan-300/60 bg-cyan-100/25"
-                style={{
-                  top: `${CATCH_ZONE_MIN}%`,
-                  height: `${CATCH_ZONE_MAX - CATCH_ZONE_MIN}%`,
-                }}
-              >
-                <div className="absolute left-2 top-1 text-[10px] font-bold uppercase tracking-wide text-cyan-600/70">
-                  Catch Zone
-                </div>
-              </div>
-
-              {/* Flash feedback */}
-              {flash && (
-                <div
-                  key={flash.key}
-                  className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center"
-                  style={{ animation: "catch-flash 500ms ease-out forwards" }}
-                >
-                  <div
-                    className={`rounded-3xl px-8 py-5 text-4xl font-black shadow-2xl ${
-                      flash.type === "catch"
-                        ? "bg-emerald-500/95 text-white"
-                        : "bg-red-500/95 text-white"
-                    }`}
-                  >
-                    {flash.type === "catch" ? "🎯 CAUGHT!" : "💨 MISSED"}
-                  </div>
-                </div>
-              )}
-
-              {/* Basket trail */}
-              <svg
-                viewBox="0 0 100 100"
-                className="pointer-events-none absolute inset-0 h-full w-full"
-                preserveAspectRatio="none"
-              >
-                {basketTrail.map((p, i) => {
-                  const age = basketTrail.length - 1 - i;
-                  return (
-                    <circle
-                      key={i}
-                      cx={p.x}
-                      cy={92}
-                      r={3 - age * 0.35}
-                      fill={`rgba(6,182,212,${Math.max(
-                        0,
-                        0.45 - age * 0.07
-                      )})`}
-                    />
-                  );
-                })}
-              </svg>
-
-              {/* Falling fruit */}
-              {fruits.map(
-                (fruit) =>
-                  !fruit.caught &&
-                  !fruit.missed && (
-                    <div
-                      key={fruit.id}
-                      className="absolute select-none"
-                      style={{
-                        left: `${fruit.x}%`,
-                        top: `${fruit.y}%`,
-                        transform: "translate(-50%, -50%)",
-                        fontSize: `${fruit.sizePx}px`,
-                        lineHeight: 1,
-                        filter: "drop-shadow(0 4px 8px rgba(15,23,42,0.18))",
-                        willChange: "top, left",
-                      }}
-                    >
-                      {fruit.emoji}
-                      {fruit.requiredGesture !== "any" && (
-                        <div
-                          className={`absolute left-1/2 -translate-x-1/2 text-[14px] font-bold whitespace-nowrap rounded-md px-1.5 py-0.5 shadow-sm ${
-                            fruit.requiredGesture === "open"
-                              ? "bg-emerald-100 text-emerald-700"
-                              : "bg-red-100 text-red-700"
-                          }`}
-                          style={{
-                            top: `-${Math.round(fruit.sizePx * 0.4)}px`,
-                          }}
-                        >
-                          {fruit.requiredGesture === "open" ? "✋" : "✊"}
-                        </div>
-                      )}
-                    </div>
-                  )
-              )}
-
-              {/* Hand cursor + basket — rendered ONLY when the hand is
-                  actively tracked. When the hand leaves the frame, both
-                  the cursor and the basket disappear. */}
-              {isHandVisible && (
-              <div
-                className="pointer-events-none absolute z-30 transition-opacity duration-150"
-                style={{
-                  left: `${basketCenterX}%`,
-                  bottom: `${BASKET_BOTTOM_PERCENT}%`,
-                  transform: "translateX(-50%)",
-                  width: `${BASKET_WIDTH_PERCENT}%`,
-                  willChange: "left",
-                }}
-              >
-                {/* Hand cursor */}
-                <div
-                  className="absolute left-1/2 flex -translate-x-1/2 flex-col items-center"
-                  style={{ bottom: "100%" }}
-                >
-                  <div
-                    className={`rounded-full border px-3 py-1 text-3xl shadow-md transition-colors duration-150 ${
-                      handGestureLabel === "open"
-                        ? "border-emerald-300 bg-emerald-100 text-emerald-700"
-                        : handGestureLabel === "closed"
-                        ? "border-red-300 bg-red-100 text-red-700"
-                        : "border-slate-200 bg-white text-slate-500"
-                    }`}
-                    title={`Tracked hand: ${handGestureLabel}`}
-                  >
-                    {handGestureLabel === "open"
-                      ? "✋"
-                      : handGestureLabel === "closed"
-                      ? "✊"
-                      : "🤚"}
-                  </div>
-                  <div className="mt-1 h-3 w-px bg-slate-300" />
-                </div>
-
-                {/* Basket icon */}
-                <div
-                  className={`relative flex items-end justify-center ${
-                    handGestureLabel === "open"
-                      ? "text-emerald-500"
-                      : handGestureLabel === "closed"
-                      ? "text-red-500"
-                      : "text-cyan-500"
-                  }`}
-                >
-                  <ShoppingBasket
-                    size={BASKET_ICON_SIZE_PX}
-                    strokeWidth={1.6}
-                    className="drop-shadow-[0_8px_16px_rgba(6,182,212,0.25)]"
-                    style={{ width: "100%", height: "auto" }}
-                  />
-                  <div className="pointer-events-none absolute -bottom-3 left-1/2 h-4 w-4/5 -translate-x-1/2 rounded-full bg-cyan-300/30 blur-2xl" />
-                </div>
-              </div>
-              )}
-
-              {/* Score card */}
-              <div className="absolute right-3 top-3 rounded-xl border border-slate-200 bg-white/95 px-4 py-2 text-right shadow-sm">
-                <div className="text-lg font-black text-amber-500">
-                  ⭐ {score}
-                </div>
-                <div className="text-xs font-semibold text-slate-500">
-                  Streak: {streak}
-                </div>
-                {gestureStats.total > 0 && (
-                  <div className="mt-0.5 text-[11px] font-semibold text-cyan-600">
-                    Gesture:{" "}
-                    {Math.round(
-                      (gestureStats.correct / gestureStats.total) * 100
-                    )}
-                    %
-                  </div>
-                )}
-              </div>
-
-              {/* ============== FLOATING CAMERA TILE (top-right) ============== */}
-              <div className="pointer-events-none absolute right-3 top-20 z-20 w-[180px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-md sm:w-[220px] lg:w-[260px]">
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="aspect-video w-full scale-x-[-1] object-cover"
-                />
-                <SkeletonOverlay
-                  poseData={poseData}
-                  overallStatus={guidance.overallStatus}
-                  shoulderAngle={shoulderAngle}
-                />
-                <div className="absolute left-2 top-2 rounded-md bg-white/90 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-700 shadow-sm">
-                  {Math.round(shoulderAngle)}° · {activeSide}
-                </div>
-                <div className="absolute bottom-2 left-2 rounded-md bg-white/90 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-700 shadow-sm">
-                  Hand:{" "}
-                  <span
-                    className={
-                      handGestureLabel === "open"
-                        ? "text-emerald-600"
-                        : handGestureLabel === "closed"
-                        ? "text-red-600"
-                        : "text-slate-500"
-                    }
-                  >
-                    {handGestureLabel}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+      {/* Catch zone band */}
+      <div
+        className="pointer-events-none absolute left-0 right-0 border-y border-dashed border-white/60 bg-white/15"
+        style={{ top: `${CATCH_ZONE_MIN}%`, height: `${CATCH_ZONE_MAX - CATCH_ZONE_MIN}%` }}
+      >
+        <div className="absolute left-2 top-1 text-[10px] font-bold uppercase tracking-wide text-white/80">Catch zone</div>
       </div>
+
+      {flash && (
+        <div
+          key={flash.key}
+          className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center"
+          style={{ animation: "catch-flash 500ms ease-out forwards" }}
+        >
+          <div
+            className={`rounded-3xl px-8 py-5 text-4xl font-black shadow-2xl ${
+              flash.type === "catch" ? "bg-emerald-500/95 text-white" : "bg-red-500/95 text-white"
+            }`}
+          >
+            {flash.type === "catch" ? "🎯 CAUGHT!" : "💨 MISSED"}
+          </div>
+        </div>
+      )}
+
+      <svg viewBox="0 0 100 100" className="pointer-events-none absolute inset-0 h-full w-full" preserveAspectRatio="none">
+        {basketTrail.map((p, i) => {
+          const age = basketTrail.length - 1 - i;
+          return <circle key={i} cx={p.x} cy={92} r={3 - age * 0.35} fill={`rgba(255,255,255,${Math.max(0, 0.5 - age * 0.08)})`} />;
+        })}
+      </svg>
+
+      {fruits.map(
+        (fruit) =>
+          !fruit.caught &&
+          !fruit.missed && (
+            <div
+              key={fruit.id}
+              className="absolute select-none"
+              style={{
+                left: `${fruit.x}%`,
+                top: `${fruit.y}%`,
+                transform: "translate(-50%, -50%)",
+                fontSize: `${fruit.sizePx}px`,
+                lineHeight: 1,
+                filter: "drop-shadow(0 4px 8px rgba(15,23,42,0.3))",
+                willChange: "top, left",
+              }}
+            >
+              {fruit.emoji}
+              {fruit.requiredGesture !== "any" && (
+                <div
+                  className={`absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md px-2 py-0.5 text-[18px] font-bold shadow-md ${
+                    fruit.requiredGesture === "open" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
+                  }`}
+                  style={{ top: `-${Math.round(fruit.sizePx * 0.45)}px` }}
+                >
+                  {fruit.requiredGesture === "open" ? "✋ open" : "✊ close"}
+                </div>
+              )}
+            </div>
+          )
+      )}
+
+      {isHandVisible && (
+        <div
+          className="pointer-events-none absolute z-30 transition-opacity duration-150"
+          style={{
+            left: `${basketCenterX}%`,
+            bottom: `${BASKET_BOTTOM_PERCENT}%`,
+            transform: "translateX(-50%)",
+            width: `${BASKET_WIDTH_PERCENT * LEVELS[levelIndex].radiusMul}%`,
+            willChange: "left",
+          }}
+        >
+          <div className="absolute left-1/2 flex -translate-x-1/2 flex-col items-center" style={{ bottom: "100%" }}>
+            <div
+              className={`rounded-full border px-3 py-1 text-3xl shadow-md transition-colors duration-150 ${
+                handGestureLabel === "open"
+                  ? "border-emerald-300 bg-emerald-100 text-emerald-700"
+                  : handGestureLabel === "closed"
+                  ? "border-red-300 bg-red-100 text-red-700"
+                  : "border-slate-200 bg-white text-slate-500"
+              }`}
+            >
+              {handGestureLabel === "open" ? "✋" : handGestureLabel === "closed" ? "✊" : "🤚"}
+            </div>
+            <div className="mt-1 h-3 w-px bg-white/70" />
+          </div>
+          <div
+            className={`relative flex items-end justify-center ${
+              handGestureLabel === "open" ? "text-emerald-300" : handGestureLabel === "closed" ? "text-red-300" : "text-white"
+            }`}
+          >
+            <ShoppingBasket size={BASKET_ICON_SIZE_PX} strokeWidth={1.6} className="drop-shadow-[0_8px_16px_rgba(0,0,0,0.35)]" style={{ width: "100%", height: "auto" }} />
+          </div>
+        </div>
+      )}
+
+      <div className="pointer-events-none absolute bottom-3 left-3 max-w-[45%] rounded-lg bg-black/50 px-3 py-1.5 text-xs font-semibold text-white sm:text-sm">
+        {levelIndex === 0
+          ? "Move your hand left and right to catch the fruit"
+          : "✋ open hand = green and ⭐ · ✊ closed hand = red and cups"}
+      </div>
+
+      <CameraPip
+        corner="tr"
+        videoRef={videoRef}
+        poseData={poseData}
+        guidance={guidance}
+        shoulderAngle={shoulderAngle}
+        label={`${Math.round(shoulderAngle)}° ${activeSide} · ${handGestureLabel}`}
+      />
 
       <style>{`
         @keyframes catch-flash {
@@ -1244,6 +1128,6 @@ export default function CatchAndFlex({
           100% { opacity: 0; transform: scale(1); }
         }
       `}</style>
-    </div>
+    </GameShell>
   );
 }

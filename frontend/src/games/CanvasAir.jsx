@@ -39,6 +39,9 @@ import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import HowToPlay from "../components/rehab/HowToPlay";
+import GameShell, { StageTopBar, CameraPip } from "../components/rehab/GameShell";
+import { StudioBackdrop } from "../components/rehab/GameBackdrops";
+import LevelBanner from "../components/rehab/LevelBanner";
 
 // ============================================================
 // CONSTANTS
@@ -86,8 +89,21 @@ const MIN_PATH_LENGTH_FOR_SMOOTHNESS = 40;
 
 // --- Smoothing constants ---
 
-const ONE_EURO_MIN_CUTOFF = 0.4;
-const ONE_EURO_BETA = 0.02;
+// Steadiness presets. "Steady" is the old, heavily smoothed feel;
+// "Balanced" (default) reacts faster while staying calm when you hold still;
+// "Quick" follows the fingertip almost one-to-one.
+const STEADINESS = {
+  steady: { label: "Steady", minCutoff: 0.4, beta: 0.02 },
+  balanced: { label: "Balanced", minCutoff: 0.9, beta: 0.05 },
+  quick: { label: "Quick", minCutoff: 1.7, beta: 0.1 },
+};
+const ONE_EURO_MIN_CUTOFF = STEADINESS.balanced.minCutoff;
+const ONE_EURO_BETA = STEADINESS.balanced.beta;
+
+// After the planned shapes, the patient may choose another set (harder
+// shapes). At most MAX_SETS sets in one session.
+const EXTRA_SET_SIZE = 3;
+const MAX_SETS = 3;
 const ONE_EURO_D_CUTOFF = 1.0;
 
 const FILTER_RESET_GAP_MS = 250;
@@ -511,6 +527,10 @@ export default function CanvasAir({
   const [sparkles, setSparkles] = useState([]);
   const [shapeTimeLeft, setShapeTimeLeft] = useState(SHAPE_TIME_LIMIT_SECONDS);
   const [calibrated, setCalibrated] = useState(false);
+  const [steadiness, setSteadiness] = useState("balanced");
+  const [setCount, setSetCount] = useState(1);
+  const [setPrompt, setSetPrompt] = useState(false);
+  const [levelBanner, setLevelBanner] = useState({ visible: false, text: "" });
 
   const [frozenAttempt, setFrozenAttempt] = useState(null);
 
@@ -684,6 +704,16 @@ export default function CanvasAir({
     )
   );
   const lastFingertipSeenMsRef = useRef(0);
+
+  // Apply the chosen steadiness to the live filter.
+  useEffect(() => {
+    const p = STEADINESS[steadiness] || STEADINESS.balanced;
+    const f = fingertipFilterRef.current;
+    f.fx.minCutoff = p.minCutoff;
+    f.fy.minCutoff = p.minCutoff;
+    f.fx.beta = p.beta;
+    f.fy.beta = p.beta;
+  }, [steadiness]);
 
   const observedRangeRef = useRef({ minX: null, maxX: null, minY: null, maxY: null });
 
@@ -1266,11 +1296,43 @@ export default function CanvasAir({
   useEffect(() => {
     if (gameState !== GAME_STATES.ACTIVE) return undefined;
     if (completed + missed + abandoned < totalShapes) return undefined;
+    if (setPrompt) return undefined;
     const t = setTimeout(() => {
-      endSession();
+      if (setCount >= MAX_SETS) {
+        endSession();
+      } else {
+        // Set finished: the patient chooses whether to go on.
+        setSetPrompt(true);
+        pauseSession();
+      }
     }, SHAPE_ADVANCE_DELAY_MS + 200);
     return () => clearTimeout(t);
-  }, [completed, missed, abandoned, totalShapes, gameState, endSession]);
+  }, [completed, missed, abandoned, totalShapes, gameState, endSession, setCount, setPrompt, pauseSession]);
+
+  const handleMoreShapes = useCallback(() => {
+    const used = sessionShapes.map((x) => x.name);
+    const pool = getShapePoolForDifficulty("Advanced").filter((x) => !used.includes(x.name));
+    const source = pool.length >= EXTRA_SET_SIZE ? pool : SHAPES;
+    const extra = shuffleArray(source).slice(0, EXTRA_SET_SIZE);
+    const startAt = sessionShapes.length;
+    setSessionShapes((prev) => [...prev, ...extra]);
+    setCurrentShapeIndex(startAt);
+    setSetCount((n) => n + 1);
+    setSetPrompt(false);
+    resumeSession();
+  }, [sessionShapes, resumeSession]);
+
+  const handleNoMoreShapes = useCallback(() => {
+    setSetPrompt(false);
+    endSession();
+  }, [endSession]);
+
+  useEffect(() => {
+    if (setCount <= 1) return undefined;
+    setLevelBanner({ visible: true, text: `Set ${setCount}: trickier shapes` });
+    const t = setTimeout(() => setLevelBanner((b) => ({ ...b, visible: false })), 2800);
+    return () => clearTimeout(t);
+  }, [setCount]);
 
   useEffect(() => {
     if (!isPainDetected || gameState !== GAME_STATES.ACTIVE) return;
@@ -1768,459 +1830,75 @@ export default function CanvasAir({
     frozenAttempt?.effectiveTolerance ?? dynamicTolerance;
   const frozenPainMultiplier = frozenAttempt?.painMultiplier ?? 1.0;
 
-  return (
-    <div className="h-screen w-full overflow-y-auto bg-slate-50 text-slate-800">
-      <SessionCheckpoint {...engine.checkpoint} />
-      <style>{`
-        @keyframes canvasAirPulse {
-          0%, 100% { opacity: 0.45; }
-          50% { opacity: 0.9; }
-        }
-        @keyframes canvasAirSparkle {
-          0% { opacity: 0.9; transform: scale(1); }
-          100% { opacity: 0; transform: scale(2.2); }
-        }
-        @keyframes canvasAirComplete {
-          0% { transform: scale(0.85); opacity: 0; }
-          60% { transform: scale(1.05); opacity: 1; }
-          100% { transform: scale(1); opacity: 1; }
-        }
-        @keyframes canvasAirShake {
-          0%, 100% { transform: translateX(0); }
-          25% { transform: translateX(-8px); }
-          75% { transform: translateX(8px); }
-        }
-        @keyframes canvasAirAbandoned {
-          0% { opacity: 0; transform: translateY(-6px); }
-          20% { opacity: 1; transform: translateY(0); }
-          100% { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
+  if (isActiveScreen) {
+    const hdr = "inline-flex items-center gap-1.5";
+    return (
+      <GameShell backdrop={<StudioBackdrop />}>
+        <SessionCheckpoint {...engine.checkpoint} />
+        <SessionCheckpoint
+          open={setPrompt}
+          title="Nice tracing! Want more shapes?"
+          subtitle={`${completed} of ${totalShapes} shapes done. The next set is trickier.`}
+          extendLabel={`😊 Yes, ${EXTRA_SET_SIZE} more shapes`}
+          continueLabel={null}
+          finishLabel="✅ I'm done for today"
+          onExtend={handleMoreShapes}
+          onFinish={handleNoMoreShapes}
+        />
+        <LevelBanner text={levelBanner.text} visible={levelBanner.visible} />
 
-      {/* Banner disabled while the pain-detector hook is being fixed. */}
-      {false && isActiveScreen && showPainDetectorWarning && (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-[60] rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800 shadow">
-          Facial pain detection unavailable — PAPS safety net is off
-        </div>
-      )}
+        {gameState === GAME_STATES.COUNTDOWN && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 text-8xl font-black text-teal-300">
+            {countdown || "GO"}
+          </div>
+        )}
 
-      {isActiveScreen && gameState === GAME_STATES.COUNTDOWN && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/90 text-8xl font-black text-teal-600">
-          {countdown || "GO"}
-        </div>
-      )}
+        {isPainDetected && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60">
+            <div className="max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-800 shadow-2xl">
+              <h2 className="mb-3 text-xl font-bold text-red-600">Discomfort Detected</h2>
+              <p className="mb-6 text-slate-600">Please rest before continuing.</p>
+              <button
+                onClick={() => {
+                  resetPainState();
+                  resumeSession();
+                }}
+                className="rounded-lg bg-teal-600 px-6 py-2 font-bold text-white hover:bg-teal-500"
+              >
+                Resume
+              </button>
+            </div>
+          </div>
+        )}
 
-      {isActiveScreen && isPainDetected && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50">
-          <div className="max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-2xl">
-            <h2 className="mb-3 text-xl font-bold text-red-600">
-              Discomfort Detected
-            </h2>
-            <p className="mb-6 text-slate-600">Please rest before continuing.</p>
-            <button
-              onClick={() => {
-                resetPainState();
-                resumeSession();
-              }}
-              className="rounded-lg bg-teal-600 px-6 py-2 font-bold text-white hover:bg-teal-500"
-            >
-              Resume
+        <StageTopBar isPaused={isPaused} onPause={pauseSession} onResume={resumeSession} onEnd={handleEndSession}>
+          <span className={`${hdr} ${shapeTimeLeft <= 5 && !showShapeComplete && !showShapeMissed ? "text-red-300" : ""}`}>
+            ⏱ {shapeTimeLeft}s
+          </span>
+          <span className={hdr}>Session {formatClock(timeLeft)}</span>
+          <span className={hdr}>Shapes {completed}/{totalShapes}</span>
+          <span className={`${hdr} ${accuracyBand.text}`}>
+            Acc {tracingAccuracy == null ? "—" : tracingAccuracy.toFixed(0) + "%"}
+          </span>
+          <span className={hdr}>Score {score}</span>
+          <span className="text-amber-300">Set {setCount}</span>
+          <span className="inline-flex items-center gap-1">
+            <button onClick={() => navigateToShapeIndex(currentShapeIndex - 1)} title="Previous shape" className="rounded bg-white/15 p-1 hover:bg-white/25">
+              <ChevronLeft size={14} />
             </button>
-          </div>
-        </div>
-      )}
+            <button onClick={() => navigateToShapeIndex(currentShapeIndex + 1)} title="Next shape" className="rounded bg-white/15 p-1 hover:bg-white/25">
+              <ChevronRight size={14} />
+            </button>
+            <button onClick={() => setShowGallery((v) => !v)} title="Choose shape" className={`rounded p-1 ${showGallery ? "bg-teal-500" : "bg-white/15 hover:bg-white/25"}`}>
+              <Grid3x3 size={14} />
+            </button>
+          </span>
+        </StageTopBar>
 
-      {isActiveScreen && (
-        <div className="sticky top-0 z-40 -mx-5 mb-3 border-b border-slate-200 bg-white/95 px-5 backdrop-blur">
-          <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-6 py-3">
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-sm text-slate-700">
-              <span
-                className={`inline-flex items-center gap-1.5 ${
-                  shapeTimeLeft <= 5 && !showShapeComplete && !showShapeMissed
-                    ? "text-red-600"
-                    : ""
-                }`}
-              >
-                <span className="text-slate-400">Shape time</span>
-                <span className="font-semibold">{shapeTimeLeft}s</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="text-slate-400">Session</span>
-                <span className="font-semibold">{formatClock(timeLeft)}</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="text-slate-400">Shapes</span>
-                <span className="font-semibold">
-                  {completed}/{totalShapes}
-                </span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="text-slate-400">Coverage</span>
-                <span className="font-semibold">
-                  {shapeProgress.toFixed(1)}%
-                </span>
-              </span>
-              <span
-                className={`inline-flex items-center gap-1.5 font-semibold ${accuracyBand.text}`}
-              >
-                <span className="font-normal text-slate-400">Accuracy</span>
-                {tracingAccuracy == null ? "—" : `${tracingAccuracy.toFixed(1)}%`}
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="text-slate-400">Smoothness</span>
-                <span className="font-semibold">
-                  {liveSmoothness == null ? "—" : liveSmoothness.toFixed(0)}
-                </span>
-              </span>
-              <span className="rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-700">
-                {currentDifficulty}
-              </span>
-              {papsScore > 0 && (
-                <span className="rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 text-xs font-semibold text-purple-700">
-                  PAPS {papsScore}
-                  {papsScore >= PAPS_PAIN_THRESHOLD ? " · pain-adjusted" : ""}
-                </span>
-              )}
-              <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-700">
-                Score {score}
-              </span>
-            </div>
-            <div className="flex flex-shrink-0 items-center gap-1.5">
-              <button
-                onClick={() =>
-                  navigateToShapeIndex(currentShapeIndex - 1)
-                }
-                title="Previous shape"
-                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
-              >
-                <ChevronLeft size={18} />
-              </button>
-              <button
-                onClick={() =>
-                  navigateToShapeIndex(currentShapeIndex + 1)
-                }
-                title="Next shape"
-                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
-              >
-                <ChevronRight size={18} />
-              </button>
-              <button
-                onClick={() => setShowGallery((v) => !v)}
-                title="Choose shape"
-                className={`rounded-lg border p-2 ${
-                  showGallery
-                    ? "border-teal-500 bg-teal-50 text-teal-700"
-                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
-                }`}
-              >
-                <Grid3x3 size={18} />
-              </button>
-              <button
-                onClick={() => (isPaused ? resumeSession() : pauseSession())}
-                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
-              >
-                {isPaused ? <Play size={18} /> : <Pause size={18} />}
-              </button>
-              <button
-                onClick={handleEndSession}
-                title="End session"
-                className="rounded-lg border border-red-200 bg-red-50 p-2 text-red-600 hover:bg-red-100"
-              >
-                <X size={18} />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+        {showGallery && <div className="absolute right-4 top-0 z-50">{galleryPanel}</div>}
 
-      {isActiveScreen && showGallery && (
-        <div className="fixed right-6 top-20 z-40">{galleryPanel}</div>
-      )}
-
-      <div
-        className={
-          isActiveScreen
-            ? "mx-auto flex max-w-[1400px] flex-col gap-5 p-5 lg:flex-row"
-            : "mx-auto max-w-5xl p-6 pb-16"
-        }
-      >
-        <div className={isActiveScreen ? "" : "w-full"}>
-          {isInstructions && (
-            <div className="mb-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <h1 className="mb-2 text-3xl font-black text-slate-800">
-                Canvas <span className="text-teal-600">Air</span>
-              </h1>
-              <p className="mb-5 leading-relaxed text-slate-600">
-                Trace each shape in the air with your index finger.{" "}
-                <span className="font-semibold text-slate-800">{sessionShapes.length} shapes</span>
-                {" "}at the {currentDifficulty.toLowerCase()} level, {SHAPE_TIME_LIMIT_SECONDS} seconds each.
-              </p>
-              <HowToPlay
-                theme="light"
-                variant="trace"
-                caption="Follow the dotted line"
-                steps={[
-                  "Show your hand to the camera. Your index fingertip is the pen.",
-                  "Move your fingertip along the dotted shape.",
-                  "Stay on the line: green means good, red means off the line.",
-                ]}
-              />
-
-              {/* Banner disabled while the pain-detector hook is being fixed. */}
-              {false && showPainDetectorWarning && (
-                <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                  <span className="font-semibold">
-                    Facial pain detection is unavailable.
-                  </span>{" "}
-                  The session will still run, but the automatic PAPS safety
-                  pause is disabled. Report any discomfort to your clinician.
-                </div>
-              )}
-
-              <div className="mb-5 flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">
-                  <span className="text-xs uppercase tracking-wide text-slate-500">
-                    Brush
-                  </span>
-                  <span>Index fingertip</span>
-                </span>
-                <button
-                  onClick={() => setShowGallery((v) => !v)}
-                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-                    showGallery
-                      ? "bg-teal-600 text-white shadow-sm"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                  }`}
-                >
-                  <Grid3x3 size={16} className="mr-1 inline" />
-                  Session Shapes
-                </button>
-                <button
-                  onClick={handleReshuffle}
-                  className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
-                >
-                  <RefreshCw size={16} className="mr-1 inline" />
-                  Reshuffle
-                </button>
-                <button
-                  onClick={handleRandomShape}
-                  className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
-                >
-                  <Shuffle size={16} className="mr-1 inline" />
-                  Random
-                </button>
-              </div>
-
-              {showGallery && <div className="relative mb-5">{galleryPanel}</div>}
-
-              <div className="flex items-start gap-5">
-                <div className="h-40 w-40 flex-shrink-0 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
-                  <svg viewBox="0 0 100 100" className="h-full w-full">
-                    <g transform={getShapeTransform(frozenScale)}>
-                      <path
-                        d={currentShapePath}
-                        fill="none"
-                        stroke="#0d9488"
-                        strokeWidth="3"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </g>
-                  </svg>
-                </div>
-                <div className="pt-2">
-                  <div className="mb-1 flex items-center gap-2">
-                    <span className="text-lg font-bold text-slate-800">
-                      {currentShape?.name}
-                    </span>
-                    <span className="text-amber-500">
-                      {"★".repeat(currentShape?.difficulty || 1)}
-                    </span>
-                  </div>
-                  <div className="space-y-0.5 text-xs text-slate-500">
-                    <div>
-                      Shape {currentShapeIndex + 1} of {sessionShapes.length}
-                    </div>
-                    <div>
-                      Target scale:{" "}
-                      <span className="font-mono font-semibold text-teal-700">
-                        {frozenScale.toFixed(2)}×
-                      </span>
-                    </div>
-                    <div>
-                      Tolerance:{" "}
-                      <span className="font-mono font-semibold">
-                        {frozenEffectiveTolerance.toFixed(1)}u ({currentDifficulty}
-                        {frozenPainMultiplier > 1 ? " · pain-widened" : ""})
-                      </span>
-                    </div>
-                    <div>
-                      Per-shape time:{" "}
-                      <span className="font-mono font-semibold">
-                        {SHAPE_TIME_LIMIT_SECONDS}s
-                      </span>
-                    </div>
-                    <div>
-                      Brush joint:{" "}
-                      <span className="font-mono font-semibold">
-                        Index fingertip
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div
-            className={
-              isActiveScreen
-                ? "relative w-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm lg:w-72 lg:flex-shrink-0"
-                : "relative aspect-video overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
-            }
-          >
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="h-full w-full scale-x-[-1] object-cover"
-            />
-            <SkeletonOverlay
-              poseData={poseData}
-              overallStatus={guidance.overallStatus}
-              shoulderAngle={shoulderAngle}
-            />
-            {isInstructions && (
-              <div className="absolute left-3 top-3 rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 font-mono text-xs text-slate-700 shadow-sm">
-                {Math.round(shoulderAngle)}° · PAPS {papsScore} · Tip
-              </div>
-            )}
-            {isActiveScreen && (
-              <div
-                className={`absolute bottom-3 left-3 rounded-lg border px-3 py-1.5 font-mono text-xs shadow-sm ${
-                  cursorVisible
-                    ? "border-slate-200 bg-white/90 text-slate-700"
-                    : "border-amber-300 bg-amber-50 text-amber-800"
-                }`}
-              >
-                {cursorVisible
-                  ? "Fingertip tracking ✓"
-                  : "Fingertip not visible — show your hand to the camera"}
-              </div>
-            )}
-          </div>
-
-          {isInstructions && (
-            <>
-              <div
-                className={`mt-4 rounded-xl border p-4 text-sm ${
-                  guidance.overallStatus === "ok"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    : "border-amber-200 bg-amber-50 text-amber-800"
-                }`}
-              >
-                {guidance.message}
-              </div>
-
-              {(poseError || handError) && (
-                <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-                  {poseError || handError}. Check camera permissions and
-                  connection, then reload.
-                </div>
-              )}
-
-              <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">
-                <div className="mb-2 font-semibold text-slate-700">
-                  How the brush stroke is scored
-                </div>
-                <ul className="space-y-1 text-xs leading-relaxed">
-                  <li>
-                    ·{" "}
-                    <span className="font-semibold text-emerald-600">
-                      Green
-                    </span>{" "}
-                    — on the outline (inside the tolerance band).
-                  </li>
-                  <li>
-                    ·{" "}
-                    <span className="font-semibold text-amber-600">Amber</span>{" "}
-                    — drifting, but still within 1.5× tolerance.
-                  </li>
-                  <li>
-                    · <span className="font-semibold text-red-600">Red</span>{" "}
-                    — outside tolerance, off the outline.
-                  </li>
-                  <li>
-                    · Accuracy is measured over your actual movement: how
-                    much of the distance you travelled stayed on the
-                    outline. Holding still does not change it either way.
-                  </li>
-                  <li>
-                    · Coverage is the proportion of the outline you
-                    actually visited. These are two different things.
-                  </li>
-                  <li>
-                    · Smoothness is scored from the{" "}
-                    <span className="font-semibold">acceleration</span> of
-                    your stroke, normalized against its speed, and only
-                    after you have moved enough to measure it.
-                  </li>
-                  <li>
-                    · Each shape has {SHAPE_TIME_LIMIT_SECONDS} seconds. If
-                    time runs out before coverage reaches the target, the
-                    shape is recorded as{" "}
-                    <span className="font-semibold">not completed</span>.
-                  </li>
-                  <li>
-                    · If the system detects discomfort, the tolerance band
-                    is widened for the next shape and the shape is scored
-                    on effort rather than precision.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-3 font-mono text-xs text-slate-500">
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                  90–100% Optimal
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-blue-500" />
-                  70–89% Good
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-orange-500" />
-                  50–69% Needs focus
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-red-500" />
-                  &lt;50% Slow down
-                </span>
-              </div>
-
-              <button
-                onClick={handleRestartSession}
-                disabled={!guidance.isReady || !canStart}
-                className="mt-6 rounded-xl bg-teal-600 px-8 py-3 font-bold text-white shadow-sm hover:bg-teal-500 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
-              >
-                {canStart
-                  ? "Start Session"
-                  : isActive && !calibrated
-                  ? "Hold still — calibrating…"
-                  : "Waiting for camera tracking…"}
-              </button>
-              {!guidance.isReady && (
-                <p className="mt-3 text-sm text-amber-600" role="status">
-                  Start is locked: {guidance.message}
-                </p>
-              )}
-            </>
-          )}
-        </div>
-
-        {isActiveScreen && (
-          <div className="relative flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="absolute inset-x-0 bottom-2 top-14 flex items-center justify-center px-2">
+          <div className="relative h-full max-w-full overflow-hidden rounded-2xl border-2 border-white/70 bg-white shadow-2xl" style={{ aspectRatio: "1 / 1" }}>
             <svg
               viewBox="0 0 100 100"
               className="h-full w-full"
@@ -2490,7 +2168,498 @@ export default function CanvasAir({
               </pre>
             )}
           </div>
-        )}
+
+        </div>
+
+        <CameraPip
+          videoRef={videoRef}
+          poseData={poseData}
+          guidance={guidance}
+          shoulderAngle={shoulderAngle}
+          label={cursorVisible ? "Fingertip ✓" : "Show your hand"}
+        />
+
+        <style>{`
+          @keyframes canvasAirPulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
+          @keyframes canvasAirSparkle { 0% { opacity: 0.9; transform: scale(1); } 100% { opacity: 0; transform: scale(2.2); } }
+          @keyframes canvasAirComplete { 0% { transform: scale(0.85); opacity: 0; } 60% { transform: scale(1.05); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+          @keyframes canvasAirShake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-8px); } 75% { transform: translateX(8px); } }
+          @keyframes canvasAirAbandoned { 0% { opacity: 0; transform: translateY(-6px); } 20% { opacity: 1; transform: translateY(0); } 100% { opacity: 1; transform: translateY(0); } }
+        `}</style>
+      </GameShell>
+    );
+  }
+
+  return (
+    <div className="h-screen w-full overflow-y-auto bg-slate-50 text-slate-800">
+      <SessionCheckpoint {...engine.checkpoint} />
+      <style>{`
+        @keyframes canvasAirPulse {
+          0%, 100% { opacity: 0.45; }
+          50% { opacity: 0.9; }
+        }
+        @keyframes canvasAirSparkle {
+          0% { opacity: 0.9; transform: scale(1); }
+          100% { opacity: 0; transform: scale(2.2); }
+        }
+        @keyframes canvasAirComplete {
+          0% { transform: scale(0.85); opacity: 0; }
+          60% { transform: scale(1.05); opacity: 1; }
+          100% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes canvasAirShake {
+          0%, 100% { transform: translateX(0); }
+          25% { transform: translateX(-8px); }
+          75% { transform: translateX(8px); }
+        }
+        @keyframes canvasAirAbandoned {
+          0% { opacity: 0; transform: translateY(-6px); }
+          20% { opacity: 1; transform: translateY(0); }
+          100% { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+
+      {/* Banner disabled while the pain-detector hook is being fixed. */}
+      {false && isActiveScreen && showPainDetectorWarning && (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-[60] rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800 shadow">
+          Facial pain detection unavailable — PAPS safety net is off
+        </div>
+      )}
+
+      {isActiveScreen && gameState === GAME_STATES.COUNTDOWN && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/90 text-8xl font-black text-teal-600">
+          {countdown || "GO"}
+        </div>
+      )}
+
+      {isActiveScreen && isPainDetected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50">
+          <div className="max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-2xl">
+            <h2 className="mb-3 text-xl font-bold text-red-600">
+              Discomfort Detected
+            </h2>
+            <p className="mb-6 text-slate-600">Please rest before continuing.</p>
+            <button
+              onClick={() => {
+                resetPainState();
+                resumeSession();
+              }}
+              className="rounded-lg bg-teal-600 px-6 py-2 font-bold text-white hover:bg-teal-500"
+            >
+              Resume
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isActiveScreen && (
+        <div className="sticky top-0 z-40 -mx-5 mb-3 border-b border-slate-200 bg-white/95 px-5 backdrop-blur">
+          <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-6 py-3">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-sm text-slate-700">
+              <span
+                className={`inline-flex items-center gap-1.5 ${
+                  shapeTimeLeft <= 5 && !showShapeComplete && !showShapeMissed
+                    ? "text-red-600"
+                    : ""
+                }`}
+              >
+                <span className="text-slate-400">Shape time</span>
+                <span className="font-semibold">{shapeTimeLeft}s</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-slate-400">Session</span>
+                <span className="font-semibold">{formatClock(timeLeft)}</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-slate-400">Shapes</span>
+                <span className="font-semibold">
+                  {completed}/{totalShapes}
+                </span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-slate-400">Coverage</span>
+                <span className="font-semibold">
+                  {shapeProgress.toFixed(1)}%
+                </span>
+              </span>
+              <span
+                className={`inline-flex items-center gap-1.5 font-semibold ${accuracyBand.text}`}
+              >
+                <span className="font-normal text-slate-400">Accuracy</span>
+                {tracingAccuracy == null ? "—" : `${tracingAccuracy.toFixed(1)}%`}
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-slate-400">Smoothness</span>
+                <span className="font-semibold">
+                  {liveSmoothness == null ? "—" : liveSmoothness.toFixed(0)}
+                </span>
+              </span>
+              <span className="rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-700">
+                {currentDifficulty}
+              </span>
+              {papsScore > 0 && (
+                <span className="rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 text-xs font-semibold text-purple-700">
+                  PAPS {papsScore}
+                  {papsScore >= PAPS_PAIN_THRESHOLD ? " · pain-adjusted" : ""}
+                </span>
+              )}
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                Score {score}
+              </span>
+            </div>
+            <div className="flex flex-shrink-0 items-center gap-1.5">
+              <button
+                onClick={() =>
+                  navigateToShapeIndex(currentShapeIndex - 1)
+                }
+                title="Previous shape"
+                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <button
+                onClick={() =>
+                  navigateToShapeIndex(currentShapeIndex + 1)
+                }
+                title="Next shape"
+                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
+              >
+                <ChevronRight size={18} />
+              </button>
+              <button
+                onClick={() => setShowGallery((v) => !v)}
+                title="Choose shape"
+                className={`rounded-lg border p-2 ${
+                  showGallery
+                    ? "border-teal-500 bg-teal-50 text-teal-700"
+                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                <Grid3x3 size={18} />
+              </button>
+              <button
+                onClick={() => (isPaused ? resumeSession() : pauseSession())}
+                className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 hover:bg-slate-100"
+              >
+                {isPaused ? <Play size={18} /> : <Pause size={18} />}
+              </button>
+              <button
+                onClick={handleEndSession}
+                title="End session"
+                className="rounded-lg border border-red-200 bg-red-50 p-2 text-red-600 hover:bg-red-100"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isActiveScreen && showGallery && (
+        <div className="fixed right-6 top-20 z-40">{galleryPanel}</div>
+      )}
+
+      <div
+        className={
+          isActiveScreen
+            ? "mx-auto flex max-w-[1400px] flex-col gap-5 p-5 lg:flex-row"
+            : "mx-auto max-w-5xl p-6 pb-16"
+        }
+      >
+        <div className={isActiveScreen ? "" : "w-full"}>
+          {isInstructions && (
+            <div className="mb-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h1 className="mb-2 text-3xl font-black text-slate-800">
+                Canvas <span className="text-teal-600">Air</span>
+              </h1>
+              <p className="mb-5 leading-relaxed text-slate-600">
+                Trace each shape in the air with your index finger.{" "}
+                <span className="font-semibold text-slate-800">{sessionShapes.length} shapes</span>
+                {" "}at the {currentDifficulty.toLowerCase()} level, {SHAPE_TIME_LIMIT_SECONDS} seconds each.
+              </p>
+              <HowToPlay
+                theme="light"
+                variant="trace"
+                caption="Follow the dotted line"
+                steps={[
+                  "Show your hand to the camera. Your index fingertip is the pen.",
+                  "Move your fingertip along the dotted shape.",
+                  "Stay on the line: green means good, red means off the line.",
+                ]}
+              />
+
+              {/* Banner disabled while the pain-detector hook is being fixed. */}
+              {false && showPainDetectorWarning && (
+                <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  <span className="font-semibold">
+                    Facial pain detection is unavailable.
+                  </span>{" "}
+                  The session will still run, but the automatic PAPS safety
+                  pause is disabled. Report any discomfort to your clinician.
+                </div>
+              )}
+
+              <div className="mb-5 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div>
+                  <div className="mb-1.5 text-sm font-semibold text-slate-700">How should the pen feel?</div>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(STEADINESS).map(([id, p]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setSteadiness(id)}
+                        className={`rounded-xl border px-3 py-2 text-sm font-bold ${steadiness === id ? "border-teal-500 bg-teal-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">Steady = smoother line. Quick = follows your finger right away. Balanced is a good start.</p>
+                </div>
+              </div>
+
+              <div className="mb-5 flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">
+                  <span className="text-xs uppercase tracking-wide text-slate-500">
+                    Brush
+                  </span>
+                  <span>Index fingertip</span>
+                </span>
+                <button
+                  onClick={() => setShowGallery((v) => !v)}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                    showGallery
+                      ? "bg-teal-600 text-white shadow-sm"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  }`}
+                >
+                  <Grid3x3 size={16} className="mr-1 inline" />
+                  Session Shapes
+                </button>
+                <button
+                  onClick={handleReshuffle}
+                  className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  <RefreshCw size={16} className="mr-1 inline" />
+                  Reshuffle
+                </button>
+                <button
+                  onClick={handleRandomShape}
+                  className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  <Shuffle size={16} className="mr-1 inline" />
+                  Random
+                </button>
+              </div>
+
+              {showGallery && <div className="relative mb-5">{galleryPanel}</div>}
+
+              <div className="flex items-start gap-5">
+                <div className="h-40 w-40 flex-shrink-0 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                  <svg viewBox="0 0 100 100" className="h-full w-full">
+                    <g transform={getShapeTransform(frozenScale)}>
+                      <path
+                        d={currentShapePath}
+                        fill="none"
+                        stroke="#0d9488"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </g>
+                  </svg>
+                </div>
+                <div className="pt-2">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="text-lg font-bold text-slate-800">
+                      {currentShape?.name}
+                    </span>
+                    <span className="text-amber-500">
+                      {"★".repeat(currentShape?.difficulty || 1)}
+                    </span>
+                  </div>
+                  <div className="space-y-0.5 text-xs text-slate-500">
+                    <div>
+                      Shape {currentShapeIndex + 1} of {sessionShapes.length}
+                    </div>
+                    <div>
+                      Target scale:{" "}
+                      <span className="font-mono font-semibold text-teal-700">
+                        {frozenScale.toFixed(2)}×
+                      </span>
+                    </div>
+                    <div>
+                      Tolerance:{" "}
+                      <span className="font-mono font-semibold">
+                        {frozenEffectiveTolerance.toFixed(1)}u ({currentDifficulty}
+                        {frozenPainMultiplier > 1 ? " · pain-widened" : ""})
+                      </span>
+                    </div>
+                    <div>
+                      Per-shape time:{" "}
+                      <span className="font-mono font-semibold">
+                        {SHAPE_TIME_LIMIT_SECONDS}s
+                      </span>
+                    </div>
+                    <div>
+                      Brush joint:{" "}
+                      <span className="font-mono font-semibold">
+                        Index fingertip
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div
+            className={
+              isActiveScreen
+                ? "relative w-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm lg:w-72 lg:flex-shrink-0"
+                : "relative aspect-video overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
+            }
+          >
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="h-full w-full scale-x-[-1] object-cover"
+            />
+            <SkeletonOverlay
+              poseData={poseData}
+              overallStatus={guidance.overallStatus}
+              shoulderAngle={shoulderAngle}
+            />
+            {isInstructions && (
+              <div className="absolute left-3 top-3 rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 font-mono text-xs text-slate-700 shadow-sm">
+                {Math.round(shoulderAngle)}° · PAPS {papsScore} · Tip
+              </div>
+            )}
+            {isActiveScreen && (
+              <div
+                className={`absolute bottom-3 left-3 rounded-lg border px-3 py-1.5 font-mono text-xs shadow-sm ${
+                  cursorVisible
+                    ? "border-slate-200 bg-white/90 text-slate-700"
+                    : "border-amber-300 bg-amber-50 text-amber-800"
+                }`}
+              >
+                {cursorVisible
+                  ? "Fingertip tracking ✓"
+                  : "Fingertip not visible — show your hand to the camera"}
+              </div>
+            )}
+          </div>
+
+          {isInstructions && (
+            <>
+              <div
+                className={`mt-4 rounded-xl border p-4 text-sm ${
+                  guidance.overallStatus === "ok"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : "border-amber-200 bg-amber-50 text-amber-800"
+                }`}
+              >
+                {guidance.message}
+              </div>
+
+              {(poseError || handError) && (
+                <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                  {poseError || handError}. Check camera permissions and
+                  connection, then reload.
+                </div>
+              )}
+
+              <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">
+                <div className="mb-2 font-semibold text-slate-700">
+                  How the brush stroke is scored
+                </div>
+                <ul className="space-y-1 text-xs leading-relaxed">
+                  <li>
+                    ·{" "}
+                    <span className="font-semibold text-emerald-600">
+                      Green
+                    </span>{" "}
+                    — on the outline (inside the tolerance band).
+                  </li>
+                  <li>
+                    ·{" "}
+                    <span className="font-semibold text-amber-600">Amber</span>{" "}
+                    — drifting, but still within 1.5× tolerance.
+                  </li>
+                  <li>
+                    · <span className="font-semibold text-red-600">Red</span>{" "}
+                    — outside tolerance, off the outline.
+                  </li>
+                  <li>
+                    · Accuracy is measured over your actual movement: how
+                    much of the distance you travelled stayed on the
+                    outline. Holding still does not change it either way.
+                  </li>
+                  <li>
+                    · Coverage is the proportion of the outline you
+                    actually visited. These are two different things.
+                  </li>
+                  <li>
+                    · Smoothness is scored from the{" "}
+                    <span className="font-semibold">acceleration</span> of
+                    your stroke, normalized against its speed, and only
+                    after you have moved enough to measure it.
+                  </li>
+                  <li>
+                    · Each shape has {SHAPE_TIME_LIMIT_SECONDS} seconds. If
+                    time runs out before coverage reaches the target, the
+                    shape is recorded as{" "}
+                    <span className="font-semibold">not completed</span>.
+                  </li>
+                  <li>
+                    · If the system detects discomfort, the tolerance band
+                    is widened for the next shape and the shape is scored
+                    on effort rather than precision.
+                  </li>
+                </ul>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-3 font-mono text-xs text-slate-500">
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  90–100% Optimal
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-blue-500" />
+                  70–89% Good
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-orange-500" />
+                  50–69% Needs focus
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-red-500" />
+                  &lt;50% Slow down
+                </span>
+              </div>
+
+              <button
+                onClick={handleRestartSession}
+                disabled={!guidance.isReady || !canStart}
+                className="mt-6 rounded-xl bg-teal-600 px-8 py-3 font-bold text-white shadow-sm hover:bg-teal-500 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
+              >
+                {canStart
+                  ? "Start Session"
+                  : isActive && !calibrated
+                  ? "Hold still — calibrating…"
+                  : "Waiting for camera tracking…"}
+              </button>
+              {!guidance.isReady && (
+                <p className="mt-3 text-sm text-amber-600" role="status">
+                  Start is locked: {guidance.message}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+
       </div>
     </div>
   );

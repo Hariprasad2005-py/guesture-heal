@@ -11,6 +11,10 @@ import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
 import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
+import GameShell from "../components/rehab/GameShell";
+import ArmPicker from "../components/rehab/ArmPicker";
+import { BlueprintBackdrop } from "../components/rehab/GameBackdrops";
+import LevelBanner from "../components/rehab/LevelBanner";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import HowToPlay from "../components/rehab/HowToPlay";
@@ -18,12 +22,25 @@ import HowToPlay from "../components/rehab/HowToPlay";
 // SESSION_TARGET_COUNT targets — see the targetIndex effect below. This
 // timer only protects against a session that somehow never resolves
 // (e.g. patient walks away).
-const SESSION_SECONDS = 120;
+const SESSION_SECONDS = 240;
 
 // The session is exactly 5 targets, always. Not configurable by
 // difficulty — difficulty affects target size/distance/hold time, never
 // the count.
 const SESSION_TARGET_COUNT = 5;
+
+// A "round" is one lap of the 5 directions. After each round the patient
+// chooses whether to go again; every extra round is a level harder
+// (further, smaller, longer hold). At most MAX_ROUNDS rounds.
+const MAX_ROUNDS = 3;
+const ROUND_LEVELS = [
+  { distMul: 1.0, sizeMul: 1.0, holdMul: 1.0, text: "Level 1: reach the targets" },
+  { distMul: 1.2, sizeMul: 0.85, holdMul: 1.15, text: "Level 2: further and smaller" },
+  { distMul: 1.4, sizeMul: 0.72, holdMul: 1.3, text: "Level 3: the widest reach" },
+];
+
+// Which hand each direction asks for when both arms are in use.
+const DIRECTION_HAND = { Up: "right", Left: "left", Right: "right", Down: "left", "Upper-Left": "left" };
 
 const HOLD_DURATION_MS = {
   Beginner: 1000,
@@ -180,7 +197,9 @@ const DIFFICULTY_TOAST_MS = 2200;
 // MediaPipe wrist reading each frame. Lower = smoother but laggier,
 // higher = snappier but jittery. 0.3 removes most frame-to-frame
 // tracking noise without feeling sluggish.
-const CURSOR_SMOOTHING = 0.3;
+// The pose hook already applies a One Euro filter, so this is only a light
+// extra blend (a heavy one adds visible lag).
+const CURSOR_SMOOTHING = 0.75;
 
 // How long (ms) the cursor must stay OUTSIDE the target zone while a
 // hold is in progress before that attempt is counted as a MISS. A
@@ -293,13 +312,15 @@ function buildPrecisionReachSessionRecord({
 // mid-attempt can reposition/resize the target without resetting the
 // response-time clock.
 function computeTarget(index, difficulty) {
-  const dir = TARGET_DIRECTIONS[index] || TARGET_DIRECTIONS[0];
-  const color = TARGET_COLORS[index] || TARGET_COLORS[0];
-  const radius = TARGET_DISTANCE_PERCENT[difficulty] ?? TARGET_DISTANCE_PERCENT.Beginner;
+  const slot = index % SESSION_TARGET_COUNT;
+  const round = Math.min(MAX_ROUNDS - 1, Math.floor(index / SESSION_TARGET_COUNT));
+  const dir = TARGET_DIRECTIONS[slot] || TARGET_DIRECTIONS[0];
+  const color = TARGET_COLORS[slot] || TARGET_COLORS[0];
+  const radius = (TARGET_DISTANCE_PERCENT[difficulty] ?? TARGET_DISTANCE_PERCENT.Beginner) * ROUND_LEVELS[round].distMul;
   const rad = (dir.angleDeg * Math.PI) / 180;
   const x = Math.min(88, Math.max(12, HOME_POSITION.x + radius * Math.cos(rad)));
   const y = Math.min(85, Math.max(15, HOME_POSITION.y + radius * Math.sin(rad)));
-  return { x, y, color, directionLabel: dir.label };
+  return { x, y, color, directionLabel: dir.label, hand: DIRECTION_HAND[dir.label] || "right" };
 }
 
 // ─── Particle Burst ──────────────────────────────────────────────────────────
@@ -483,6 +504,11 @@ export default function PrecisionReach({
   // is active." 0..4 during play; reaching SESSION_TARGET_COUNT means the
   // session is over (handled by the effect below).
   const [targetIndex, setTargetIndex] = useState(0);
+  const [totalTargets, setTotalTargets] = useState(SESSION_TARGET_COUNT);
+  const [roundPrompt, setRoundPrompt] = useState(false);
+  const [armChoice, setArmChoice] = useState("both");
+  const [levelBanner, setLevelBanner] = useState({ visible: false, text: "" });
+  const roundIndex = Math.min(MAX_ROUNDS - 1, Math.floor(Math.min(targetIndex, totalTargets - 1) / SESSION_TARGET_COUNT));
   const [isHolding, setIsHolding] = useState(false);
   const [holdProgress, setHoldProgress] = useState(0);
   const [showMissFlash, setShowMissFlash] = useState(false);
@@ -508,7 +534,9 @@ export default function PrecisionReach({
   const spawnedAtRef = useRef(performance.now());
 
   const { isActive } = useMediaPipeUpperBody({ videoRef, onPoseUpdate: setPoseData });
-  const { position, shoulderAngle, activeSide, status, hasTrackedOnce } = usePoseDetection(poseData);
+  const nextHand = DIRECTION_HAND[(TARGET_DIRECTIONS[targetIndex % SESSION_TARGET_COUNT] || TARGET_DIRECTIONS[0]).label] || "right";
+  const forcedSide = armChoice !== "both" ? armChoice : nextHand;
+  const { position, shoulderAngle, activeSide, status, hasTrackedOnce } = usePoseDetection(poseData, { preferredSide: forcedSide });
   const guidance = usePostureGuidance(poseData);
   const { papsScore: painScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
   const { currentDifficulty, adapt } = useAdaptiveDifficulty();
@@ -628,8 +656,9 @@ export default function PrecisionReach({
     painDetected: painDetectedDuringSessionRef.current,
   });
 
-  const targetSizePercent = TARGET_SIZE_PERCENT[currentDifficulty] || TARGET_SIZE_PERCENT.Beginner;
-  const holdDurationMs = HOLD_DURATION_MS[currentDifficulty] || HOLD_DURATION_MS.Beginner;
+  const roundLevel = ROUND_LEVELS[roundIndex];
+  const targetSizePercent = (TARGET_SIZE_PERCENT[currentDifficulty] || TARGET_SIZE_PERCENT.Beginner) * roundLevel.sizeMul;
+  const holdDurationMs = (HOLD_DURATION_MS[currentDifficulty] || HOLD_DURATION_MS.Beginner) * roundLevel.holdMul;
   const arenaMinSide = Math.min(arenaSize.width, arenaSize.height) || 0;
   const targetSizePx = (targetSizePercent / 100) * arenaMinSide;
 
@@ -679,7 +708,7 @@ export default function PrecisionReach({
   // detected angle records 0 (no valid ROM), not a stale value from the
   // previous rep.
   useEffect(() => {
-    if (targetIndex >= SESSION_TARGET_COUNT) return;
+    if (targetIndex >= totalTargets) return;
     spawnedAtRef.current = performance.now();
     pausedMsSinceSpawnRef.current = 0;
     pauseStartRef.current = null;
@@ -691,18 +720,42 @@ export default function PrecisionReach({
     setIsHolding(false);
     setHoldProgress(0);
     // eslint-disable-next-line no-console
-    console.log(`[TARGET] ${targetIndex + 1}/${SESSION_TARGET_COUNT} spawned`);
-  }, [targetIndex]);
+    console.log(`[TARGET] ${targetIndex + 1}/${totalTargets} spawned`);
+  }, [targetIndex, totalTargets]);
 
   // Session ends the moment all 5 targets have been attempted — this is
   // the PRIMARY completion condition, not the 120s timer.
   useEffect(() => {
-    if (targetIndex >= SESSION_TARGET_COUNT && gameState === GAME_STATES.ACTIVE) {
-      // eslint-disable-next-line no-console
-      console.log("[SESSION] COMPLETE");
-      endSession();
+    if (targetIndex >= totalTargets && gameState === GAME_STATES.ACTIVE && !roundPrompt) {
+      if (totalTargets / SESSION_TARGET_COUNT >= MAX_ROUNDS) {
+        // eslint-disable-next-line no-console
+        console.log("[SESSION] COMPLETE");
+        endSession();
+      } else {
+        // Round finished: let the patient choose to go again.
+        setRoundPrompt(true);
+        pauseSession();
+      }
     }
-  }, [targetIndex, gameState, endSession]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetIndex, totalTargets, gameState, endSession, roundPrompt]);
+
+  const handleRoundYes = useCallback(() => {
+    setTotalTargets((n) => n + SESSION_TARGET_COUNT);
+    setRoundPrompt(false);
+    resumeSession();
+  }, [resumeSession]);
+  const handleRoundNo = useCallback(() => {
+    setRoundPrompt(false);
+    endSession();
+  }, [endSession]);
+
+  useEffect(() => {
+    if (roundIndex === 0) return undefined;
+    setLevelBanner({ visible: true, text: ROUND_LEVELS[roundIndex].text });
+    const t = setTimeout(() => setLevelBanner((b) => ({ ...b, visible: false })), 2800);
+    return () => clearTimeout(t);
+  }, [roundIndex]);
 
   const advanceTarget = useCallback(() => {
     setTargetIndex((v) => v + 1);
@@ -713,7 +766,7 @@ export default function PrecisionReach({
     targetResolvedRef.current = true;
     const missedTarget = target;
     // eslint-disable-next-line no-console
-    console.log(`[TARGET] ${targetIndex + 1}/${SESSION_TARGET_COUNT} MISS`);
+    console.log(`[TARGET] ${targetIndex + 1}/${totalTargets} MISS`);
     setMisses((v) => v + 1); telemetry.recordRep(false);
     audio.playMiss();
     setMissFlashPos({ x: missedTarget.x, y: missedTarget.y });
@@ -746,7 +799,7 @@ export default function PrecisionReach({
       : Math.max(0, Math.round(attemptMaxAngleRef.current - attemptMinAngleRef.current));
 
     // eslint-disable-next-line no-console
-    console.log(`[TARGET] ${targetIndex + 1}/${SESSION_TARGET_COUNT} HIT`);
+    console.log(`[TARGET] ${targetIndex + 1}/${totalTargets} HIT`);
     setHits((v) => v + 1); telemetry.recordRep(true);
     audio.playSuccess();
 
@@ -792,7 +845,7 @@ export default function PrecisionReach({
     if (gameState !== GAME_STATES.ACTIVE || isPaused) return;
     if (!arenaRectRef.current.width || !arenaRectRef.current.height) return;
     if (status !== "tracking") return;
-    if (targetIndex >= SESSION_TARGET_COUNT) return;
+    if (targetIndex >= totalTargets) return;
     // Once this target has already been resolved (hit or miss), ignore
     // any further detection frames for it — the target-index update and
     // the reset effect that clears this flag haven't necessarily landed
@@ -864,7 +917,7 @@ export default function PrecisionReach({
     position.x, position.y,
     smoothPosition.x, smoothPosition.y,
     target, targetSizePx, holdDurationMs, shoulderAngle,
-    targetIndex, wristToBoardPx,
+    targetIndex, totalTargets, wristToBoardPx,
   ]);
 
   useEffect(() => {
@@ -1190,7 +1243,7 @@ export default function PrecisionReach({
             steps={[
               "Sit back so your shoulders show on the camera.",
               "Move your white dot into the colored target with your arm.",
-              "Hold still until the ring fills. Do this for 5 targets.",
+              "Hold still until the ring fills. Do this for 5 targets. You can then choose another, harder round.",
             ]}
             scoring={[
               "A target counts when you hold the dot inside it until the ring is full.",
@@ -1199,6 +1252,13 @@ export default function PrecisionReach({
             ]}
             trains="shoulder reach in every direction, and holding steady."
           />
+
+          <div className="mb-6 space-y-3 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+            <div>
+              <div className="mb-1.5 text-sm font-semibold text-slate-200">Which arm will you use?</div>
+              <ArmPicker value={armChoice} onChange={setArmChoice} />
+            </div>
+          </div>
 
           <div className="mb-8 grid grid-cols-2 gap-6">
             <div>
@@ -1285,6 +1345,7 @@ export default function PrecisionReach({
       durationSeconds: sessionStartTimeRef.current
         ? Math.max(0, Math.round((Date.now() - sessionStartTimeRef.current) / 1000))
         : null,
+      moodChoice: engine.moodChoice,
       score,
       accuracyPercent: accuracy,
       romData: {
@@ -1339,11 +1400,23 @@ export default function PrecisionReach({
 
   // ─── ACTIVE GAME ──────────────────────────────────────────────────────────
   const diffColors = DIFFICULTY_COLOR[currentDifficulty] || DIFFICULTY_COLOR.Beginner;
-  const displayedTargetNumber = Math.min(targetIndex + 1, SESSION_TARGET_COUNT);
+  const displayedTargetNumber = (Math.min(targetIndex, totalTargets - 1) % SESSION_TARGET_COUNT) + 1;
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-[#060d1a] text-white overflow-hidden">
+    <GameShell backdrop={<BlueprintBackdrop homeX={HOME_POSITION.x} homeY={HOME_POSITION.y} />}>
+    <div className="absolute inset-0 flex min-h-0 flex-col">
       <SessionCheckpoint {...engine.checkpoint} />
+      <SessionCheckpoint
+        open={roundPrompt}
+        title="Round complete! Go again?"
+        subtitle={`${hits} of ${repData.length} targets reached. The next round is a level harder.`}
+        extendLabel="😊 Yes, another round"
+        continueLabel={null}
+        finishLabel="✅ I'm done for today"
+        onExtend={handleRoundYes}
+        onFinish={handleRoundNo}
+      />
+      <LevelBanner text={levelBanner.text} visible={levelBanner.visible} />
       <style>{`
         @keyframes pulse-ring { 0%,100% { transform: scale(1) translate(-50%,-50%); opacity: 0.5; } 50% { transform: scale(1.22) translate(-50%,-50%); opacity: 0.9; } }
         @keyframes particleBurst {
@@ -1377,7 +1450,7 @@ export default function PrecisionReach({
         <div className="flex flex-wrap items-center gap-2">
           <Pill
             label="Target"
-            value={`${displayedTargetNumber} / ${SESSION_TARGET_COUNT}`}
+            value={`${displayedTargetNumber} / ${SESSION_TARGET_COUNT} · Lv ${roundIndex + 1}`}
             colorClass="text-cyan-300"
             icon="🎯"
           />
@@ -1415,19 +1488,19 @@ export default function PrecisionReach({
       <div className="flex flex-1 min-h-0 px-4 py-3">
         <div
           ref={arenaRef}
-          className="relative w-full h-full overflow-hidden rounded-2xl border-2 border-slate-700/40"
-          style={{ background: "radial-gradient(ellipse 70% 70% at 50% 50%, rgba(6,20,50,0.9) 0%, rgba(6,13,26,1) 100%)" }}
+          className="relative w-full h-full overflow-hidden rounded-2xl border border-white/20"
         >
-          <div
-            className="pointer-events-none absolute inset-0 z-0"
-            style={{
-              backgroundImage: "linear-gradient(rgba(34,211,238,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(34,211,238,0.06) 1px, transparent 1px)",
-              backgroundSize: "48px 48px",
-              animation: "gridPulse 4s ease-in-out infinite",
-            }}
-          />
+
 
           <DifficultyToast message={diffToast.message} visible={diffToast.visible} />
+          {armChoice === "both" && targetIndex < totalTargets && (
+            <div
+              className="pointer-events-none absolute left-1/2 top-3 z-30 -translate-x-1/2 rounded-full px-5 py-1.5 text-sm font-black text-white shadow-lg sm:text-base"
+              style={{ background: target.hand === "left" ? "#0891b2" : "#ea580c" }}
+            >
+              {target.hand === "left" ? "✋ Use your LEFT hand" : "Use your RIGHT hand ✋"}
+            </div>
+          )}
 
           {/* Countdown — centered on the ARENA, not the browser viewport. */}
           {gameState === GAME_STATES.COUNTDOWN && (
@@ -1443,7 +1516,7 @@ export default function PrecisionReach({
             </div>
           )}
 
-          {isPaused && !isPainDetected && (
+          {isPaused && !isPainDetected && !roundPrompt && (
             <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 backdrop-blur-sm">
               <div className="text-center">
                 <div className="text-5xl font-black text-slate-300 mb-2">⏸ Paused</div>
@@ -1463,7 +1536,7 @@ export default function PrecisionReach({
           />
 
           {/* ── Colored target orb ───────────────────────────────────── */}
-          {!showMissFlash && targetIndex < SESSION_TARGET_COUNT && (
+          {!showMissFlash && targetIndex < totalTargets && (
             <>
               {!isHolding && (
                 <div
@@ -1581,8 +1654,8 @@ export default function PrecisionReach({
 
           {/* Webcam overlay */}
           <div
-            className="absolute top-4 right-4 z-20 overflow-hidden rounded-xl border-2 border-cyan-500/40 bg-black/60 shadow-[0_0_20px_rgba(34,211,238,0.25)] backdrop-blur"
-            style={{ width: "clamp(200px, 24vw, 300px)", aspectRatio: "4 / 3" }}
+            className="absolute bottom-4 right-4 z-20 overflow-hidden rounded-xl border-2 border-white/80 bg-black/60 shadow-lg"
+            style={{ width: "clamp(150px, 15vw, 210px)", aspectRatio: "4 / 3" }}
           >
             <video ref={videoRef} autoPlay playsInline muted className="h-full w-full scale-x-[-1] object-cover" />
             <SkeletonOverlay poseData={poseData} overallStatus={guidance.overallStatus} shoulderAngle={shoulderAngle} />
@@ -1597,5 +1670,6 @@ export default function PrecisionReach({
         </div>
       </div>
     </div>
+    </GameShell>
   );
 }
