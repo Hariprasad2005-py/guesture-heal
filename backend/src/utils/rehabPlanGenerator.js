@@ -351,10 +351,14 @@ function generateRehabPlan(condition = "", painLevel = 3, affectedSide = "n/a") 
     // into rotationOrder and wraps around, so across a 7-day week every
     // game in the library gets used at least once instead of the same
     // 3 repeating on every day.
-    const startIndex = (day - 1) % rotationOrder.length;
-    const dayGames = [];
-    for (let i = 0; i < GAMES_PER_DAY; i++) {
-      dayGames.push(rotationOrder[(startIndex + i) % rotationOrder.length]);
+    // Condition-recommended games are in EVERY day. The remaining slots are
+    // filled from the other games, rotating one step each day, so the whole
+    // library still gets used across the week.
+    const fixed = recommended.slice(0, GAMES_PER_DAY);
+    const others = rotationOrder.filter((g) => !fixed.includes(g));
+    const dayGames = [...fixed];
+    for (let i = 0; dayGames.length < GAMES_PER_DAY && others.length > 0 && i < others.length; i++) {
+      dayGames.push(others[(day - 1 + i) % others.length]);
     }
 
     const dayExercises = dayGames.map((game) => {
