@@ -55,13 +55,16 @@ import LevelBanner from "../components/rehab/LevelBanner";
     { minHits: 12, directions: ["horizontal", "vertical", "diagonal"] },
   ];
 
-  // Five levels. Each one is harder: more slice directions, faster, smaller.
+  // Eight levels. Each one is harder: more slice directions, faster, smaller.
   const LEVELS = [
     { minHits: 0, directions: ["horizontal"], sizeMul: 1.15, speedMul: 0.9, text: "Level 1: side to side" },
     { minHits: 5, directions: ["horizontal", "vertical"], sizeMul: 1.0, speedMul: 1.0, text: "Level 2: up and down too" },
     { minHits: 12, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.95, speedMul: 1.1, text: "Level 3: diagonals" },
     { minHits: 20, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.85, speedMul: 1.25, text: "Level 4: faster fruit" },
     { minHits: 30, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.75, speedMul: 1.4, text: "Level 5: smaller and faster" },
+    { minHits: 42, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.7, speedMul: 1.6, text: "Level 6: fast lane" },
+    { minHits: 56, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.66, speedMul: 1.8, text: "Level 7: lightning fruit" },
+    { minHits: 72, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.62, speedMul: 2.05, text: "Level 8: master slicer" },
   ];
 
   const DIRECTION_HINT = {

@@ -12,6 +12,7 @@ import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
 import SkeletonOverlay from "../components/rehab/SkeletonOverlay";
 import GameShell, { StageTopBar, CameraPip } from "../components/rehab/GameShell";
+import { OneEuro } from "../utils/oneEuro";
 import ArmPicker from "../components/rehab/ArmPicker";
 import { OrchardBackdrop } from "../components/rehab/GameBackdrops";
 import LevelBanner from "../components/rehab/LevelBanner";
@@ -31,8 +32,15 @@ const SESSION_SECONDS = 120;
 const CATCH_ZONE_MIN = 78;
 const CATCH_ZONE_MAX = 94;
 
-const BASKET_WIDTH_PERCENT = 26;
-const BASKET_HALF = BASKET_WIDTH_PERCENT / 2;
+// The basket starts small and shrinks as the level goes up (% of board width).
+const BASKET_WIDTHS = [17, 15.5, 14, 12, 10];
+const BASKET_HALF = BASKET_WIDTHS[0] / 2;
+
+// Two-basket mode (both arms): each hand moves its own basket on its own
+// side of the board. These are the screen-x ranges the hand sweeps.
+const LEFT_HAND_RANGE = [10, 55];
+const RIGHT_HAND_RANGE = [45, 90];
+const HAND_COLOR = { left: "#22d3ee", right: "#fb923c" };
 const BASKET_BOTTOM_PERCENT = 2;
 const BASKET_ICON_SIZE_PX = 140;
 
@@ -94,7 +102,7 @@ function difficultyToRadiusMultiplier(label) {
   return 1.15;
 }
 
-function spawnObject({ speed, sizePx, gestureMix = 0, gestureAvailable }) {
+function spawnObject({ speed, sizePx, gestureMix = 0, gestureAvailable, armChoice = "both", lastHand = "right" }) {
   const wantGesture = gestureAvailable && Math.random() < gestureMix;
   const pool = OBJECT_TYPES.filter((t) =>
     wantGesture ? t.requiredGesture !== "any" : t.requiredGesture === "any"
@@ -102,7 +110,14 @@ function spawnObject({ speed, sizePx, gestureMix = 0, gestureAvailable }) {
   const selected = pool[Math.floor(Math.random() * pool.length)] || OBJECT_TYPES[4];
   const emoji = selected.emoji || FRUITS[Math.floor(Math.random() * FRUITS.length)];
 
-  const x = 12 + Math.random() * 76;
+  // both arms: fruit alternates sides, left-side fruit is for the left hand
+  const hand = armChoice === "both" ? (lastHand === "left" ? "right" : "left") : armChoice;
+  const x =
+    armChoice === "both"
+      ? hand === "left"
+        ? 10 + Math.random() * 36
+        : 54 + Math.random() * 36
+      : 12 + Math.random() * 76;
 
   return {
     id:
@@ -110,6 +125,7 @@ function spawnObject({ speed, sizePx, gestureMix = 0, gestureAvailable }) {
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random()}`,
     x,
+    hand,
     y: -12,
     speed: clamp(speed || 0.35, MIN_SPEED, MAX_SPEED),
     emoji,
@@ -147,14 +163,21 @@ export default function CatchAndFlex({
   const [reactionTimes, setReactionTimes] = useState([]);
   const [gestureStats, setGestureStats] = useState({ correct: 0, total: 0 });
   const [handGestureLabel, setHandGestureLabel] = useState("unknown");
-  const [basketCenterX, setBasketCenterX] = useState(50);
-  const [isHandVisible, setIsHandVisible] = useState(false);
+  const [baskets, setBaskets] = useState({
+    left: { x: 25, vis: false, g: "unknown" },
+    right: { x: 75, vis: false, g: "unknown" },
+  });
   const [armChoice, setArmChoice] = useState("both");
   const [levelBanner, setLevelBanner] = useState({ visible: false, text: "" });
 
   // ---- High-frequency refs (RAF reads only these; no setState per frame) ----
-  const smoothedHandXRef = useRef(50);
-  const basketCenterXRef = useRef(50);
+  const basketsRef = useRef({
+    left: { x: 25, vis: false, gesture: "unknown" },
+    right: { x: 75, vis: false, gesture: "unknown" },
+  });
+  const sideFiltersRef = useRef({ left: new OneEuro(1.4, 0.09), right: new OneEuro(1.4, 0.09) });
+  const armChoiceRef = useRef("both");
+  const lastHandRef = useRef("right");
   const fruitsRef = useRef([]);
   const basketTrailRef = useRef([]);
   const handGestureRef = useRef("unknown");
@@ -171,7 +194,6 @@ export default function CatchAndFlex({
   const currentDifficultyRef = useRef("Beginner");
   const shoulderAngleRef = useRef(0);
   const flashRef = useRef(null);
-  const poseStatusRef = useRef("never_tracked");
 
   const minAngleRef = useRef(null);
   const maxAngleRef = useRef(0);
@@ -191,8 +213,10 @@ export default function CatchAndFlex({
     onPoseUpdate: setPoseData,
   });
 
-  const { position, shoulderAngle, activeSide, status: poseStatus } =
-    usePoseDetection(poseData, { preferredSide: armChoice === "both" ? "auto" : armChoice });
+  const { shoulderAngle, activeSide } = usePoseDetection(poseData, {
+    preferredSide: armChoice === "both" ? "auto" : armChoice,
+  });
+  armChoiceRef.current = armChoice;
   const guidance = usePostureGuidance(poseData);
   const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({
     videoRef,
@@ -202,45 +226,90 @@ export default function CatchAndFlex({
   const audio = useAudioFeedback(true);
 
   // ============================================================
-  // HAND → SMOOTHED BASKET X (per pose-frame, not per RAF frame)
+  // HANDS → BASKETS (per pose frame)
   // ============================================================
-  // Two jobs:
-  //   1) lerp the raw hand X to damp MediaPipe jitter.
-  //   2) clamp so the basket never leaves the canvas.
+  // Each hand drives its own basket. With "Both arms" the left hand moves the
+  // left basket and the right hand moves the right basket; with one arm
+  // there is a single full-width basket. The hand shape (open / closed) is
+  // read from the same hand that moves that basket.
   useEffect(() => {
-    // `position.x` from usePoseDetection is ALREADY in the correct
-    // screen-space coordinate: the hook computes (1 - rawWristX) * 100,
-    // which matches the mirrored video preview you see on the tile.
-    // Do NOT invert here — that produces a basket on the opposite side
-    // from your hand.
-    const target = clamp(((position.x - REACH_MIN) / (REACH_MAX - REACH_MIN)) * 100, 0, 100);
+    const raw = poseData?.raw;
+    const now = performance.now();
+    const next = { left: null, right: null };
+    for (const side of ["left", "right"]) {
+      const enabled = armChoice === "both" || armChoice === side;
+      const w = raw?.[`${side}Wrist`];
+      const idx = raw?.[`${side}Index`];
+      const sh = raw?.[`${side}Shoulder`];
+      const prev = basketsRef.current[side];
+      if (!enabled || !w || (w.visibility ?? 0) < 0.4) {
+        next[side] = { ...prev, vis: false, gesture: "unknown" };
+        if (!enabled || !w) sideFiltersRef.current[side].reset();
+        continue;
+      }
+      const screenX = (1 - w.x) * 100; // mirrored like the camera picture
+      let mapped;
+      if (armChoice === "both") {
+        const [lo, hi] = side === "left" ? LEFT_HAND_RANGE : RIGHT_HAND_RANGE;
+        const t = clamp((screenX - lo) / (hi - lo), 0, 1);
+        mapped = side === "left" ? t * 60 : 40 + t * 60;
+      } else {
+        mapped = clamp(((screenX - REACH_MIN) / (REACH_MAX - REACH_MIN)) * 100, 0, 100);
+      }
+      const half = BASKET_WIDTHS[levelRef.current] / 2;
+      const x = clamp(sideFiltersRef.current[side].filter(mapped, now), half, 100 - half);
 
-    const prev = smoothedHandXRef.current;
-    const isInitialising = prev === 50 && smoothedHandXRef.current === 50;
-
-    const next = isInitialising
-      ? target
-      : prev + (target - prev) * BASKET_LERP;
-
-    smoothedHandXRef.current = next;
-    basketCenterXRef.current = clamp(next, BASKET_HALF, 100 - BASKET_HALF);
-  }, [position.x]);
-
-  // Basket is only shown when the hand is actively tracked. When the
-  // hand leaves the frame, hide it; when it returns, snap instantly to
-  // the new position so the basket doesn't slide in from the old spot.
-  useEffect(() => {
-    const visible = poseStatus === "tracking";
-    setIsHandVisible(visible);
-    if (visible) {
-      // Snap on reacquire so the basket doesn't glide from its last spot.
-      const target = clamp(((position.x - REACH_MIN) / (REACH_MAX - REACH_MIN)) * 100, 0, 100);
-      smoothedHandXRef.current = target;
-      basketCenterXRef.current = clamp(target, BASKET_HALF, 100 - BASKET_HALF);
-      setBasketCenterX(basketCenterXRef.current);
+      let gesture = "unknown";
+      if (idx && sh && (idx.visibility ?? 0) >= 0.4) {
+        const d = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
+        const ref = d(w, sh);
+        if (ref > 1e-4) {
+          const ratio = d(w, idx) / ref;
+          if (ratio >= GESTURE_OPEN_RATIO) gesture = "open";
+          else if (ratio <= GESTURE_CLOSED_RATIO) gesture = "closed";
+        }
+      }
+      next[side] = { x, vis: true, gesture };
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [poseStatus]);
+    basketsRef.current = next;
+    // one "any hand shape" value for the spawner and the labels
+    const first = armChoice === "right" ? next.right : next.left.vis ? next.left : next.right;
+    const label = first?.gesture || "unknown";
+    if (label !== handGestureRef.current) {
+      handGestureRef.current = label;
+      setHandGestureLabel(label);
+    }
+  }, [poseData, armChoice]);
+
+  // Push the basket positions into React state ~30 times a second. The game
+  // loop reads basketsRef directly, so catching is instant.
+  useEffect(() => {
+    let raf;
+    let last = 0;
+    const tick = (t) => {
+      if (t - last >= STATE_SYNC_MS) {
+        last = t;
+        const b = basketsRef.current;
+        setBaskets((prev) => {
+          const same = ["left", "right"].every(
+            (k) =>
+              prev[k].vis === b[k].vis &&
+              prev[k].g === b[k].gesture &&
+              Math.abs(prev[k].x - b[k].x) <= 0.15
+          );
+          return same
+            ? prev
+            : {
+                left: { x: b.left.x, vis: b.left.vis, g: b.left.gesture },
+                right: { x: b.right.x, vis: b.right.vis, g: b.right.gesture },
+              };
+        });
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   // Sync cheap, low-frequency refs.
   useEffect(() => {
@@ -254,80 +323,6 @@ export default function CatchAndFlex({
   useEffect(() => {
     shoulderAngleRef.current = shoulderAngle;
   }, [shoulderAngle]);
-
-  useEffect(() => {
-    poseStatusRef.current = poseStatus;
-  }, [poseStatus]);
-
-  // Push basketCenterX into state at low frequency for the React render.
-  // The RAF loop reads basketCenterXRef directly, so movement is instant.
-  useEffect(() => {
-    let raf;
-    let last = 0;
-    const tick = (t) => {
-      if (t - last >= STATE_SYNC_MS) {
-        last = t;
-        setBasketCenterX((prev) =>
-          Math.abs(prev - basketCenterXRef.current) > 0.15
-            ? basketCenterXRef.current
-            : prev
-        );
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-
-  // ============================================================
-  // GESTURE DETECTION (from pose landmarks)
-  // ============================================================
-  useEffect(() => {
-    if (!poseData?.raw) {
-      handGestureRef.current = "unknown";
-      setHandGestureLabel("unknown");
-      return;
-    }
-    const raw = poseData.raw;
-    const { leftWrist, rightWrist, leftIndex, rightIndex, leftShoulder, rightShoulder } = raw;
-
-    const leftVis = (leftWrist?.visibility ?? 0) + (leftIndex?.visibility ?? 0);
-    const rightVis = (rightWrist?.visibility ?? 0) + (rightIndex?.visibility ?? 0);
-
-    // Read the hand shape from the SAME arm that is moving the basket.
-    const useLeft = armChoice === "left" ? true : armChoice === "right" ? false : activeSide === "left";
-    const wrist = useLeft ? leftWrist : rightWrist;
-    const index = useLeft ? leftIndex : rightIndex;
-    const shoulder = useLeft ? leftShoulder : rightShoulder;
-
-    if (
-      !wrist || !index || !shoulder ||
-      (wrist.visibility ?? 0) < 0.4 ||
-      (index.visibility ?? 0) < 0.4
-    ) {
-      handGestureRef.current = "unknown";
-      setHandGestureLabel("unknown");
-      return;
-    }
-
-    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-    const reference = dist(wrist, shoulder);
-    if (reference < 1e-4) {
-      handGestureRef.current = "unknown";
-      setHandGestureLabel("unknown");
-      return;
-    }
-    const ratio = dist(wrist, index) / reference;
-
-    let label = "unknown";
-    if (ratio >= GESTURE_OPEN_RATIO) label = "open";
-    else if (ratio <= GESTURE_CLOSED_RATIO) label = "closed";
-
-    if (label !== handGestureRef.current) {
-      handGestureRef.current = label;
-      setHandGestureLabel(label);
-    }
-  }, [poseData, activeSide, armChoice]);
 
   // ============================================================
   // DERIVED METRICS
@@ -386,10 +381,10 @@ export default function CatchAndFlex({
   // CATCH RADIUS — derived from visual basket
   // ============================================================
   useEffect(() => {
-    const base = BASKET_HALF * 1.05;
+    const base = (BASKET_WIDTHS[levelIndex] / 2) * 1.05;
     const mult = difficultyToRadiusMultiplier(currentDifficulty);
     const papsBonus = 1 + (papsScore || 0) / 200;
-    catchRadiusRef.current = clamp(base * mult * papsBonus * LEVELS[levelIndex].radiusMul, 7, 22);
+    catchRadiusRef.current = clamp(base * mult * papsBonus, 5, 22);
   }, [currentDifficulty, papsScore, levelIndex]);
 
   // ============================================================
@@ -425,15 +420,13 @@ export default function CatchAndFlex({
       const delta = Math.min((timestamp - lastTime) / 16, 3);
       lastTime = timestamp;
 
-      const handVisible = poseStatusRef.current === "tracking";
-      const handX = basketCenterXRef.current;
-      const gesture = handGestureRef.current;
-      const gestureAvailable = gesture !== "unknown";
       const catchRadius = catchRadiusRef.current;
+      const B = basketsRef.current;
+      const firstBasket = armChoiceRef.current === "right" ? B.right : B.left.vis ? B.left : B.right;
 
       // ---- Basket trail: mutate ref only, no setState ----
       const trail = basketTrailRef.current;
-      trail.push({ x: handX });
+      trail.push({ x: firstBasket.x });
       if (trail.length > BASKET_TRAIL_LENGTH) trail.shift();
 
       // ---- Fruit physics: mutate ref array in place ----
@@ -442,6 +435,13 @@ export default function CatchAndFlex({
       for (let i = 0; i < list.length; i++) {
         const fruit = list[i];
         if (fruit.caught || fruit.missed) continue;
+
+        // each fruit belongs to ONE hand: its own basket must catch it
+        const bk = armChoiceRef.current === "both" ? B[fruit.hand] || B.left : firstBasket;
+        const handVisible = bk.vis;
+        const handX = bk.x;
+        const gesture = bk.gesture;
+        const gestureAvailable = gesture !== "unknown";
 
         const newY = fruit.y + fruit.speed * delta;
         const inCatchZone = newY >= CATCH_ZONE_MIN && newY <= CATCH_ZONE_MAX;
@@ -560,7 +560,7 @@ export default function CatchAndFlex({
       return;
     }
     telemetryTimerRef.current = setInterval(() => {
-      telemetry.trackMovement({ x: basketCenterXRef.current, y: 50 });
+      telemetry.trackMovement({ x: (basketsRef.current.left.vis ? basketsRef.current.left.x : basketsRef.current.right.x), y: 50 });
       telemetry.trackAngle(shoulderAngleRef.current);
     }, 100);
     return () => {
@@ -589,7 +589,7 @@ export default function CatchAndFlex({
       const active = fruitsRef.current.filter(
         (f) => !f.caught && !f.missed
       ).length;
-      if (active >= MAX_OBJECTS_ON_SCREEN) return;
+      if (active >= (armChoiceRef.current === "both" ? 4 : MAX_OBJECTS_ON_SCREEN)) return;
 
       const lv = LEVELS[levelRef.current];
       const obj = spawnObject({
@@ -597,7 +597,10 @@ export default function CatchAndFlex({
         sizePx: settings.objectSize,
         gestureMix: lv.gestureMix,
         gestureAvailable: handGestureRef.current !== "unknown",
+        armChoice: armChoiceRef.current,
+        lastHand: lastHandRef.current,
       });
+      lastHandRef.current = obj.hand;
       fruitsRef.current = [...fruitsRef.current, obj];
       spawnedRef.current += 1;
     }, interval);
@@ -1057,6 +1060,14 @@ export default function CatchAndFlex({
               }}
             >
               {fruit.emoji}
+              {armChoice === "both" && (
+                <div
+                  className="absolute -right-2 -top-1 rounded-full px-1.5 text-[13px] font-black text-white shadow"
+                  style={{ background: HAND_COLOR[fruit.hand] === "#22d3ee" ? "#0891b2" : "#ea580c" }}
+                >
+                  {fruit.hand === "left" ? "L" : "R"}
+                </div>
+              )}
               {fruit.requiredGesture !== "any" && (
                 <div
                   className={`absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md px-2 py-0.5 text-[18px] font-bold shadow-md ${
@@ -1071,43 +1082,52 @@ export default function CatchAndFlex({
           )
       )}
 
-      {isHandVisible && (
-        <div
-          className="pointer-events-none absolute z-30 transition-opacity duration-150"
-          style={{
-            left: `${basketCenterX}%`,
-            bottom: `${BASKET_BOTTOM_PERCENT}%`,
-            transform: "translateX(-50%)",
-            width: `${BASKET_WIDTH_PERCENT * LEVELS[levelIndex].radiusMul}%`,
-            willChange: "left",
-          }}
-        >
-          <div className="absolute left-1/2 flex -translate-x-1/2 flex-col items-center" style={{ bottom: "100%" }}>
-            <div
-              className={`rounded-full border px-3 py-1 text-3xl shadow-md transition-colors duration-150 ${
-                handGestureLabel === "open"
-                  ? "border-emerald-300 bg-emerald-100 text-emerald-700"
-                  : handGestureLabel === "closed"
-                  ? "border-red-300 bg-red-100 text-red-700"
-                  : "border-slate-200 bg-white text-slate-500"
-              }`}
-            >
-              {handGestureLabel === "open" ? "✋" : handGestureLabel === "closed" ? "✊" : "🤚"}
-            </div>
-            <div className="mt-1 h-3 w-px bg-white/70" />
-          </div>
+      {["left", "right"].map((side) => {
+        const bk = baskets[side];
+        if (!bk.vis) return null;
+        if (armChoice !== "both" && armChoice !== side) return null;
+        const tint = armChoice === "both" ? HAND_COLOR[side] : null;
+        const g = bk.g;
+        return (
           <div
-            className={`relative flex items-end justify-center ${
-              handGestureLabel === "open" ? "text-emerald-300" : handGestureLabel === "closed" ? "text-red-300" : "text-white"
-            }`}
+            key={side}
+            className="pointer-events-none absolute z-30 transition-opacity duration-150"
+            style={{
+              left: `${bk.x}%`,
+              bottom: `${BASKET_BOTTOM_PERCENT}%`,
+              transform: "translateX(-50%)",
+              width: `${BASKET_WIDTHS[levelIndex]}%`,
+              willChange: "left",
+            }}
           >
-            <ShoppingBasket size={BASKET_ICON_SIZE_PX} strokeWidth={1.6} className="drop-shadow-[0_8px_16px_rgba(0,0,0,0.35)]" style={{ width: "100%", height: "auto" }} />
+            <div className="absolute left-1/2 flex -translate-x-1/2 flex-col items-center" style={{ bottom: "100%" }}>
+              <div
+                className={`rounded-full border px-2 py-0.5 text-2xl shadow-md transition-colors duration-150 ${
+                  g === "open"
+                    ? "border-emerald-300 bg-emerald-100 text-emerald-700"
+                    : g === "closed"
+                    ? "border-red-300 bg-red-100 text-red-700"
+                    : "border-slate-200 bg-white text-slate-500"
+                }`}
+              >
+                {g === "open" ? "✋" : g === "closed" ? "✊" : "🤚"}
+              </div>
+              <div className="mt-1 h-3 w-px bg-white/70" />
+            </div>
+            <div className="relative flex items-end justify-center" style={{ color: tint || (g === "open" ? "#6ee7b7" : g === "closed" ? "#fca5a5" : "#ffffff") }}>
+              <ShoppingBasket size={BASKET_ICON_SIZE_PX} strokeWidth={1.6} className="drop-shadow-[0_8px_16px_rgba(0,0,0,0.35)]" style={{ width: "100%", height: "auto" }} />
+              {tint && (
+                <span className="absolute text-sm font-black text-white drop-shadow" style={{ bottom: "26%" }}>{side === "left" ? "L" : "R"}</span>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })}
 
       <div className="pointer-events-none absolute bottom-3 left-3 max-w-[45%] rounded-lg bg-black/50 px-3 py-1.5 text-xs font-semibold text-white sm:text-sm">
-        {levelIndex === 0
+        {armChoice === "both"
+          ? "Left hand catches cyan L fruit · right hand catches orange R fruit"
+          : levelIndex === 0
           ? "Move your hand left and right to catch the fruit"
           : "✋ open hand = green and ⭐ · ✊ closed hand = red and cups"}
       </div>

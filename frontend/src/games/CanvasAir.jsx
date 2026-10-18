@@ -93,9 +93,9 @@ const MIN_PATH_LENGTH_FOR_SMOOTHNESS = 40;
 // "Balanced" (default) reacts faster while staying calm when you hold still;
 // "Quick" follows the fingertip almost one-to-one.
 const STEADINESS = {
-  steady: { label: "Steady", minCutoff: 0.4, beta: 0.02 },
-  balanced: { label: "Balanced", minCutoff: 0.9, beta: 0.05 },
-  quick: { label: "Quick", minCutoff: 1.7, beta: 0.1 },
+  steady: { label: "Steady", minCutoff: 0.6, beta: 0.03 },
+  balanced: { label: "Balanced", minCutoff: 1.3, beta: 0.09 },
+  quick: { label: "Quick", minCutoff: 2.4, beta: 0.16 },
 };
 const ONE_EURO_MIN_CUTOFF = STEADINESS.balanced.minCutoff;
 const ONE_EURO_BETA = STEADINESS.balanced.beta;
@@ -108,7 +108,13 @@ const ONE_EURO_D_CUTOFF = 1.0;
 
 const FILTER_RESET_GAP_MS = 250;
 
-const CURSOR_DEADBAND_UNITS = 0.3;
+const CURSOR_DEADBAND_UNITS = 0.15;
+
+// Start point: before each shape the patient brings the fingertip to the
+// glowing start dot and holds it there; only then does tracing (and the
+// shape timer) begin.
+const START_RADIUS_UNITS = 6.5;
+const START_HOLD_MS = 600;
 
 const OFF_FRAME_MARGIN = 0.02;
 
@@ -528,6 +534,10 @@ export default function CanvasAir({
   const [shapeTimeLeft, setShapeTimeLeft] = useState(SHAPE_TIME_LIMIT_SECONDS);
   const [calibrated, setCalibrated] = useState(false);
   const [steadiness, setSteadiness] = useState("balanced");
+  const [phase, setPhase] = useState("goto");
+  const [startProgress, setStartProgress] = useState(0);
+  const phaseRef = useRef("goto");
+  const startHoldRef = useRef(null);
   const [setCount, setSetCount] = useState(1);
   const [setPrompt, setSetPrompt] = useState(false);
   const [levelBanner, setLevelBanner] = useState({ visible: false, text: "" });
@@ -895,6 +905,10 @@ export default function CanvasAir({
       attemptShapeIndexRef.current = shapeIndex;
       attemptStateRef.current = "ACTIVE";
       attemptStartMsRef.current = null;
+      phaseRef.current = "goto";
+      startHoldRef.current = null;
+      setPhase("goto");
+      setStartProgress(0);
       movementStatsRef.current = emptyMovementStats();
       emaDeviationUnitsRef.current = 0;
       motionRef.current = emptyMotionTrack();
@@ -1130,10 +1144,6 @@ export default function CanvasAir({
       return;
     }
 
-    if (attemptStartMsRef.current == null) {
-      attemptStartMsRef.current = performance.now();
-    }
-
     const { rangeX, rangeY } = frozenAttempt.handRange;
     const nx = remapNormalized(filtered.x, rangeX);
     const ny = remapNormalized(filtered.y, rangeY);
@@ -1153,6 +1163,26 @@ export default function CanvasAir({
       cursorPosRef.current = { x: point.x, y: point.y, visible: true };
     }
     if (!cursorVisible) setCursorVisible(true);
+
+    // ---- Step 1: reach the start point and hold briefly ----
+    if (phaseRef.current === "goto") {
+      const sp = frozenAttempt.sampledPath[0];
+      const d = sp ? Math.hypot(point.x - sp.x, point.y - sp.y) : 0;
+      if (d <= START_RADIUS_UNITS) {
+        if (startHoldRef.current == null) startHoldRef.current = nowMs;
+        const prog = Math.min(1, (nowMs - startHoldRef.current) / START_HOLD_MS);
+        setStartProgress(Math.round(prog * 10) / 10);
+        if (prog >= 1) {
+          phaseRef.current = "trace";
+          setPhase("trace");
+          attemptStartMsRef.current = nowMs;
+        }
+      } else {
+        startHoldRef.current = null;
+        setStartProgress(0);
+      }
+      return;
+    }
 
     const { distance } = recordMotionSample(motionRef.current, point, nowMs);
 
@@ -1905,10 +1935,10 @@ export default function CanvasAir({
               preserveAspectRatio="none"
             >
               <text
-                x="50"
-                y="9"
-                textAnchor="middle"
-                fontSize="4.5"
+                x="4"
+                y="7"
+                textAnchor="start"
+                fontSize="4"
                 fontWeight="700"
                 fill="#334155"
               >
@@ -1930,6 +1960,38 @@ export default function CanvasAir({
                   }}
                 />
               </g>
+
+              {frozenAttempt?.sampledPath?.[0] && (
+                <g>
+                  <circle
+                    cx={frozenAttempt.sampledPath[0].x}
+                    cy={frozenAttempt.sampledPath[0].y}
+                    r={phase === "goto" ? START_RADIUS_UNITS : 3}
+                    fill={phase === "goto" ? "rgba(16,185,129,0.18)" : "rgba(16,185,129,0.5)"}
+                    stroke="#10b981"
+                    strokeWidth="1.2"
+                    style={phase === "goto" ? { animation: `canvasAirPulse 1.2s ease-in-out infinite` } : undefined}
+                  />
+                  {phase === "goto" && startProgress > 0 && (
+                    <circle
+                      cx={frozenAttempt.sampledPath[0].x}
+                      cy={frozenAttempt.sampledPath[0].y}
+                      r={START_RADIUS_UNITS * startProgress}
+                      fill="rgba(16,185,129,0.55)"
+                    />
+                  )}
+                  <text
+                    x={frozenAttempt.sampledPath[0].x}
+                    y={frozenAttempt.sampledPath[0].y < 22 ? frozenAttempt.sampledPath[0].y + START_RADIUS_UNITS + 4 : frozenAttempt.sampledPath[0].y - START_RADIUS_UNITS - 1.5}
+                    textAnchor="middle"
+                    fontSize="3.6"
+                    fontWeight="800"
+                    fill="#047857"
+                  >
+                    START
+                  </text>
+                </g>
+              )}
 
               {contiguousGroups.onPath.map((seg, i) => (
                 <polyline
@@ -2150,6 +2212,13 @@ export default function CanvasAir({
               </div>
             )}
 
+            {phase === "goto" && !showShapeComplete && !showShapeMissed && !showShapeAbandoned && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
+                <div className="rounded-full bg-emerald-600 px-4 py-1.5 text-sm font-bold text-white shadow-lg">
+                  Move your fingertip to the green START dot and hold
+                </div>
+              </div>
+            )}
             <div
               ref={cursorElRef}
               className="pointer-events-none absolute h-5 w-5 rounded-full border-2 border-teal-500 bg-teal-200/60 shadow"

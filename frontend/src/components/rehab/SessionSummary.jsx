@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { Trophy, Target, Activity, TrendingUp, Clock, Zap, Shield, Timer } from 'lucide-react';
 import MetricsChart from './MetricsChart';
 import { useAppStore } from '../../store/appStore';
+import { getCurrentAttempt } from '../../utils/dailyPlays';
 
 // Keys already surfaced as their own dedicated stat cards above (PAPS,
 // Avg Response) when present. They're excluded from the generic Game
@@ -168,6 +169,14 @@ export default function SessionSummary({
         <h1 className="text-4xl font-black mb-2">🎯 Session Complete!</h1>
         <p className="text-slate-400">{gameName || 'Rehab Game'}</p>
         <p className="mt-3 text-lg text-emerald-300">{kindMessage(sessionData)}</p>
+        {(() => {
+          const a = getCurrentAttempt(gameId);
+          return a ? (
+            <p className="mt-2 inline-block rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-bold text-amber-300">
+              Attempt {a.attemptNumber} of {a.maxAttempts} today
+            </p>
+          ) : null;
+        })()}
       </div>
 
       {/* Below-threshold discard notice */}

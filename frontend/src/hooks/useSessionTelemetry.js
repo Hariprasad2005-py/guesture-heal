@@ -5,6 +5,7 @@ import { sessionApi, reportApi } from '../utils/apiService';
 import { sessionDB, reportDB } from '../utils/sessionStore';
 import MetricsEngine from '../utils/metricsEngine';
 import { GAME_TYPE_MAP } from '../constants/games';
+import { attemptMetrics } from '../utils/dailyPlays';
 
 const INITIAL_METRICS = {
   reps: [],
@@ -413,11 +414,14 @@ export function useSessionTelemetry(patientId, gameId) {
             ? reportData.painFluctuations
             : finalMetrics.painFluctuations;
 
-        const gameSpecific =
-          reportData.gameSpecific &&
+        const gameSpecific = {
+          ...(reportData.gameSpecific &&
             typeof reportData.gameSpecific === 'object'
             ? reportData.gameSpecific
-            : {};
+            : {}),
+          // which attempt of the day this was (shows up in every report)
+          ...attemptMetrics(gameId),
+        };
 
         const payload = {
           ...reportData,

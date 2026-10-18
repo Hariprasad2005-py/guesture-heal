@@ -7,9 +7,16 @@ import RehabSlicer from '../games/RehabSlicer';
 import CatchAndFlex from '../games/CatchAndFlex';
 import CanvasAir from '../games/CanvasAir';
 import CloudReach from '../games/CloudReach';
-import PushWall from '../games/PushWall';
 import { GAME_IDS, GAME_DISPLAY_NAMES } from '../constants/games';
 import { ArrowLeft, Loader2 } from 'lucide-react';
+import { ConfirmReplayModal, DoneForTodayModal } from '../components/rehab/ReplayModals';
+import {
+  MAX_PLAYS_PER_GAME_PER_DAY,
+  getPlaysToday,
+  recordPlay,
+  beginAttempt,
+  getCurrentAttempt,
+} from '../utils/dailyPlays';
 
 const GAME_COMPONENTS = {
   [GAME_IDS.PRECISION_REACH]: PrecisionReach,
@@ -17,7 +24,6 @@ const GAME_COMPONENTS = {
   [GAME_IDS.CATCH_FLEX]: CatchAndFlex,
   [GAME_IDS.CANVAS_AIR]: CanvasAir,
   [GAME_IDS.CLOUD_REACH]: CloudReach,
-  [GAME_IDS.PUSH_WALL]: PushWall,
 };
 
 const GameEngine = () => {
@@ -27,6 +33,10 @@ const GameEngine = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
+  // 'checking' -> 'open' (first play), 'confirm' (played before today) or 'blocked' (limit reached)
+  const [gate, setGate] = useState('checking');
+  const [playedToday, setPlayedToday] = useState(0);
+  const recordedRef = React.useRef(false);
 
   // TEST MODE — set when the URL contains ?test=1. Passed down to the
   // game so it can skip telemetry/reports and reset state between runs.
@@ -53,6 +63,30 @@ const GameEngine = () => {
     setIsLoading(false);
   }, [gameId, GameComponent, patientId, token]);
 
+  // Replay rules: the 1st play opens straight away, later plays ask first,
+  // and after the daily limit the game stays closed. Test mode skips this.
+  useEffect(() => {
+    if (!gameId || !GameComponent) return;
+    if (isTestMode) {
+      setGate('open');
+      return;
+    }
+    const pid = patientId || 'guest';
+    const plays = getPlaysToday(pid, gameId);
+    setPlayedToday(plays);
+    if (plays >= MAX_PLAYS_PER_GAME_PER_DAY) setGate('blocked');
+    else if (plays >= 1) setGate('confirm');
+    else {
+      beginAttempt(pid, gameId);
+      setGate('open');
+    }
+  }, [gameId, GameComponent, patientId, isTestMode]);
+
+  const confirmReplay = useCallback(() => {
+    beginAttempt(patientId || 'guest', gameId);
+    setGate('open');
+  }, [patientId, gameId]);
+
   const showToast = useCallback((message, type = 'error') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 5000);
@@ -63,17 +97,26 @@ const GameEngine = () => {
       const { currentSession } = useAppStore.getState();
       const sessionId = currentSession?._id || currentSession?.sessionId || null;
 
+      // Count this finished session toward today's plays of this game (once).
+      if (!isTestMode && !recordedRef.current) {
+        recordedRef.current = true;
+        recordPlay(patientId || 'guest', gameId, sessionId || data?.sessionId);
+      }
+      const attempt = getCurrentAttempt(gameId);
+
       navigate('/session-report', {
         state: {
           gameName,
           gameId,
           patientId,
           sessionId,
+          attemptNumber: attempt?.attemptNumber ?? null,
+          maxAttempts: attempt?.maxAttempts ?? MAX_PLAYS_PER_GAME_PER_DAY,
           ...data,
         },
       });
     },
-    [gameId, gameName, navigate, patientId]
+    [gameId, gameName, navigate, patientId, isTestMode]
   );
 
   if (isLoading) {
@@ -131,14 +174,31 @@ const GameEngine = () => {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 relative overflow-y-auto overflow-x-hidden">
-        <GameComponent
+      <div className="flex-1 min-h-0 relative overflow-hidden">
+        {gate === 'confirm' && (
+          <ConfirmReplayModal
+            gameName={gameName}
+            playedToday={playedToday}
+            attemptNumber={playedToday + 1}
+            maxAttempts={MAX_PLAYS_PER_GAME_PER_DAY}
+            onYes={confirmReplay}
+            onNo={() => navigate('/games')}
+          />
+        )}
+        {gate === 'blocked' && (
+          <DoneForTodayModal
+            gameName={gameName}
+            maxAttempts={MAX_PLAYS_PER_GAME_PER_DAY}
+            onBack={() => navigate('/games')}
+          />
+        )}
+        {gate === 'open' && <GameComponent
           onSessionEnd={handleSessionEnd}
           onBack={() => navigate('/games')}
           patientId={patientId || 'guest'}
           gameId={gameId}
           isTestMode={isTestMode}
-        />
+        />}
       </div>
     </div>
   );

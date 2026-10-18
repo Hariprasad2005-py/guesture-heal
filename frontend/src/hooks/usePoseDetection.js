@@ -39,7 +39,11 @@ const LOG_EVERY_N_FRAMES = 15;
 // reach the percentage conversion, it can never push the cursor off-canvas.
 const clamp01 = (v) => Math.min(1, Math.max(0, v));
 
-export function usePoseDetection(poseData, { hasCamera = true } = {}) {
+export function usePoseDetection(poseData, { hasCamera = true, preferredSide = "auto" } = {}) {
+  // "auto" = follow whichever arm is reaching. "left"/"right" = lock to that
+  // arm (used when the patient picks one arm, or a game asks for a hand).
+  const preferredSideRef = useRef(preferredSide);
+  preferredSideRef.current = preferredSide;
   const [position, setPosition] = useState({ x: 50, y: 50 });
   const [velocity, setVelocity] = useState(0);
   const [shoulderAngle, setShoulderAngle] = useState(0);
@@ -93,6 +97,12 @@ export function usePoseDetection(poseData, { hasCamera = true } = {}) {
   // Decides which wrist should drive the cursor this frame, only actually
   // switching once the height gap has been sustained for several frames.
   const resolveActiveSide = useCallback((raw, leftVisible, rightVisible, leftAngle, rightAngle) => {
+    const forced = preferredSideRef.current;
+    if (forced === "left" || forced === "right") {
+      activeSideRef.current = forced;
+      switchCandidateRef.current = { side: null, frames: 0 };
+      return forced;
+    }
     // BUGFIX: cursor stranding at the idle arm during a max reach.
     // shoulderAngle is computed from shoulder→elbow only, so it keeps
     // reading correctly even when the wrist landmark's visibility drops

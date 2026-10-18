@@ -313,6 +313,11 @@ const [canonicalSession, setCanonicalSession] = useState(null);
           <Trophy className="text-teal-600" size={36} />
         </div>
         <h1 className="text-3xl font-black text-slate-900">Session Complete!</h1>
+        {state?.attemptNumber != null && (
+          <p className="mt-2 inline-block rounded-full bg-amber-50 px-3 py-1 text-xs font-bold text-amber-700 border border-amber-200">
+            Attempt {state.attemptNumber} of {state.maxAttempts} today
+          </p>
+        )}
         <p className="text-slate-500 mt-1">
           {display.gameName || "Rehab Session"}
           {refreshing && (
@@ -381,7 +386,7 @@ const [canonicalSession, setCanonicalSession] = useState(null);
           View All Reports <ArrowRight size={18} />
         </Link>
         <button
-          onClick={() => navigate("/games")}
+          onClick={() => navigate(state?.gameId ? `/game/${state.gameId}` : "/games")}
           className="flex items-center justify-center gap-2 px-6 py-3.5 bg-slate-100 text-slate-700 rounded-xl font-bold hover:bg-slate-200"
         >
           <Home size={18} /> Play Again
