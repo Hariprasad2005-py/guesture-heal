@@ -47,7 +47,7 @@ import LevelBanner from "../components/rehab/LevelBanner";
 // CONSTANTS
 // ============================================================
 
-const SHAPE_TIME_LIMIT_SECONDS = 15;
+const SHAPE_TIME_LIMIT_SECONDS = 30;
 const SHAPE_ADVANCE_DELAY_MS = 1800;
 const ABANDONED_OVERLAY_MS = 900;
 
@@ -540,6 +540,7 @@ export default function CanvasAir({
   const [startProgress, setStartProgress] = useState(0);
   const phaseRef = useRef("goto");
   const startHoldRef = useRef(null);
+  const [returned, setReturned] = useState(false); // fingertip is back on the START dot after tracing
   const penRef = useRef(null); // slow-follow position of the drawing dot
   const steadinessRef = useRef("balanced");
   const [setCount, setSetCount] = useState(1);
@@ -913,6 +914,7 @@ export default function CanvasAir({
       phaseRef.current = "goto";
       startHoldRef.current = null;
       penRef.current = null;
+      setReturned(false);
       setPhase("goto");
       setStartProgress(0);
       movementStatsRef.current = emptyMovementStats();
@@ -1247,7 +1249,17 @@ export default function CanvasAir({
       });
     }
 
-    setShapeProgress(frozenAttempt.tracker.getCoverage());
+    const coverageNow = frozenAttempt.tracker.getCoverage();
+    setShapeProgress(coverageNow);
+
+    // The shape only finishes when enough is traced AND the fingertip is
+    // back on the START dot (closing the loop).
+    const need = currentDifficulty === "Advanced" ? 90 : currentDifficulty === "Intermediate" ? 85 : 80;
+    const sp0 = frozenAttempt.sampledPath[0];
+    if (coverageNow >= need && sp0) {
+      const back = Math.hypot(point.x - sp0.x, point.y - sp0.y) <= START_RADIUS_UNITS * 1.4;
+      setReturned(back);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     gameState,
@@ -1274,10 +1286,12 @@ export default function CanvasAir({
 
     if (shapeProgress < threshold) return;
     if (frozenAttempt.tracker.getCoverage() < threshold) return;
+    if (!returned) return; // wait until the fingertip is back on START
 
     finalizeAttempt("completed");
   }, [
     shapeProgress,
+    returned,
     gameState,
     isPaused,
     showShapeComplete,
@@ -2231,6 +2245,13 @@ export default function CanvasAir({
               </div>
             )}
 
+            {phase === "trace" && !returned && shapeProgress >= (currentDifficulty === "Advanced" ? 90 : currentDifficulty === "Intermediate" ? 85 : 80) && !showShapeComplete && !showShapeMissed && !showShapeAbandoned && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
+                <div className="rounded-full bg-emerald-600 px-4 py-1.5 text-sm font-bold text-white shadow-lg">
+                  Well traced! Now move back to the START dot to finish
+                </div>
+              </div>
+            )}
             {phase === "goto" && !showShapeComplete && !showShapeMissed && !showShapeAbandoned && (
               <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
                 <div className="rounded-full bg-emerald-600 px-4 py-1.5 text-sm font-bold text-white shadow-lg">
@@ -2279,7 +2300,7 @@ export default function CanvasAir({
   }
 
   return (
-    <div className="h-screen w-full overflow-y-auto bg-slate-50 text-slate-800">
+    <div className="min-h-full w-full bg-slate-50 text-slate-800">
       <SessionCheckpoint {...engine.checkpoint} />
       <style>{`
         @keyframes canvasAirPulse {

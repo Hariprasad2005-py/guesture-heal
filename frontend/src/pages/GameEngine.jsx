@@ -10,6 +10,7 @@ import CloudReach from '../games/CloudReach';
 import PushWall from '../games/PushWall';
 import { GAME_IDS, GAME_DISPLAY_NAMES } from '../constants/games';
 import { ArrowLeft, Loader2 } from 'lucide-react';
+import { preloadPoseAssets } from '../utils/preloadPose';
 import { ConfirmReplayModal, DoneForTodayModal } from '../components/rehab/ReplayModals';
 import {
   MAX_PLAYS_PER_GAME_PER_DAY,
@@ -64,6 +65,11 @@ const GameEngine = () => {
 
     setIsLoading(false);
   }, [gameId, GameComponent, patientId, token]);
+
+  // Start downloading the hand-tracking files right away.
+  useEffect(() => {
+    preloadPoseAssets();
+  }, []);
 
   // Replay rules: the 1st play opens straight away, later plays ask first,
   // and after the daily limit the game stays closed. Test mode skips this.

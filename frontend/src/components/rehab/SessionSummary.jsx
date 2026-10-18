@@ -164,7 +164,7 @@ export default function SessionSummary({
   const hasRomData = sessionData.romData?.perRep?.length > 0;
 
   return (
-    <div className="h-screen overflow-y-auto bg-[#0B1120] p-8 text-white">      <div className="max-w-4xl mx-auto">
+    <div className="min-h-full bg-[#0B1120] p-8 text-white">      <div className="max-w-4xl mx-auto">
       <div className="text-center mb-8">
         <h1 className="text-4xl font-black mb-2">🎯 Session Complete!</h1>
         <p className="text-slate-400">{gameName || 'Rehab Game'}</p>

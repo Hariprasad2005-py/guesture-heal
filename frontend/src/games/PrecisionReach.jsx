@@ -1327,7 +1327,7 @@ export default function PrecisionReach({
               className="relative overflow-hidden rounded-2xl px-12 py-4 font-black text-lg tracking-wide transition-all disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
               style={hasTrackedOnce && isActive ? { background: "linear-gradient(135deg, #06b6d4, #7c3aed)", boxShadow: "0 0 32px rgba(34,211,238,0.4)" } : {}}
             >
-              {hasTrackedOnce && isActive ? "▶ Start Session" : "Waiting for hand detection…"}
+              {hasTrackedOnce && isActive ? "▶ Start Session" : "Loading camera and hand tracking… stand back so your shoulders show"}
             </button>
           </div>
         </div>

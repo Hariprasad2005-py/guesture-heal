@@ -11,6 +11,7 @@ import {
 import { useEffect, useState } from 'react';
 import { GAME_IDS, GAME_TYPE_MAP, GAME_DISPLAY_NAMES, GAME_DESCRIPTIONS, GAME_COLORS } from '../constants/games';
 import { patientPublicApi } from '../utils/apiService';
+import { preloadPoseAssets } from '../utils/preloadPose';
 
 // Normalizes an exerciseId/name from rehabPlan (hyphenated, underscored, or
 // display-name form) to the canonical GAME_IDS value used by this page.
@@ -138,6 +139,11 @@ export default function GameSelectPage() {
   const { currentPatient, publicPatientId, token, setCurrentPatient } = useAppStore();
   const [loading, setLoading] = useState(false);
   const [completionNotice, setCompletionNotice] = useState(null);
+
+  // Warm up hand tracking while the patient picks a game.
+  useEffect(() => {
+    preloadPoseAssets();
+  }, []);
 
   // TEST MODE — activated by appending ?test=1 to the URL.
   // When true, the daily-completion popup is bypassed for this page only.
