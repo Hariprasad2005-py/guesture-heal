@@ -794,7 +794,7 @@ import useComfortEase from "../hooks/useComfortEase";
     const hint = ball ? DIRECTION_HINT[ball.requiredDirection] : null;
     const fruitHand = armChoice === "both" && ball && !ball.sliced ? ball.hand : null;
     return (
-      <GameShell backdrop={<InkBackdrop />}>
+      <GameShell backdrop={<InkBackdrop level={levelIndex} />}>
         <SessionCheckpoint {...engine.checkpoint} />
         {gameState === GAME_STATES.COUNTDOWN && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 text-8xl font-black text-cyan-300">

@@ -49,6 +49,8 @@ const LEVEL_CHALLENGE = [
   { window: 140, spawnMul: 0.7, tierWeights: [0, 0.2, 0.8] },
 ];
 
+export const LEVEL_NAMES = LEVEL_THEMES.map((t) => t.name);
+
 function tierForLevel(level) {
   const w = LEVEL_CHALLENGE[Math.max(0, Math.min(LEVEL_CHALLENGE.length - 1, level))].tierWeights;
   const roll = Math.random();

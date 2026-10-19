@@ -15,11 +15,11 @@ import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import MetricsEngine from "../utils/metricsEngine";
 import PushDemo from "../components/rehab/PushDemo";
-import GameShell, { StageTopBar, CameraPip } from "../components/rehab/GameShell";
+import GameShell, { StageTopBar } from "../components/rehab/GameShell";
 import LevelBanner from "../components/rehab/LevelBanner";
 import useComfortEase from "../hooks/useComfortEase";
 import { createPushDetector, symmetryFromGap } from "../utils/pushDetector";
-import { createPushWallGame } from "./pushWallScene";
+import { createPushWallGame, LEVEL_NAMES } from "./pushWallScene";
 
 const SESSION_SECONDS = 120;
 
@@ -203,7 +203,7 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
     // Level (look, wall speed, number of blocks): up after a smooth round,
     // down after a hard one.
     const struggled = pain > 5 || hitRate < 0.5;
-    const smooth = !struggled && hitRate >= 0.85 && avgSym >= 0.7 && pain < 3;
+    const smooth = !struggled && hitRate >= 0.75 && avgSym >= 0.4 && pain < 3;
     const nextLevel = Math.max(0, Math.min(4, levelIdxRef.current + (smooth ? 1 : struggled ? -1 : 0)));
     levelIdxRef.current = nextLevel;
     setLevelIdx(nextLevel);
@@ -595,9 +595,6 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
         </div>
       )}
 
-      {/* Phaser game canvas fills the stage */}
-      <div ref={attachContainer} className="absolute inset-0" />
-
       <StageTopBar isPaused={isPaused} onPause={pauseSession} onResume={resumeSession} onEnd={endSession}>
         <span>⏱ {timeLeft}s</span>
         <span>🎯 {score}</span>
@@ -618,44 +615,56 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
         <span>💥 {breaches}</span>
         <span>🔥 {combo}</span>
         <span>⚖ {lastSymmetryPct}%</span>
-        <span className="rounded-full bg-amber-400 px-3 py-0.5 font-black text-slate-900">Level {effectiveLevel + 1}</span>
+        <span className="rounded-full bg-amber-400 px-3 py-0.5 font-black text-slate-900">Level {effectiveLevel + 1} · {LEVEL_NAMES[Math.min(effectiveLevel, LEVEL_NAMES.length - 1)]}</span>
       </StageTopBar>
 
       <LevelBanner text={comfortNotice.text} visible={comfortNotice.visible} />
 
-      {roundBanner && (
-        <div key={roundBanner.key} className="pointer-events-none absolute inset-x-0 top-20 z-30 flex justify-center">
-          <div className="rounded-2xl border border-cyan-400/40 bg-slate-950/90 px-8 py-4 text-center shadow-lg shadow-cyan-500/20">
-            <div className="text-2xl font-black text-cyan-300">{roundBanner.title}</div>
-            <div className="text-sm text-slate-300">{roundBanner.sub}</div>
-            <div className="mt-1 text-sm font-semibold text-orange-300">{roundBanner.note}</div>
+      {/* Big camera on the left so both arms stay in view, game on the right */}
+      <div className="absolute inset-x-0 bottom-0 top-14 flex gap-3 p-3">
+        <div className="relative w-[38%] flex-shrink-0 overflow-hidden rounded-2xl border-4 border-slate-700 bg-black">
+          <video ref={videoRef} autoPlay playsInline muted className="h-full w-full scale-x-[-1] object-cover" />
+          <SkeletonOverlay poseData={poseData} overallStatus={guidance.overallStatus} shoulderAngle={armAngle} />
+          <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
+            Arms {armAngle}° · Sym {lastSymmetryPct}%
+          </div>
+          {guidance?.overallStatus && guidance.overallStatus !== "ok" && guidance?.message && (
+            <div className="absolute inset-x-3 top-3 rounded-lg bg-black/60 px-3 py-1.5 text-center text-xs font-semibold text-amber-300">
+              {guidance.message}
+            </div>
+          )}
+        </div>
+
+        <div className="relative flex-1 overflow-hidden rounded-2xl border-4 border-slate-700 bg-[#0b1120]">
+          <div ref={attachContainer} className="absolute inset-0" />
+
+          {roundBanner && (
+            <div key={roundBanner.key} className="pointer-events-none absolute inset-x-0 top-6 z-30 flex justify-center">
+              <div className="rounded-2xl border border-cyan-400/40 bg-slate-950/90 px-6 py-3 text-center shadow-lg shadow-cyan-500/20">
+                <div className="text-xl font-black text-cyan-300">{roundBanner.title}</div>
+                <div className="text-sm text-slate-300">{roundBanner.sub}</div>
+                <div className="mt-1 text-sm font-semibold text-orange-300">{roundBanner.note}</div>
+              </div>
+            </div>
+          )}
+
+          {feedbackFlash && (
+            <div
+              key={feedbackFlash.key}
+              className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-4xl font-black ${
+                feedbackFlash.type === "hit" ? "text-emerald-400" : feedbackFlash.type === "early" ? "text-amber-400" : "text-red-400"
+              }`}
+              style={{ animation: "pushwall-flash 450ms ease-out forwards" }}
+            >
+              {feedbackFlash.type === "hit" ? `🔥 ${feedbackFlash.label}` : `⚠️ ${feedbackFlash.label}`}
+            </div>
+          )}
+
+          <div className="pointer-events-none absolute bottom-3 left-1/2 z-10 max-w-[90%] -translate-x-1/2 rounded-lg bg-black/50 px-3 py-1.5 text-center text-xs font-semibold text-white sm:text-sm">
+            When the wall reaches the red line, raise both arms together
           </div>
         </div>
-      )}
-
-      {feedbackFlash && (
-        <div
-          key={feedbackFlash.key}
-          className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-5xl font-black ${
-            feedbackFlash.type === "hit" ? "text-emerald-400" : feedbackFlash.type === "early" ? "text-amber-400" : "text-red-400"
-          }`}
-          style={{ animation: "pushwall-flash 450ms ease-out forwards" }}
-        >
-          {feedbackFlash.type === "hit" ? `🔥 ${feedbackFlash.label}` : `⚠️ ${feedbackFlash.label}`}
-        </div>
-      )}
-
-      <div className="pointer-events-none absolute bottom-3 left-1/2 z-10 max-w-[60%] -translate-x-1/2 rounded-lg bg-black/50 px-3 py-1.5 text-center text-xs font-semibold text-white sm:text-sm">
-        When the wall reaches the red line, raise both arms together
       </div>
-
-      <CameraPip
-        videoRef={videoRef}
-        poseData={poseData}
-        guidance={guidance}
-        shoulderAngle={armAngle}
-        label={`Arms ${armAngle}° · Sym ${lastSymmetryPct}%`}
-      />
 
       <style>{`
         @keyframes pushwall-flash {

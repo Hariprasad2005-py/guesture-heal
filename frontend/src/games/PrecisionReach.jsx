@@ -1407,7 +1407,7 @@ export default function PrecisionReach({
   const displayedTargetNumber = (Math.min(targetIndex, totalTargets - 1) % SESSION_TARGET_COUNT) + 1;
 
   return (
-    <GameShell backdrop={<BlueprintBackdrop homeX={HOME_POSITION.x} homeY={HOME_POSITION.y} />}>
+    <GameShell backdrop={<BlueprintBackdrop homeX={HOME_POSITION.x} homeY={HOME_POSITION.y} level={roundIndex} />}>
     <div className="absolute inset-0 flex min-h-0 flex-col">
       <SessionCheckpoint {...engine.checkpoint} />
       <SessionCheckpoint

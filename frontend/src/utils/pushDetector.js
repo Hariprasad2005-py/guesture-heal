@@ -8,10 +8,11 @@
 //
 // Pure functions only (no React / DOM) so it can be unit-tested.
 export const PUSH_DEFAULTS = {
-  fireAngle: 55,        // fire when avg elevation passes this on the way up
-  rearmAngle: 30,       // arms must drop below this before the next push
-  minVelocity: 90,      // deg/s of avg elevation required at the moment of firing
-  velocityWindowMs: 120, // short window = fast response
+  fireAngle: 42,        // fire when avg elevation passes this on the way up
+  rearmAngle: 34,       // arms must drop below this before the next push
+  minVelocity: 50,      // deg/s of avg elevation required at the moment of firing
+  velocityWindowMs: 150, // short window = fast response
+  slowFireAngle: 65,    // a slower raise still counts once it gets this high
   minGapMs: 250,
   gapWindowMs: 200,     // window used to average the left/right difference
 };
@@ -60,7 +61,10 @@ export function createPushDetector(options = {}) {
         return out;
       }
 
-      if (e >= cfg.fireAngle && velocity >= cfg.minVelocity && t - lastFireAt >= cfg.minGapMs) {
+      // Fast push, or a slower raise that clearly reached shoulder height.
+      const fast = e >= cfg.fireAngle && velocity >= cfg.minVelocity;
+      const slowButHigh = e >= cfg.slowFireAngle && velocity >= 0;
+      if ((fast || slowButHigh) && t - lastFireAt >= cfg.minGapMs) {
         armed = false;
         lastFireAt = t;
         peak = e;

@@ -979,7 +979,7 @@ export default function CatchAndFlex({
   // RENDER: ACTIVE GAME
   // ============================================================
   return (
-    <GameShell backdrop={<OrchardBackdrop />}>
+    <GameShell backdrop={<OrchardBackdrop level={levelIndex} />}>
       <SessionCheckpoint {...engine.checkpoint} />
 
       <StageTopBar isPaused={isPaused} onPause={pauseSession} onResume={resumeSession} onEnd={endSession}>

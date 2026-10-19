@@ -11,13 +11,35 @@ const rnd = (i) => {
   return x - Math.floor(x);
 };
 
-const Fill = ({ children, style }) => (
-  <div className="pointer-events-none absolute inset-0 overflow-hidden" style={style} aria-hidden="true">{children}</div>
-);
-
-export function InkBackdrop() {
+// Each level shifts the colours of the same scene, so the game looks new as
+// you move up. Level 0 is the original look, untouched.
+const LEVEL_LOOKS = [
+  { hue: 0, sat: 1, bright: 1 },
+  { hue: 40, sat: 1.1, bright: 1 },
+  { hue: -45, sat: 1.15, bright: 0.97 },
+  { hue: 95, sat: 1.2, bright: 0.94 },
+  { hue: -100, sat: 1.25, bright: 0.92 },
+  { hue: 150, sat: 1.25, bright: 0.9 },
+  { hue: -150, sat: 1.3, bright: 0.88 },
+  { hue: 200, sat: 1.3, bright: 0.86 },
+];
+const Fill = ({ children, style, level = 0 }) => {
+  const look = LEVEL_LOOKS[Math.max(0, Math.min(LEVEL_LOOKS.length - 1, level))];
+  const filter = level > 0 ? `hue-rotate(${look.hue}deg) saturate(${look.sat}) brightness(${look.bright})` : undefined;
   return (
-    <Fill style={{ background: "linear-gradient(180deg,#f6eddc 0%,#efe3c9 60%,#e4d4b4 100%)" }}>
+    <div
+      className="pointer-events-none absolute inset-0 overflow-hidden"
+      style={{ ...style, filter, transition: "filter 1.2s ease" }}
+      aria-hidden="true"
+    >
+      {children}
+    </div>
+  );
+};
+
+export function InkBackdrop({ level = 0 }) {
+  return (
+    <Fill level={level} style={{ background: "linear-gradient(180deg,#f6eddc 0%,#efe3c9 60%,#e4d4b4 100%)" }}>
       <svg className="absolute inset-0 h-full w-full" viewBox="0 0 1000 600" preserveAspectRatio="xMidYMid slice">
         <defs>
           <filter id="ink-grain"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="4" /><feColorMatrix values="0 0 0 0 0.3  0 0 0 0 0.25  0 0 0 0 0.2  0 0 0 0.35 0" /></filter>
@@ -51,13 +73,13 @@ export function InkBackdrop() {
   );
 }
 
-export function OrchardBackdrop() {
+export function OrchardBackdrop({ level = 0 }) {
   const flies = useMemo(
     () => Array.from({ length: 14 }, (_, i) => ({ l: rnd(i + 3) * 100, t: 45 + rnd(i + 30) * 45, d: 2 + rnd(i + 60) * 4, dl: rnd(i + 90) * 5 })),
     []
   );
   return (
-    <Fill style={{ background: "linear-gradient(180deg,#fff1d6 0%,#fbd0a0 28%,#f2956b 52%,#8c4a5a 70%,#2a3a4a 100%)" }}>
+    <Fill level={level} style={{ background: "linear-gradient(180deg,#fff1d6 0%,#fbd0a0 28%,#f2956b 52%,#8c4a5a 70%,#2a3a4a 100%)" }}>
       <style>{`@keyframes orch-fly { 0%,100% { opacity:.2; transform: translateY(0) } 50% { opacity:1; transform: translateY(-10px) } }`}</style>
       <svg className="absolute inset-0 h-full w-full" viewBox="0 0 1000 600" preserveAspectRatio="xMidYMid slice">
         <defs><radialGradient id="orch-sun"><stop offset="0" stopColor="#fff7e0" /><stop offset="0.5" stopColor="#ffd9a0" stopOpacity="0.7" /><stop offset="1" stopColor="#ffd9a0" stopOpacity="0" /></radialGradient></defs>
@@ -82,9 +104,9 @@ export function OrchardBackdrop() {
   );
 }
 
-export function BlueprintBackdrop({ homeX = 50, homeY = 50 }) {
+export function BlueprintBackdrop({ homeX = 50, homeY = 50, level = 0 }) {
   return (
-    <Fill style={{ background: "radial-gradient(ellipse at 50% 50%, #1b4a80 0%, #123a69 55%, #0b2a50 100%)" }}>
+    <Fill level={level} style={{ background: "radial-gradient(ellipse at 50% 50%, #1b4a80 0%, #123a69 55%, #0b2a50 100%)" }}>
       <div className="absolute inset-0" style={{
         backgroundImage:
           "linear-gradient(rgba(255,255,255,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.07) 1px, transparent 1px), linear-gradient(rgba(255,255,255,.16) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.16) 1px, transparent 1px)",
