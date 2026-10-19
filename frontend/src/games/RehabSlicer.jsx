@@ -18,6 +18,7 @@ import GameShell, { StageTopBar, CameraPip, HandBanner } from "../components/reh
 import ArmPicker from "../components/rehab/ArmPicker";
 import { InkBackdrop } from "../components/rehab/GameBackdrops";
 import LevelBanner from "../components/rehab/LevelBanner";
+import useComfortEase from "../hooks/useComfortEase";
   import MetricsEngine from "../utils/metricsEngine";
   import { researchLogger } from "../utils/researchLogger";
 
@@ -189,9 +190,8 @@ import LevelBanner from "../components/rehab/LevelBanner";
     const lastHandRef = useRef("right");
     const armChoiceRef = useRef("both");
     armChoiceRef.current = armChoice;
-    const levelIndex = LEVELS.reduce((acc, l, i) => (hits >= l.minHits ? i : acc), 0);
+    const rawLevelIndex = LEVELS.reduce((acc, l, i) => (hits >= l.minHits ? i : acc), 0);
     const levelRef = useRef(0);
-    levelRef.current = levelIndex;
 
     const wristHistoryRef = useRef([]);
     const sliceVelocitiesRef = useRef([]);
@@ -281,6 +281,15 @@ import LevelBanner from "../components/rehab/LevelBanner";
       completeRep,
       endSession,
     } = engine;
+
+    // Looks uncomfortable for a few seconds -> drop a level; calm again -> back up.
+    const { easeSteps, notice: comfortNotice } = useComfortEase({
+      papsScore,
+      isPainDetected,
+      active: gameState === GAME_STATES.ACTIVE,
+    });
+    const levelIndex = Math.max(0, rawLevelIndex - easeSteps);
+    levelRef.current = levelIndex;
 
     // --- Latest-value refs ----------------------------------------------------
     // The main rAF game loop below must stay alive for the whole ACTIVE
@@ -833,6 +842,7 @@ import LevelBanner from "../components/rehab/LevelBanner";
         </StageTopBar>
 
         <LevelBanner text={levelBanner.text} visible={levelBanner.visible} />
+        <LevelBanner text={comfortNotice.text} visible={comfortNotice.visible} />
         <HandBanner hand={fruitHand} />
 
         {flash && (

@@ -15,6 +15,7 @@ import GameShell from "../components/rehab/GameShell";
 import ArmPicker from "../components/rehab/ArmPicker";
 import { BlueprintBackdrop } from "../components/rehab/GameBackdrops";
 import LevelBanner from "../components/rehab/LevelBanner";
+import useComfortEase from "../hooks/useComfortEase";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import HowToPlay from "../components/rehab/HowToPlay";
@@ -311,9 +312,9 @@ function buildPrecisionReachSessionRecord({
 // (below) owns "when did this target appear," so difficulty changing
 // mid-attempt can reposition/resize the target without resetting the
 // response-time clock.
-function computeTarget(index, difficulty) {
+function computeTarget(index, difficulty, easeSteps = 0) {
   const slot = index % SESSION_TARGET_COUNT;
-  const round = Math.min(MAX_ROUNDS - 1, Math.floor(index / SESSION_TARGET_COUNT));
+  const round = Math.max(0, Math.min(MAX_ROUNDS - 1, Math.floor(index / SESSION_TARGET_COUNT)) - easeSteps);
   const dir = TARGET_DIRECTIONS[slot] || TARGET_DIRECTIONS[0];
   const color = TARGET_COLORS[slot] || TARGET_COLORS[0];
   const radius = (TARGET_DISTANCE_PERCENT[difficulty] ?? TARGET_DISTANCE_PERCENT.Beginner) * ROUND_LEVELS[round].distMul;
@@ -508,7 +509,7 @@ export default function PrecisionReach({
   const [roundPrompt, setRoundPrompt] = useState(false);
   const [armChoice, setArmChoice] = useState("both");
   const [levelBanner, setLevelBanner] = useState({ visible: false, text: "" });
-  const roundIndex = Math.min(MAX_ROUNDS - 1, Math.floor(Math.min(targetIndex, totalTargets - 1) / SESSION_TARGET_COUNT));
+  const rawRoundIndex = Math.min(MAX_ROUNDS - 1, Math.floor(Math.min(targetIndex, totalTargets - 1) / SESSION_TARGET_COUNT));
   const [isHolding, setIsHolding] = useState(false);
   const [holdProgress, setHoldProgress] = useState(0);
   const [showMissFlash, setShowMissFlash] = useState(false);
@@ -539,6 +540,9 @@ export default function PrecisionReach({
   const { position, shoulderAngle, activeSide, status, hasTrackedOnce } = usePoseDetection(poseData, { preferredSide: forcedSide });
   const guidance = usePostureGuidance(poseData);
   const { papsScore: painScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
+  // Looks uncomfortable for a few seconds -> drop a level; calm again -> back up.
+  const { easeSteps, notice: comfortNotice } = useComfortEase({ papsScore: painScore, isPainDetected, active: true });
+  const roundIndex = Math.max(0, rawRoundIndex - easeSteps);
   const { currentDifficulty, adapt } = useAdaptiveDifficulty();
   const telemetry = useSessionTelemetry(patientId, gameId);
   const audio = useAudioFeedback(true);
@@ -597,8 +601,8 @@ export default function PrecisionReach({
   // position/size/color) if currentDifficulty changes mid-session, without
   // resetting spawnedAtRef or the attempt count.
   const target = useMemo(
-    () => computeTarget(targetIndex, currentDifficulty),
-    [targetIndex, currentDifficulty]
+    () => computeTarget(targetIndex, currentDifficulty, easeSteps),
+    [targetIndex, currentDifficulty, easeSteps]
   );
 
   const attempts = hits + misses;
@@ -1417,6 +1421,7 @@ export default function PrecisionReach({
         onFinish={handleRoundNo}
       />
       <LevelBanner text={levelBanner.text} visible={levelBanner.visible} />
+      <LevelBanner text={comfortNotice.text} visible={comfortNotice.visible} />
       <style>{`
         @keyframes pulse-ring { 0%,100% { transform: scale(1) translate(-50%,-50%); opacity: 0.5; } 50% { transform: scale(1.22) translate(-50%,-50%); opacity: 0.9; } }
         @keyframes particleBurst {

@@ -16,6 +16,7 @@ import { OneEuro } from "../utils/oneEuro";
 import ArmPicker from "../components/rehab/ArmPicker";
 import { OrchardBackdrop } from "../components/rehab/GameBackdrops";
 import LevelBanner from "../components/rehab/LevelBanner";
+import useComfortEase from "../hooks/useComfortEase";
 import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import HowToPlay from "../components/rehab/HowToPlay";
@@ -367,7 +368,14 @@ export default function CatchAndFlex({
     endSession,
   } = engine;
 
-  const levelIndex = LEVELS.reduce((acc, l, i) => (caught >= l.minCaught ? i : acc), 0);
+  const rawLevelIndex = LEVELS.reduce((acc, l, i) => (caught >= l.minCaught ? i : acc), 0);
+  // Looks uncomfortable for a few seconds -> drop a level; calm again -> back up.
+  const { easeSteps, notice: comfortNotice } = useComfortEase({
+    papsScore,
+    isPainDetected,
+    active: gameState === GAME_STATES.ACTIVE,
+  });
+  const levelIndex = Math.max(0, rawLevelIndex - easeSteps);
   const levelRef = useRef(0);
   levelRef.current = levelIndex;
   useEffect(() => {
@@ -984,6 +992,7 @@ export default function CatchAndFlex({
       </StageTopBar>
 
       <LevelBanner text={levelBanner.text} visible={levelBanner.visible} />
+      <LevelBanner text={comfortNotice.text} visible={comfortNotice.visible} />
 
       {gameState === GAME_STATES.COUNTDOWN && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">

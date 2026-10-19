@@ -8,14 +8,14 @@
 // setPaused() calls, so it stays testable and reusable independent of the
 // camera pipeline.
 //
-// Coordinate system: internal game width/height is fixed at 800x600 and
+// Coordinate system: internal game width/height is fixed at 1120x630 and
 // Phaser's Scale Manager (FIT mode, set by the caller) handles resizing to
-// fit the container — so all positions below are authored against 800x600.
+// fit the container — so all positions below are authored against 1120x630.
 
 import Phaser from "phaser";
 
-const GAME_W = 800;
-const GAME_H = 600;
+const GAME_W = 1120;
+const GAME_H = 630;
 const IMPACT_Y = GAME_H * 0.82; // the line the wave must be pushed back before crossing
 const SPAWN_Y = -40;
 
@@ -38,6 +38,27 @@ const LEVEL_THEMES = [
   { name: "Golden Vault", bands: [[40, 24, 4], [120, 80, 10], [230, 180, 60]], ambient: "spark", ambientColor: 0xfef08a, line: 0xffffff,
     tiers: { wood: [0xd97706, 0xfbbf24], stone: [0xb45309, 0xf59e0b], gold: [0xfff3b0, 0xffffff] }, blocks: 9, speedMul: 1.55 },
 ];
+
+// How hard each level is. Higher level = the wall shows up faster, you get a
+// shorter window to push it back, and heavier blocks (stone, gold) appear.
+const LEVEL_CHALLENGE = [
+  { window: 230, spawnMul: 1.0, tierWeights: [1, 0, 0] },
+  { window: 205, spawnMul: 0.93, tierWeights: [0.6, 0.4, 0] },
+  { window: 180, spawnMul: 0.86, tierWeights: [0.2, 0.6, 0.2] },
+  { window: 160, spawnMul: 0.78, tierWeights: [0, 0.5, 0.5] },
+  { window: 140, spawnMul: 0.7, tierWeights: [0, 0.2, 0.8] },
+];
+
+function tierForLevel(level) {
+  const w = LEVEL_CHALLENGE[Math.max(0, Math.min(LEVEL_CHALLENGE.length - 1, level))].tierWeights;
+  const roll = Math.random();
+  let acc = 0;
+  for (let i = 0; i < w.length; i++) {
+    acc += w[i];
+    if (roll < acc) return TIERS[i];
+  }
+  return TIERS[0];
+}
 
 function tierForDifficulty(difficultyName) {
   if (difficultyName === "Advanced") {
@@ -269,7 +290,7 @@ export class PushWallScene extends Phaser.Scene {
 
   _scheduleNextWave(immediate = false) {
     if (this._spawnTimer) this._spawnTimer.remove();
-    const delay = immediate ? 400 : (this._difficultySettings.spawnRate || 3500);
+    const delay = immediate ? 400 : (this._difficultySettings.spawnRate || 3500) * LEVEL_CHALLENGE[this._level].spawnMul;
     this._spawnTimer = this.time.delayedCall(delay, () => {
       this._spawnWave();
       this._scheduleNextWave(false);
@@ -280,11 +301,11 @@ export class PushWallScene extends Phaser.Scene {
     if (this._paused) return;
 
     const settings = this._difficultySettings;
-    const tier = tierForDifficulty(settings.difficultyName);
+    const tier = tierForLevel(this._level);
     const th = LEVEL_THEMES[this._level];
     const blockCount = th.blocks;
     const sizeByWidth = (GAME_W - 100) / blockCount - 10;
-    const blockSize = Math.max(32, Math.min(64, (settings.objectSize || 100) * 0.42, sizeByWidth));
+    const blockSize = Math.max(32, Math.min(84, (settings.objectSize || 100) * 0.55, sizeByWidth));
     const [tierColor, tierHighlight] = th.tiers[tier.name];
     const spacing = blockSize + 10;
     const totalWidth = blockCount * spacing;
@@ -500,7 +521,7 @@ export class PushWallScene extends Phaser.Scene {
     // "In range" means the wave's leading edge is close enough to the
     // impact line to be a deliberate, well-timed push — not a wave still
     // near the top of the screen.
-    return wave.y > IMPACT_Y - 220 && wave.y < IMPACT_Y + 30;
+    return wave.y > IMPACT_Y - LEVEL_CHALLENGE[this._level].window && wave.y < IMPACT_Y + 30;
   }
 
   _cleanup() {

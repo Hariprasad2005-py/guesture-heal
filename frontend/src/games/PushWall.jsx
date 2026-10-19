@@ -15,6 +15,9 @@ import SessionSummary from "../components/rehab/SessionSummary";
 import SessionCheckpoint from "../components/rehab/SessionCheckpoint";
 import MetricsEngine from "../utils/metricsEngine";
 import PushDemo from "../components/rehab/PushDemo";
+import GameShell, { StageTopBar, CameraPip } from "../components/rehab/GameShell";
+import LevelBanner from "../components/rehab/LevelBanner";
+import useComfortEase from "../hooks/useComfortEase";
 import { createPushDetector, symmetryFromGap } from "../utils/pushDetector";
 import { createPushWallGame } from "./pushWallScene";
 
@@ -281,9 +284,16 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
     });
   }, [settings, currentDifficulty]);
 
+  const { easeSteps, notice: comfortNotice } = useComfortEase({
+    papsScore,
+    isPainDetected,
+    active: gameState === GAME_STATES.ACTIVE,
+  });
+  // The level the patient actually plays: normal level minus any comfort easing.
+  const effectiveLevel = Math.max(0, levelIdx - easeSteps);
   useEffect(() => {
-    sceneRef.current?.setLevel(levelIdx);
-  }, [levelIdx]);
+    sceneRef.current?.setLevel(effectiveLevel);
+  }, [effectiveLevel]);
 
   // Mirror pause state into the scene.
   useEffect(() => {
@@ -557,9 +567,9 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
     );
   }
 
-  // Active game state
+  // Active game state: full-screen stage like the other games
   return (
-    <div className="min-h-screen bg-[#0B1120] p-8 pt-24 text-white">
+    <GameShell offset={100} backdrop={<div className="absolute inset-0 bg-[#0b1120]" />}>
       <SessionCheckpoint {...engine.checkpoint} />
       {gameState === GAME_STATES.COUNTDOWN && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 text-8xl font-black text-orange-400">
@@ -585,46 +595,36 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
         </div>
       )}
 
-      {/* Top bar */}
-      <div className="fixed left-0 right-0 top-0 z-40 flex justify-between border-b border-slate-800 bg-slate-950/90 px-8 py-4 backdrop-blur">
-        <div className="flex gap-5 font-mono text-sm overflow-x-auto">
-          <span>⏱ {timeLeft}s</span>
-          <span>🎯 Score: {score}</span>
-          <span>🛡 Pushes: {pushes}</span>
-          <span>🦾 Arms: {armAngle}°</span>
-          <span className="flex items-center gap-2 text-cyan-300">
-            🏁 Round {roundNumber} · Level {levelIdx + 1}
-            <span className="flex items-center gap-1">
-              {Array.from({ length: roundTarget }).map((_, i) => (
-                <span
-                  key={i}
-                  className={`h-3 w-3 rounded-sm ${
-                    roundDots[i] === "hit" ? "bg-emerald-400" : roundDots[i] === "miss" ? "bg-red-500" : "bg-slate-700"
-                  }`}
-                />
-              ))}
-            </span>
+      {/* Phaser game canvas fills the stage */}
+      <div ref={attachContainer} className="absolute inset-0" />
+
+      <StageTopBar isPaused={isPaused} onPause={pauseSession} onResume={resumeSession} onEnd={endSession}>
+        <span>⏱ {timeLeft}s</span>
+        <span>🎯 {score}</span>
+        <span>🛡 {pushes}</span>
+        <span className="flex items-center gap-2 text-cyan-300">
+          Round {roundNumber}
+          <span className="flex items-center gap-1">
+            {Array.from({ length: roundTarget }).map((_, i) => (
+              <span
+                key={i}
+                className={`h-2.5 w-2.5 rounded-sm ${
+                  roundDots[i] === "hit" ? "bg-emerald-400" : roundDots[i] === "miss" ? "bg-red-500" : "bg-slate-600"
+                }`}
+              />
+            ))}
           </span>
-          <span>💥 Breaches: {breaches}</span>
-          <span>🔥 Combo: {combo}</span>
-          <span>⚖ Symmetry: {lastSymmetryPct}%</span>
-          <span className="text-orange-400">{currentDifficulty}</span>
-        </div>
-        <div className="flex gap-2 flex-shrink-0">
-          <button
-            onClick={() => (isPaused ? resumeSession() : pauseSession())}
-            className="rounded-lg bg-slate-800 p-2 hover:bg-slate-700"
-          >
-            {isPaused ? <Play size={18} /> : <Pause size={18} />}
-          </button>
-          <button onClick={endSession} className="rounded-lg bg-red-950 p-2 hover:bg-red-900">
-            <X size={18} />
-          </button>
-        </div>
-      </div>
+        </span>
+        <span>💥 {breaches}</span>
+        <span>🔥 {combo}</span>
+        <span>⚖ {lastSymmetryPct}%</span>
+        <span className="rounded-full bg-amber-400 px-3 py-0.5 font-black text-slate-900">Level {effectiveLevel + 1}</span>
+      </StageTopBar>
+
+      <LevelBanner text={comfortNotice.text} visible={comfortNotice.visible} />
 
       {roundBanner && (
-        <div key={roundBanner.key} className="pointer-events-none fixed inset-x-0 top-28 z-30 flex justify-center">
+        <div key={roundBanner.key} className="pointer-events-none absolute inset-x-0 top-20 z-30 flex justify-center">
           <div className="rounded-2xl border border-cyan-400/40 bg-slate-950/90 px-8 py-4 text-center shadow-lg shadow-cyan-500/20">
             <div className="text-2xl font-black text-cyan-300">{roundBanner.title}</div>
             <div className="text-sm text-slate-300">{roundBanner.sub}</div>
@@ -633,48 +633,29 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
         </div>
       )}
 
-      {/* Game area */}
-      <div className="flex h-[calc(100vh-140px)] gap-6">
-        {/* Camera view */}
-        <div className="relative w-[38%] overflow-hidden rounded-2xl border-4 border-slate-800 flex-shrink-0">
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full scale-x-[-1] object-cover"
-          />
-          <SkeletonOverlay poseData={poseData} overallStatus={guidance.overallStatus} />
-          <div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">
-            Avg Flexion {Math.round(((poseData?.leftFlexion || 0) + (poseData?.rightFlexion || 0)) / 2)}°
-          </div>
+      {feedbackFlash && (
+        <div
+          key={feedbackFlash.key}
+          className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-5xl font-black ${
+            feedbackFlash.type === "hit" ? "text-emerald-400" : feedbackFlash.type === "early" ? "text-amber-400" : "text-red-400"
+          }`}
+          style={{ animation: "pushwall-flash 450ms ease-out forwards" }}
+        >
+          {feedbackFlash.type === "hit" ? `🔥 ${feedbackFlash.label}` : `⚠️ ${feedbackFlash.label}`}
         </div>
+      )}
 
-        {/* Phaser game canvas */}
-        <div className="relative w-[62%] overflow-hidden rounded-2xl border-4 border-slate-800 bg-[#0b1120]">
-          <div ref={attachContainer} className="absolute inset-0 w-full h-full" />
-
-          {feedbackFlash && (
-            <div
-              key={feedbackFlash.key}
-              className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-4xl font-black ${
-                feedbackFlash.type === "hit"
-                  ? "text-emerald-400"
-                  : feedbackFlash.type === "early"
-                  ? "text-amber-400"
-                  : "text-red-400"
-              }`}
-              style={{ animation: "pushwall-flash 450ms ease-out forwards" }}
-            >
-              {feedbackFlash.type === "hit" ? `🔥 ${feedbackFlash.label}` : `⚠️ ${feedbackFlash.label}`}
-            </div>
-          )}
-
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-slate-500 text-xs">
-            Push forward with both arms together as the wall gets close
-          </div>
-        </div>
+      <div className="pointer-events-none absolute bottom-3 left-1/2 z-10 max-w-[60%] -translate-x-1/2 rounded-lg bg-black/50 px-3 py-1.5 text-center text-xs font-semibold text-white sm:text-sm">
+        When the wall reaches the red line, raise both arms together
       </div>
+
+      <CameraPip
+        videoRef={videoRef}
+        poseData={poseData}
+        guidance={guidance}
+        shoulderAngle={armAngle}
+        label={`Arms ${armAngle}° · Sym ${lastSymmetryPct}%`}
+      />
 
       <style>{`
         @keyframes pushwall-flash {
@@ -683,6 +664,6 @@ export default function PushWall({ onSessionEnd, patientId, gameId = "push-wall"
           100% { opacity: 0; transform: scale(1); }
         }
       `}</style>
-    </div>
+    </GameShell>
   );
 }

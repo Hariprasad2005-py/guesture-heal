@@ -15,6 +15,7 @@ import useHandTracking from "../hooks/useHandTracking";
 import usePoseDetection from "../hooks/usePoseDetection";
 import usePostureGuidance from "../hooks/usePostureGuidance";
 import useFacialPainDetection from "../hooks/useFacialPainDetection";
+import useComfortEase from "../hooks/useComfortEase";
 import { useGameEngine, GAME_STATES } from "../hooks/useGameEngine";
 import { useSessionTelemetry } from "../hooks/useSessionTelemetry";
 import { useAudioFeedback } from "../hooks/useAudioFeedback";
@@ -1067,6 +1068,32 @@ export default function CloudReach({
   const showMilestone = useCallback((text) => {
     setFeedbackMsg(text);
   }, []);
+
+  // Looks uncomfortable for a few seconds -> drop a level; calm again -> back up.
+  const { easeSteps } = useComfortEase({
+    papsScore,
+    isPainDetected,
+    active: gameState === GAME_STATES.ACTIVE,
+  });
+  const prevEaseRef = useRef(0);
+  useEffect(() => {
+    const prev = prevEaseRef.current;
+    if (easeSteps === prev) return;
+    prevEaseRef.current = easeSteps;
+    if (easeSteps > prev) {
+      if (levelRef.current > 1) {
+        levelRef.current -= 1;
+        setLevel(levelRef.current);
+      }
+      showMilestone("Taking it a little easier");
+    } else {
+      if (levelRef.current < LEVELS.length) {
+        levelRef.current += 1;
+        setLevel(levelRef.current);
+      }
+      showMilestone("Feeling good? Stepping back up");
+    }
+  }, [easeSteps, showMilestone]);
 
   // ==================================================================
   // HANDLE REP COMPLETION
