@@ -22,6 +22,8 @@ const LEVEL_LOOKS = [
   { hue: 150, sat: 1.25, bright: 0.9 },
   { hue: -150, sat: 1.3, bright: 0.88 },
   { hue: 200, sat: 1.3, bright: 0.86 },
+  { hue: 250, sat: 1.3, bright: 0.85 },
+  { hue: -250, sat: 1.3, bright: 0.84 },
 ];
 const Fill = ({ children, style, level = 0 }) => {
   const look = LEVEL_LOOKS[Math.max(0, Math.min(LEVEL_LOOKS.length - 1, level))];

@@ -48,7 +48,7 @@ import LevelBanner from "../components/rehab/LevelBanner";
 // ============================================================
 
 const SHAPE_TIME_LIMIT_SECONDS = 30;
-const SHAPE_ADVANCE_DELAY_MS = 1800;
+const SHAPE_ADVANCE_DELAY_MS = 900;
 const ABANDONED_OVERLAY_MS = 900;
 
 const SHAPES_PER_SESSION = {

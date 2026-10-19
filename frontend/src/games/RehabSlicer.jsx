@@ -51,9 +51,16 @@ import useComfortEase from "../hooks/useComfortEase";
   // Movement-complexity progression: which slice directions are in play at
   // each stage of the session, keyed by cumulative successful slices.
   const MOVEMENT_STAGES = [
-    { minHits: 0, directions: ["horizontal"] },
-    { minHits: 5, directions: ["horizontal", "vertical"] },
-    { minHits: 12, directions: ["horizontal", "vertical", "diagonal"] },
+    { minHits: 0, directions: ["horizontal"], sizeMul: 1.15, speedMul: 0.95, text: "Level 1: side to side" },
+    { minHits: 4, directions: ["horizontal", "vertical"], sizeMul: 1.0, speedMul: 1.1, text: "Level 2: up and down too" },
+    { minHits: 10, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.95, speedMul: 1.25, text: "Level 3: diagonals" },
+    { minHits: 17, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.85, speedMul: 1.4, text: "Level 4: faster fruit" },
+    { minHits: 25, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.78, speedMul: 1.6, text: "Level 5: smaller and faster" },
+    { minHits: 34, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.72, speedMul: 1.8, text: "Level 6: fast lane" },
+    { minHits: 45, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.68, speedMul: 2.05, text: "Level 7: lightning fruit" },
+    { minHits: 58, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.64, speedMul: 2.3, text: "Level 8: master slicer" },
+    { minHits: 72, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.6, speedMul: 2.6, text: "Level 9: blur" },
+    { minHits: 88, directions: ["horizontal", "vertical", "diagonal"], sizeMul: 0.56, speedMul: 2.9, text: "Level 10: legend" },
   ];
 
   // Eight levels. Each one is harder: more slice directions, faster, smaller.

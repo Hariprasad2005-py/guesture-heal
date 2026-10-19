@@ -33,11 +33,13 @@ const SESSION_TARGET_COUNT = 5;
 // A "round" is one lap of the 5 directions. After each round the patient
 // chooses whether to go again; every extra round is a level harder
 // (further, smaller, longer hold). At most MAX_ROUNDS rounds.
-const MAX_ROUNDS = 3;
+const MAX_ROUNDS = 5;
 const ROUND_LEVELS = [
   { distMul: 1.0, sizeMul: 1.0, holdMul: 1.0, text: "Level 1: reach the targets" },
   { distMul: 1.2, sizeMul: 0.85, holdMul: 1.15, text: "Level 2: further and smaller" },
   { distMul: 1.4, sizeMul: 0.72, holdMul: 1.3, text: "Level 3: the widest reach" },
+  { distMul: 1.55, sizeMul: 0.62, holdMul: 1.4, text: "Level 4: smaller and further" },
+  { distMul: 1.7, sizeMul: 0.55, holdMul: 1.5, text: "Level 5: full stretch" },
 ];
 
 // Which hand each direction asks for when both arms are in use.

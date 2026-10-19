@@ -90,14 +90,16 @@ const DIFFICULTY_SETTINGS = {
   },
 };
 
-// Five levels. The patient moves up after 3 reaches in a row and down after
+// Seven levels. The patient moves up after 3 reaches in a row and down after
 // 2 misses in a row. Each level also changes the backdrop (see THEMES).
 const LEVELS = [
-  { key: "L1", name: "Level 1", arc: 0.6, cloudSize: 100, dwellMs: 400, lifetimeMs: 12000, zonePool: ["center", "upper-center", "left", "right"] },
-  { key: "L2", name: "Level 2", arc: 0.75, cloudSize: 86, dwellMs: 450, lifetimeMs: 11000, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right"] },
-  { key: "L3", name: "Level 3", arc: 0.9, cloudSize: 74, dwellMs: 500, lifetimeMs: 10000, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right", "lower-left", "lower-right"] },
-  { key: "L4", name: "Level 4", arc: 1.0, cloudSize: 62, dwellMs: 600, lifetimeMs: 9000, zonePool: "ALL" },
-  { key: "L5", name: "Level 5", arc: 1.1, cloudSize: 52, dwellMs: 700, lifetimeMs: 8000, zonePool: "ALL" },
+  { key: "L1", name: "Level 1", arc: 0.7, cloudSize: 100, dwellMs: 400, lifetimeMs: 10000, zonePool: ["center", "upper-center", "left", "right"] },
+  { key: "L2", name: "Level 2", arc: 0.85, cloudSize: 88, dwellMs: 450, lifetimeMs: 8500, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right"] },
+  { key: "L3", name: "Level 3", arc: 1.0, cloudSize: 76, dwellMs: 500, lifetimeMs: 7000, zonePool: ["center", "upper-center", "upper-left", "upper-right", "left", "right", "lower-left", "lower-right"] },
+  { key: "L4", name: "Level 4", arc: 1.15, cloudSize: 66, dwellMs: 550, lifetimeMs: 6000, zonePool: "ALL" },
+  { key: "L5", name: "Level 5", arc: 1.3, cloudSize: 58, dwellMs: 600, lifetimeMs: 5200, zonePool: "ALL" },
+  { key: "L6", name: "Level 6", arc: 1.45, cloudSize: 52, dwellMs: 650, lifetimeMs: 4600, zonePool: "ALL" },
+  { key: "L7", name: "Level 7", arc: 1.6, cloudSize: 46, dwellMs: 700, lifetimeMs: 4000, zonePool: "ALL" },
 ];
 const CONTINUE_EXTRA_REPS = 5;
 const CONTINUE_EXTRA_SECONDS = 60;
@@ -2097,7 +2099,7 @@ export default function CloudReach({
               {flash && (
                 <div
                   key={flash.key}
-                  className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center text-2xl sm:text-4xl font-semibold ${flash.type === "pop" ? "text-[#16A34A]" : "text-[#DC2626]"}`}
+                  className={`pointer-events-none absolute inset-x-0 bottom-6 z-20 flex items-center justify-center text-xl sm:text-3xl font-semibold drop-shadow ${flash.type === "pop" ? "text-[#16A34A]" : "text-[#DC2626]"}`}
                   style={{ animation: "cloud-flash 400ms ease-out forwards" }}
                 >
                   {flash.type === "pop" ? "✓ Target reached" : "Missed — that's okay"}
@@ -2105,10 +2107,10 @@ export default function CloudReach({
               )}
 
               {repPhase === REP_PHASE.RESTING && (
-                <div className="absolute inset-0 flex items-center justify-center bg-white/60 z-10">
-                  <div className="text-center px-4">
-                    <div className="text-xl sm:text-2xl font-semibold text-[#92400E]">Take a moment</div>
-                    <div className="text-3xl sm:text-4xl font-mono mt-2 text-[#0F172A]">{Math.round(restTimer / 1000)}s</div>
+                <div className="pointer-events-none absolute inset-x-0 bottom-16 z-10 flex justify-center">
+                  <div className="flex items-center gap-3 rounded-full border border-[#E2E8F0] bg-white/90 px-5 py-2 shadow">
+                    <span className="text-base sm:text-lg font-semibold text-[#92400E]">Take a moment</span>
+                    <span className="font-mono text-xl sm:text-2xl text-[#0F172A]">{Math.round(restTimer / 1000)}s</span>
                   </div>
                 </div>
               )}
