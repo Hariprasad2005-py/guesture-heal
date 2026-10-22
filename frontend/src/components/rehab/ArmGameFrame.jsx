@@ -27,6 +27,11 @@ import GameShell, { StageTopBar, CameraPip } from "./GameShell";
 import LevelBanner from "./LevelBanner";
 import ArmPicker from "./ArmPicker";
 import MoveDemo from "./MoveDemo";
+import HandDemo from "./HandDemo";
+import HandCheck from "./HandCheck";
+import HandOverlay from "./HandOverlay";
+import useHandLandmarks from "../../hooks/useHandLandmarks";
+import { createHandInput, EMPTY_HAND } from "../../utils/handInput";
 import { LEVEL_LOOKS } from "./GameBackdrops";
 import { createArmInput } from "../../utils/armInput";
 import { getPlaysToday } from "../../utils/dailyPlays";
@@ -85,7 +90,27 @@ export default function ArmGameFrame({ meta, onSessionEnd, patientId, gameId, ch
   const completeRepRef = useRef(null);
   const bannerTimer = useRef(null);
 
-  const { isActive } = useMediaPipeUpperBody({ videoRef, onPoseUpdate: setPoseData });
+  // Hand games (meta.needsHands): full-hand tracking as well as the body pose.
+  const poseRef = useRef(null);
+  const handIn = useRef(null);
+  if (!handIn.current) handIn.current = createHandInput({ fast: !!meta.fastHand });
+  const handRef = useRef(EMPTY_HAND);
+  const [handLive, setHandLive] = useState(EMPTY_HAND);
+  const handLiveAt = useRef(0);
+  const gameStateRef = useRef(null);
+  const onHands = useCallback((hands, dims) => {
+    const m = handIn.current.update(hands, { arm: armRef.current === "left" ? "left" : "right", poseRaw: poseRef.current?.raw, dims });
+    handRef.current = m;
+    if (activeRef.current && m.present) {
+      const rom = m.grip * 90;
+      if (rom > maxRomRef.current && meta.trackHandRom !== false) maxRomRef.current = rom;
+    }
+    const now = performance.now();
+    if (gameStateRef.current === GAME_STATES.INSTRUCTIONS && now - handLiveAt.current > 120) { handLiveAt.current = now; setHandLive(m); }
+  }, [meta.trackHandRom]);
+  const { isReady: handReady, error: handError } = useHandLandmarks({ videoRef, enabled: !!meta.needsHands, onHands });
+
+  const { isActive } = useMediaPipeUpperBody({ videoRef, onPoseUpdate: (d) => { poseRef.current = d; setPoseData(d); } });
   const guidance = usePostureGuidance(poseData);
   const { papsScore, isPainDetected, resetPainState } = useFacialPainDetection({ videoRef });
   const telemetry = useSessionTelemetry(patientId, gameId);
@@ -103,6 +128,7 @@ export default function ArmGameFrame({ meta, onSessionEnd, patientId, gameId, ch
   });
   const { gameState, countdown, timeLeft, isPaused, startSession, pauseSession, resumeSession, completeRep, endSession } = engine;
   completeRepRef.current = completeRep;
+  gameStateRef.current = gameState;
 
   const { easeSteps, notice } = useComfortEase({ papsScore, isPainDetected, active: gameState === GAME_STATES.ACTIVE });
   const level = Math.max(0, levelIdx - easeSteps);
@@ -209,7 +235,7 @@ export default function ArmGameFrame({ meta, onSessionEnd, patientId, gameId, ch
   const levelName = meta.levelNames?.[Math.min(level, meta.levelNames.length - 1)] || "";
 
   const api = {
-    inputRef, activeRef, level, levelCount, levelFilter, move, arm: armChoice, extraRef, hit, miss, bonus, roundDone,
+    inputRef, handRef, activeRef, level, levelCount, levelFilter, move, arm: armChoice, extraRef, hit, miss, bonus, roundDone,
     timeLeft, score, streak, hits, misses, showBanner, setMission, setCoach,
   };
 
@@ -218,7 +244,9 @@ export default function ArmGameFrame({ meta, onSessionEnd, patientId, gameId, ch
     if (moves[i].arm) setArmChoice(moves[i].arm);
   };
   const accent = meta.accent || "#22d3ee";
-  const demoMove = { ...move, arm: move.arm || (armChoice === "both" ? "right" : armChoice) };
+  const needsHands = !!meta.needsHands;
+  const demoMove = { ...move, arm: needsHands ? (armChoice === "left" ? "left" : "right") : move.arm || (armChoice === "both" ? "right" : armChoice) };
+  const Demo = needsHands ? HandDemo : MoveDemo;
 
   // ---------------- INSTRUCTIONS ----------------
   if (gameState === GAME_STATES.INSTRUCTIONS) {
@@ -245,10 +273,10 @@ export default function ArmGameFrame({ meta, onSessionEnd, patientId, gameId, ch
           </div>
 
           <div className="mb-4 grid items-center gap-6 rounded-2xl border border-slate-800 bg-slate-900/60 p-5 sm:grid-cols-[280px_1fr]">
-            <MoveDemo move={demoMove} caption={move.label} />
+            <Demo move={demoMove} caption={move.label} />
             <div>
               <ol className="space-y-3 text-lg text-slate-200">
-                <li><b style={{ color: accent }}>1.</b> Sit tall on a chair so both shoulders show on the camera.</li>
+                <li><b style={{ color: accent }}>1.</b> {needsHands ? "Sit tall on a chair, both shoulders on the camera, and rest your elbow on a table or your lap." : "Sit tall on a chair so both shoulders show on the camera."}</li>
                 {move.steps.map((s, i) => (<li key={i}><b style={{ color: accent }}>{i + 2}.</b> {s}</li>))}
               </ol>
               {move.body?.length > 0 && (
@@ -267,20 +295,23 @@ export default function ArmGameFrame({ meta, onSessionEnd, patientId, gameId, ch
             <ul className="mt-3 list-disc space-y-1 pl-5 text-slate-400">
               {(meta.scoring || []).map((s, i) => (<li key={i}>{s}</li>))}
               <li>Smooth rounds raise the LEVEL: a new look and a little more challenge. If it feels like too much, the game eases off by itself.</li>
-              <li>Cyan arm = your left, orange arm = your right.</li>
+              <li>{needsHands ? "Cyan hand = your left, orange hand = your right." : "Cyan arm = your left, orange arm = your right."}</li>
             </ul>
             {meta.trains && <div className="mt-3 text-slate-500">Trains: {meta.trains}</div>}
           </details>
 
           <div className="mb-5 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-            <div className="mb-1.5 text-sm font-semibold text-slate-200">Which arm will you use?</div>
-            <ArmPicker value={armChoice} onChange={setArmChoice} dark hint={false} />
+            <div className="mb-1.5 text-sm font-semibold text-slate-200">{needsHands ? "Which hand will you use?" : "Which arm will you use?"}</div>
+            <ArmPicker value={needsHands && armChoice === "both" ? "right" : armChoice} onChange={setArmChoice} dark hint={false} handOnly={needsHands} />
           </div>
+
+          {needsHands && <HandCheck hand={handLive} side={armChoice === "left" ? "left" : "right"} ready={handReady} error={handError} accent={armChoice === "left" ? "#22d3ee" : "#fb923c"} />}
 
           <div className="relative aspect-video overflow-hidden rounded-2xl border-4 border-slate-800">
             <video ref={videoRef} autoPlay playsInline muted className="h-full w-full scale-x-[-1] object-cover" />
             <SkeletonOverlay poseData={poseData} overallStatus={guidance.overallStatus} shoulderAngle={live.elev} />
-            <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">Arm {live.elev}° · PAPS {papsScore}</div>
+            {needsHands && <HandOverlay videoRef={videoRef} handRef={handRef} />}
+            <div className="absolute left-4 top-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-sm">{needsHands ? `Hand ${handLive.present ? "found" : "not seen"}` : `Arm ${live.elev}°`} · PAPS {papsScore}</div>
           </div>
           <div className={`mt-4 rounded-xl border p-4 ${guidance.overallStatus === "ok" ? "border-green-800 bg-green-950/30 text-green-300" : "border-amber-800 bg-amber-950/30 text-amber-300"}`}>
             {guidance.message}
@@ -379,7 +410,7 @@ export default function ArmGameFrame({ meta, onSessionEnd, patientId, gameId, ch
 
         <div className="pointer-events-none absolute right-3 top-[76px] z-10 hidden w-40 rounded-xl border border-white/15 bg-black/55 p-1.5 backdrop-blur sm:block">
           <div className="text-center text-[10px] font-bold uppercase tracking-widest text-slate-300">Copy this</div>
-          <MoveDemo move={demoMove} />
+          <Demo move={demoMove} />
         </div>
 
         <div className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex flex-col items-center gap-1.5 px-3">
@@ -397,7 +428,9 @@ export default function ArmGameFrame({ meta, onSessionEnd, patientId, gameId, ch
         </div>
       </div>
 
-      <CameraPip videoRef={videoRef} poseData={poseData} guidance={guidance} />
+      <CameraPip videoRef={videoRef} poseData={poseData} guidance={guidance}>
+        {needsHands && <HandOverlay videoRef={videoRef} handRef={handRef} />}
+      </CameraPip>
     </GameShell>
   );
 }

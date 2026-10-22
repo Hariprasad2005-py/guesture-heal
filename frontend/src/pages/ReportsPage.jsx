@@ -47,6 +47,10 @@ const GAME_TYPE_LABELS = {
   regatta: "🚣 Regatta",
   daily_tasks: "☕ Daily Tasks",
   rhythm_studio: "🎵 Rhythm Studio",
+  grip_gauge: "✊ Grip Gauge",
+  piano: "🎹 Piano",
+  flight: "✈️ Flight",
+  steady_hand: "🎯 Steady Hand",
 };
 
 function formatGameType(gameType) {
@@ -433,7 +437,7 @@ export default function ReportsPage() {
   const [loadingTherapists, setLoadingTherapists] = useState(false);
 
   const isGlobalView = !patientIdFromUrl;
-  const games = ["rehab_slicer", "precision_reach", "catch_flex", "canvas_air", "cloud_reach", "push_wall", "breathe", "summit", "window_wiper", "cross_rally", "pendulum", "regatta", "daily_tasks", "rhythm_studio"];
+  const games = ["rehab_slicer", "precision_reach", "catch_flex", "canvas_air", "cloud_reach", "push_wall", "breathe", "summit", "window_wiper", "cross_rally", "pendulum", "regatta", "daily_tasks", "rhythm_studio", "grip_gauge", "piano", "flight", "steady_hand"];
 
   // ─── ROLE HELPER ──────────────────────────────────────────────────────────
   function isAdminUser() {

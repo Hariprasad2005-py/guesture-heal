@@ -37,3 +37,20 @@ export const roundedRect = (ctx, x, y, w, h, r) => {
   ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 };
+
+// Draws the player's own tracked hand (21 points) as a glowing skeleton, mirrored like the camera picture.
+// (cx, cy) = wrist, S = palm length in pixels. Only the chosen hand is passed in.
+const HAND_BONES = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [17, 18], [18, 19], [19, 20], [0, 17]];
+export function drawLiveHand(ctx, hand, cx, cy, S, color, { alpha = 1, highlight = null } = {}) {
+  if (!hand?.present || !hand.lm) return;
+  const lm = hand.lm, asp = hand.aspect || 4 / 3;
+  const pl = Math.hypot((lm[9].x - lm[0].x) * asp, lm[9].y - lm[0].y) || 1;
+  const P = (p) => [cx - ((p.x - lm[0].x) * asp / pl) * S, cy + ((p.y - lm[0].y) / pl) * S];
+  ctx.save(); ctx.globalAlpha = alpha; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.strokeStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 12; ctx.lineWidth = Math.max(3, S * 0.07);
+  HAND_BONES.forEach(([a, b]) => { const [x1, y1] = P(lm[a]), [x2, y2] = P(lm[b]); ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); });
+  ctx.shadowBlur = 0; ctx.fillStyle = "#fff";
+  lm.forEach((p, i) => { const [x, y] = P(p); ctx.beginPath(); ctx.arc(x, y, i % 4 === 0 && i > 0 ? S * 0.055 : S * 0.032, 0, 6.283); ctx.fill(); });
+  if (highlight != null) { const [x, y] = P(lm[highlight]); ctx.strokeStyle = "#fde047"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, S * 0.1, 0, 6.283); ctx.stroke(); }
+  ctx.restore();
+}

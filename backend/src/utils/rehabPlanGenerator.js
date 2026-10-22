@@ -300,6 +300,34 @@ const GAMES_LIBRARY = {
     name: "Rhythm Studio",
     description: "Swing your arms big and in time with the beat to build movement size and rhythm.",
   },
+  "grip-gauge": {
+    gameId: "grip-gauge",
+    tier: "Easy",
+    tags: ["hand surgery", "stroke", "wrist", "nerve", "parkinson", "fracture"],
+    name: "Grip Gauge",
+    description: "Squeeze your hand into a fist, hold it, then open wide to fill the grip gauge.",
+  },
+  "steady-hand": {
+    gameId: "steady-hand",
+    tier: "Medium",
+    tags: ["parkinson", "stroke", "hand surgery", "nerve", "wrist"],
+    name: "Steady Hand",
+    description: "Guide your fingertip along a winding wire without touching the sides.",
+  },
+  "piano": {
+    gameId: "piano",
+    tier: "Hard",
+    tags: ["stroke", "hand surgery", "nerve", "parkinson"],
+    name: "Piano",
+    description: "Press the matching finger when each falling note reaches the line.",
+  },
+  "flight": {
+    gameId: "flight",
+    tier: "Hard",
+    tags: ["wrist", "stroke", "hand surgery", "nerve"],
+    name: "Flight",
+    description: "Tilt your wrist like a steering wheel to fly a plane through rings.",
+  },
 };
 // Clinical ROM targets for game-based rehab entries, keyed by the exact
 // session.gameType string each game records (NOT GAMES_LIBRARY's hyphenated

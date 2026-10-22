@@ -35,11 +35,12 @@ export function StageTopBar({ children, isPaused, onPause, onResume, onEnd }) {
   );
 }
 
-export function CameraPip({ videoRef, poseData, guidance, shoulderAngle, label, corner = "br", className = "" }) {
+export function CameraPip({ videoRef, poseData, guidance, shoulderAngle, label, corner = "br", className = "", children = null }) {
   return (
     <div className={`absolute z-40 h-24 w-36 overflow-hidden rounded-xl border-2 border-white/80 shadow-lg sm:h-36 sm:w-52 ${corner === "tr" ? "right-2 top-14 sm:right-4" : "bottom-2 right-2 sm:bottom-4 sm:right-4"} ${className}`}>
       <video ref={videoRef} autoPlay playsInline muted className="h-full w-full scale-x-[-1] object-cover" />
       <SkeletonOverlay poseData={poseData} overallStatus={guidance?.overallStatus} shoulderAngle={shoulderAngle} />
+      {children}
       {label && <div className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[9px] sm:text-xs">{label}</div>}
     </div>
   );

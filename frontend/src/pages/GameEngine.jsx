@@ -16,6 +16,10 @@ import Pendulum from '../games/Pendulum';
 import Regatta from '../games/Regatta';
 import DailyTasks from '../games/DailyTasks';
 import RhythmStudio from '../games/RhythmStudio';
+import GripGauge from '../games/GripGauge';
+import Piano from '../games/Piano';
+import Flight from '../games/Flight';
+import SteadyHand from '../games/SteadyHand';
 import { GAME_IDS, GAME_DISPLAY_NAMES } from '../constants/games';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { preloadPoseAssets } from '../utils/preloadPose';
@@ -43,6 +47,10 @@ const GAME_COMPONENTS = {
   [GAME_IDS.REGATTA]: Regatta,
   [GAME_IDS.DAILY_TASKS]: DailyTasks,
   [GAME_IDS.RHYTHM_STUDIO]: RhythmStudio,
+  [GAME_IDS.GRIP_GAUGE]: GripGauge,
+  [GAME_IDS.PIANO]: Piano,
+  [GAME_IDS.FLIGHT]: Flight,
+  [GAME_IDS.STEADY_HAND]: SteadyHand,
 };
 
 class GameErrorBoundary extends React.Component {

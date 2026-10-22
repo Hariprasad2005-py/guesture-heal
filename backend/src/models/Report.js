@@ -72,7 +72,7 @@ const reportSchema = new mongoose.Schema(
     // report records which game produced this session.
     gameType: {
       type: String,
-      enum: ["rehab_slicer", "catch_flex", "precision_reach", "canvas_air", "cloud_reach", "push_wall", "breathe", "summit", "window_wiper", "cross_rally", "pendulum", "regatta", "daily_tasks", "rhythm_studio"],
+      enum: ["rehab_slicer", "catch_flex", "precision_reach", "canvas_air", "cloud_reach", "push_wall", "breathe", "summit", "window_wiper", "cross_rally", "pendulum", "regatta", "daily_tasks", "rhythm_studio", "grip_gauge", "piano", "flight", "steady_hand"],
     },
     generatedAt: { type: Date, default: Date.now },
     patientSnapshot: {

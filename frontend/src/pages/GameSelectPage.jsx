@@ -5,7 +5,7 @@ import { useAppStore } from '../store/appStore';
 import { 
   Target, Sword, ShoppingBasket, Palette, Cloud, Play, ChevronRight, 
   Settings, Zap, Heart, Activity, Move, Brain, Clock, Hand, Waves,
-  TrendingUp, Shield, Eye, Star, Wind, Mountain, CloudRain, Coffee, Music,
+  TrendingUp, Shield, Eye, Star, Wind, Mountain, CloudRain, Coffee, Music, Piano, Plane, Crosshair, Gauge,
   Flame, CheckCircle2, X, PartyPopper, Trophy
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -50,6 +50,10 @@ const GAME_ICON_MAP = {
   [GAME_IDS.REGATTA]: Waves,
   [GAME_IDS.DAILY_TASKS]: Coffee,
   [GAME_IDS.RHYTHM_STUDIO]: Music,
+  [GAME_IDS.GRIP_GAUGE]: Gauge,
+  [GAME_IDS.PIANO]: Piano,
+  [GAME_IDS.FLIGHT]: Plane,
+  [GAME_IDS.STEADY_HAND]: Crosshair,
 };
 
 // --- Presentation-only metadata (does not touch game data/constants) ---
@@ -68,6 +72,10 @@ const EXERCISE_TAG = {
   [GAME_IDS.REGATTA]: 'Elbow Rowing',
   [GAME_IDS.DAILY_TASKS]: 'Everyday Reach',
   [GAME_IDS.RHYTHM_STUDIO]: 'Rhythm & Size',
+  [GAME_IDS.GRIP_GAUGE]: 'Grip Strength',
+  [GAME_IDS.PIANO]: 'Finger Isolation',
+  [GAME_IDS.FLIGHT]: 'Wrist Control',
+  [GAME_IDS.STEADY_HAND]: 'Fine Control',
 };
 
 const DIFFICULTY = {
@@ -85,6 +93,10 @@ const DIFFICULTY = {
   [GAME_IDS.REGATTA]: 'Medium',
   [GAME_IDS.DAILY_TASKS]: 'Medium',
   [GAME_IDS.RHYTHM_STUDIO]: 'Hard',
+  [GAME_IDS.GRIP_GAUGE]: 'Easy',
+  [GAME_IDS.PIANO]: 'Hard',
+  [GAME_IDS.FLIGHT]: 'Hard',
+  [GAME_IDS.STEADY_HAND]: 'Medium',
 };
 
 const DIFFICULTY_DOT = { Easy: 'bg-emerald-500', Medium: 'bg-amber-500', Hard: 'bg-rose-500' };
@@ -104,6 +116,10 @@ const ACCENT_COLOR = {
   [GAME_IDS.REGATTA]: '#2563EB',
   [GAME_IDS.DAILY_TASKS]: '#0D9488',
   [GAME_IDS.RHYTHM_STUDIO]: '#9333EA',
+  [GAME_IDS.GRIP_GAUGE]: '#D97706',
+  [GAME_IDS.PIANO]: '#7C3AED',
+  [GAME_IDS.FLIGHT]: '#0284C7',
+  [GAME_IDS.STEADY_HAND]: '#0D9488',
 };
 
 const GAMES = [
@@ -149,7 +165,7 @@ const GAMES = [
     icon: GAME_ICON_MAP[GAME_IDS.PUSH_WALL],
     ...GAME_COLORS[GAME_IDS.PUSH_WALL],
   },
-  ...[GAME_IDS.BREATHE, GAME_IDS.SUMMIT, GAME_IDS.WINDOW_WIPER, GAME_IDS.CROSS_RALLY, GAME_IDS.PENDULUM, GAME_IDS.REGATTA, GAME_IDS.DAILY_TASKS, GAME_IDS.RHYTHM_STUDIO].map((id) => ({
+  ...[GAME_IDS.BREATHE, GAME_IDS.SUMMIT, GAME_IDS.WINDOW_WIPER, GAME_IDS.CROSS_RALLY, GAME_IDS.PENDULUM, GAME_IDS.REGATTA, GAME_IDS.DAILY_TASKS, GAME_IDS.RHYTHM_STUDIO, GAME_IDS.GRIP_GAUGE, GAME_IDS.PIANO, GAME_IDS.FLIGHT, GAME_IDS.STEADY_HAND].map((id) => ({
     id,
     name: GAME_DISPLAY_NAMES[id],
     description: GAME_DESCRIPTIONS[id],

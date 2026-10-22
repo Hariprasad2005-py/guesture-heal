@@ -14,6 +14,10 @@ export const GAME_IDS = {
   REGATTA: 'regatta',
   DAILY_TASKS: 'daily-tasks',
   RHYTHM_STUDIO: 'rhythm-studio',
+  GRIP_GAUGE: 'grip-gauge',
+  PIANO: 'piano',
+  FLIGHT: 'flight',
+  STEADY_HAND: 'steady-hand',
 };
 
 export const GAME_TYPE_MAP = {
@@ -31,6 +35,10 @@ export const GAME_TYPE_MAP = {
   'regatta': 'regatta',
   'daily-tasks': 'daily_tasks',
   'rhythm-studio': 'rhythm_studio',
+  'grip-gauge': 'grip_gauge',
+  'piano': 'piano',
+  'flight': 'flight',
+  'steady-hand': 'steady_hand',
 };
 
 export const GAME_DISPLAY_NAMES = {
@@ -48,6 +56,10 @@ export const GAME_DISPLAY_NAMES = {
   'regatta': 'Regatta',
   'daily-tasks': 'Daily Tasks',
   'rhythm-studio': 'Rhythm Studio',
+  'grip-gauge': 'Grip Gauge',
+  'piano': 'Piano',
+  'flight': 'Flight',
+  'steady-hand': 'Steady Hand',
 };
 
 export const GAME_ICONS = {
@@ -65,6 +77,10 @@ export const GAME_ICONS = {
   'regatta': 'Waves',
   'daily-tasks': 'Coffee',
   'rhythm-studio': 'Music',
+  'grip-gauge': 'Hand',
+  'piano': 'Piano',
+  'flight': 'Plane',
+  'steady-hand': 'Crosshair',
 };
 
 export const GAME_COLORS = {
@@ -82,6 +98,10 @@ export const GAME_COLORS = {
   'regatta': { bg: 'bg-blue-50', text: 'text-blue-600' },
   'daily-tasks': { bg: 'bg-teal-50', text: 'text-teal-600' },
   'rhythm-studio': { bg: 'bg-purple-50', text: 'text-purple-600' },
+  'grip-gauge': { bg: 'bg-amber-50', text: 'text-amber-600' },
+  'piano': { bg: 'bg-violet-50', text: 'text-violet-600' },
+  'flight': { bg: 'bg-sky-50', text: 'text-sky-600' },
+  'steady-hand': { bg: 'bg-teal-50', text: 'text-teal-600' },
 };
 
 export const GAME_DESCRIPTIONS = {
@@ -99,4 +119,8 @@ export const GAME_DESCRIPTIONS = {
   'regatta': 'Row a boat down the lane by pulling both elbows back and stretching out again.',
   'daily-tasks': 'Practise everyday movements: sip a drink, brush your hair and reach a shelf.',
   'rhythm-studio': 'Swing your arms big and in time with the beat to build movement size and rhythm.',
+  'grip-gauge': 'Squeeze your hand into a fist, hold it, then open wide to fill the grip gauge.',
+  'piano': 'Press the matching finger when each falling note reaches the line.',
+  'flight': 'Tilt your wrist like a steering wheel to fly a plane through rings.',
+  'steady-hand': 'Guide your fingertip along a winding wire without touching the sides.',
 };

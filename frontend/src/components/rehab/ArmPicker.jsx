@@ -1,11 +1,13 @@
 // "Which arm do you want to use?" three-way control shared by the games.
 // value: "both" | "left" | "right"
-export default function ArmPicker({ value, onChange, dark = true, hint = true }) {
-  const opts = [
-    ["both", "Both arms"],
-    ["left", "Left arm only"],
-    ["right", "Right arm only"],
-  ];
+export default function ArmPicker({ value, onChange, dark = true, hint = true, handOnly = false }) {
+  const opts = handOnly
+    ? [["left", "Left hand"], ["right", "Right hand"]]
+    : [
+        ["both", "Both arms"],
+        ["left", "Left arm only"],
+        ["right", "Right arm only"],
+      ];
   return (
     <div>
       <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Which arm to use">
