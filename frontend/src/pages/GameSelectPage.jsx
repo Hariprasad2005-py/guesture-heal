@@ -5,7 +5,7 @@ import { useAppStore } from '../store/appStore';
 import { 
   Target, Sword, ShoppingBasket, Palette, Cloud, Play, ChevronRight, 
   Settings, Zap, Heart, Activity, Move, Brain, Clock, Hand, Waves,
-  TrendingUp, Shield, Eye, Star,
+  TrendingUp, Shield, Eye, Star, Wind, Mountain, CloudRain,
   Flame, CheckCircle2, X, PartyPopper, Trophy
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -42,6 +42,10 @@ const GAME_ICON_MAP = {
   [GAME_IDS.CANVAS_AIR]: Palette,
   [GAME_IDS.CLOUD_REACH]: Cloud,
   [GAME_IDS.PUSH_WALL]: Shield,
+  [GAME_IDS.BREATHE]: Wind,
+  [GAME_IDS.SUMMIT]: Mountain,
+  [GAME_IDS.WINDOW_WIPER]: CloudRain,
+  [GAME_IDS.CROSS_RALLY]: Zap,
 };
 
 // --- Presentation-only metadata (does not touch game data/constants) ---
@@ -52,18 +56,26 @@ const EXERCISE_TAG = {
   [GAME_IDS.CATCH_FLEX]: 'Coordination',
   [GAME_IDS.CANVAS_AIR]: 'Fine Motor',
   [GAME_IDS.PUSH_WALL]: 'Bilateral Strength',
+  [GAME_IDS.BREATHE]: 'Shoulder Opening',
+  [GAME_IDS.SUMMIT]: 'Shoulder Raise',
+  [GAME_IDS.WINDOW_WIPER]: 'Shoulder Sweep',
+  [GAME_IDS.CROSS_RALLY]: 'Cross-Body Reach',
 };
 
 const DIFFICULTY = {
   [GAME_IDS.PRECISION_REACH]: 'Easy',
-  [GAME_IDS.REHAB_SLICER]: 'Medium',
+  [GAME_IDS.REHAB_SLICER]: 'Hard',
   [GAME_IDS.CLOUD_REACH]: 'Easy',
   [GAME_IDS.CATCH_FLEX]: 'Medium',
-  [GAME_IDS.CANVAS_AIR]: 'Medium',
-  [GAME_IDS.PUSH_WALL]: 'Medium',
+  [GAME_IDS.CANVAS_AIR]: 'Hard',
+  [GAME_IDS.PUSH_WALL]: 'Hard',
+  [GAME_IDS.BREATHE]: 'Easy',
+  [GAME_IDS.SUMMIT]: 'Easy',
+  [GAME_IDS.WINDOW_WIPER]: 'Medium',
+  [GAME_IDS.CROSS_RALLY]: 'Easy',
 };
 
-const DIFFICULTY_DOT = { Easy: 'bg-emerald-500', Medium: 'bg-amber-500' };
+const DIFFICULTY_DOT = { Easy: 'bg-emerald-500', Medium: 'bg-amber-500', Hard: 'bg-rose-500' };
 
 const ACCENT_COLOR = {
   [GAME_IDS.PRECISION_REACH]: '#2563EB',
@@ -72,6 +84,10 @@ const ACCENT_COLOR = {
   [GAME_IDS.CATCH_FLEX]: '#8B5CF6',
   [GAME_IDS.CANVAS_AIR]: '#EC4899',
   [GAME_IDS.PUSH_WALL]: '#F97316',
+  [GAME_IDS.BREATHE]: '#14B8A6',
+  [GAME_IDS.SUMMIT]: '#F59E0B',
+  [GAME_IDS.WINDOW_WIPER]: '#0EA5E9',
+  [GAME_IDS.CROSS_RALLY]: '#10B981',
 };
 
 const GAMES = [
@@ -117,6 +133,13 @@ const GAMES = [
     icon: GAME_ICON_MAP[GAME_IDS.PUSH_WALL],
     ...GAME_COLORS[GAME_IDS.PUSH_WALL],
   },
+  ...[GAME_IDS.BREATHE, GAME_IDS.SUMMIT, GAME_IDS.WINDOW_WIPER, GAME_IDS.CROSS_RALLY].map((id) => ({
+    id,
+    name: GAME_DISPLAY_NAMES[id],
+    description: GAME_DESCRIPTIONS[id],
+    icon: GAME_ICON_MAP[id],
+    ...GAME_COLORS[id],
+  })),
 ];
 
 // Local keyframes for staggered fade-in — scoped via a plain <style> tag so it

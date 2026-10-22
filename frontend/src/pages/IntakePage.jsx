@@ -155,6 +155,7 @@ export default function IntakePage() {
                 >
                   <option value="">Select Condition</option>
                   <option value="Rotator Cuff">Rotator Cuff</option>
+                  <option value="Frozen Shoulder">Frozen Shoulder</option>
                   <option value="ACL Reconstruction">ACL Reconstruction</option>
                   <option value="Stroke Rehabilitation">Stroke Rehabilitation</option>
                   <option value="Hand Surgery Recovery">Hand Surgery Recovery</option>

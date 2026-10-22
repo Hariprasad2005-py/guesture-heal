@@ -14,6 +14,7 @@ const CONDITIONS = [
   "Wrist Rehabilitation", 
   "Parkinson's", 
   "Rotator Cuff",
+  "Frozen Shoulder",
 ];
 
 export default function PatientRegistrationPage() {

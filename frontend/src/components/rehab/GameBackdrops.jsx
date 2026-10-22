@@ -13,7 +13,7 @@ const rnd = (i) => {
 
 // Each level shifts the colours of the same scene, so the game looks new as
 // you move up. Level 0 is the original look, untouched.
-const LEVEL_LOOKS = [
+export const LEVEL_LOOKS = [
   { hue: 0, sat: 1, bright: 1 },
   { hue: 40, sat: 1.1, bright: 1 },
   { hue: -45, sat: 1.15, bright: 0.97 },

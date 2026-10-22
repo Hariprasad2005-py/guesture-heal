@@ -29,6 +29,7 @@ const CONDITIONS = [
   "Wrist Rehabilitation",
   "Parkinson's",
   "Rotator Cuff",
+  "Frozen Shoulder",
 ];
 
 const THERAPY_AREAS = [

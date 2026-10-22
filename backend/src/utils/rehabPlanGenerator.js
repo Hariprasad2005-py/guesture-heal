@@ -208,33 +208,69 @@ function getExercisesForCondition(condition = "") {
 const GAMES_LIBRARY = {
   "precision-reach": {
     gameId: "precision-reach",
+    tier: "Easy",
     name: "Precision Reach",
     description: "Hold your fingertip inside moving targets to build controlled reach and shoulder mobility.",
   },
   "canvas-air": {
     gameId: "canvas-air",
+    tier: "Hard",
     name: "Canvas Air",
     description: "Trace shapes in the air to build fine motor control and precision.",
   },
   "catch-flex": {
     gameId: "catch-flex",
+    tier: "Medium",
     name: "Catch & Flex",
     description: "Move your hand to catch falling items, building hand-eye coordination and arm control.",
   },
   "cloud-reach": {
     gameId: "cloud-reach",
+    tier: "Easy",
     name: "Cloud Reach",
     description: "Reach upward to pop balloons, building shoulder elevation and arm strength.",
   },
   "rehab-slicer": {
     gameId: "rehab-slicer",
+    tier: "Hard",
     name: "Rehab Slicer",
     description: "Swipe through falling objects to build wrist/forearm mobility and coordination.",
   },
   "push-wall": {
     gameId: "push-wall",
+    tier: "Hard",
     name: "Push Wall",
     description: "Push both arms forward together to break blocks, building shoulder flexion and left-right symmetry.",
+  },
+  // ── Shoulder-focused games (adult look). `tags` = conditions they suit,
+  // used to pick the daily rotation. Existing games have no tags: they suit everyone.
+  "breathe": {
+    gameId: "breathe",
+    tier: "Easy",
+    tags: ["frozen shoulder", "rotator cuff", "stroke", "parkinson"],
+    name: "Breathe",
+    description: "Raise your arms slowly with a breathing light to gently open a stiff shoulder.",
+  },
+  "summit": {
+    gameId: "summit",
+    tier: "Easy",
+    tags: ["frozen shoulder", "rotator cuff", "fracture"],
+    name: "Summit",
+    description: "Climb a mountain route by raising your arm higher, one checkpoint at a time.",
+  },
+  "cross-rally": {
+    gameId: "cross-rally",
+    tier: "Easy",
+    tags: ["frozen shoulder", "rotator cuff"],
+    name: "Table Rally",
+    description: "Play table tennis with your hand as the paddle, reaching across your body to return the ball.",
+  },
+  "window-wiper": {
+    gameId: "window-wiper",
+    tier: "Medium",
+    tags: ["frozen shoulder", "rotator cuff", "stroke"],
+    name: "Window Wiper",
+    description: "Sweep wide arcs with your hand to wipe the rain off a night windshield.",
   },
 };
 // Clinical ROM targets for game-based rehab entries, keyed by the exact
@@ -272,6 +308,9 @@ const CONDITION_GAMES = {
   "wrist rehabilitation": ["rehab-slicer", "canvas-air", "catch-flex"],
   "parkinson's": ["catch-flex", "canvas-air", "cloud-reach"],
   "rotator cuff": ["cloud-reach", "push-wall", "rehab-slicer"],
+  // Frozen shoulder: gentle, slow raising and sweeping. Never Hard games
+  // (see HARD_BLOCKED below) until the recovering stage is added.
+  "frozen shoulder": ["breathe", "summit", "cloud-reach"],
   // Added: general "shoulder" match (e.g. "Shoulder Impingement Syndrome")
   // was previously unmatched by any key here and silently fell through to
   // "default" — same games CONDITION_EXERCISES already assigns to its own
@@ -310,6 +349,23 @@ function progressionMultiplier(day) {
 // can be used directly to route into GameEngine (/games/:gameId).
 const GAMES_PER_DAY = 5;
 
+// Conditions that never get Hard games in the plan (early, stiff stage).
+const HARD_BLOCKED = ["frozen shoulder"];
+
+// Which games may be used for this condition and pain level:
+//  - Hard games are left out for HARD_BLOCKED conditions and when pain is 6 or more
+//  - tagged games only appear for the conditions they are tagged for
+//    (untagged = the original games, which suit every condition)
+function eligibleGames(condition, painLevel) {
+  const lower = (condition || "").toLowerCase();
+  const noHard = painLevel >= 6 || HARD_BLOCKED.some((k) => lower.includes(k));
+  return Object.values(GAMES_LIBRARY).filter((g) => {
+    if (noHard && g.tier === "Hard") return false;
+    if (g.tags && !g.tags.some((t) => lower.includes(t))) return false;
+    return true;
+  });
+}
+
 function generateRehabPlan(condition = "", painLevel = 3, affectedSide = "n/a") {
   // Previously this pulled clinical PT names from EXERCISE_LIBRARY via
   // getExercisesForCondition() and only appended ONE hardcoded game
@@ -332,9 +388,11 @@ function generateRehabPlan(condition = "", painLevel = 3, affectedSide = "n/a") 
   // Precision Reach's session.gameType string has actually been
   // confirmed against real session data — flagging this assumption
   // rather than silently guessing.
-  const recommended = getGamesForCondition(condition);
+  const eligible = eligibleGames(condition, painLevel);
+  const eligibleIds = new Set(eligible.map((g) => g.gameId));
+  const recommended = getGamesForCondition(condition).filter((g) => eligibleIds.has(g.gameId));
   const recommendedIds = new Set(recommended.map((g) => g.gameId));
-  const allGames = Object.values(GAMES_LIBRARY);
+  const allGames = eligible;
   // Recommended games first (so they're weighted toward earlier days /
   // appear more often across the rotation), then whatever's left in the
   // library, deduped.
@@ -359,6 +417,15 @@ function generateRehabPlan(condition = "", painLevel = 3, affectedSide = "n/a") 
     const dayGames = [...fixed];
     for (let i = 0; dayGames.length < GAMES_PER_DAY && others.length > 0 && i < others.length; i++) {
       dayGames.push(others[(day - 1 + i) % others.length]);
+    }
+
+    // Mix of tiers: every day has at least one Easy and (when one exists) one Medium.
+    // Swap the last rotating slot if a tier is missing.
+    for (const tier of ["Medium", "Easy"]) {
+      if (dayGames.some((g) => g.tier === tier)) continue;
+      const cand = others.find((g) => g.tier === tier && !dayGames.includes(g));
+      const swapAt = dayGames.length - 1;
+      if (cand && swapAt >= recommended.length) dayGames[swapAt] = cand;
     }
 
     const dayExercises = dayGames.map((game) => {

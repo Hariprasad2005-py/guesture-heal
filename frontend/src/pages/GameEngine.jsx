@@ -8,6 +8,10 @@ import CatchAndFlex from '../games/CatchAndFlex';
 import CanvasAir from '../games/CanvasAir';
 import CloudReach from '../games/CloudReach';
 import PushWall from '../games/PushWall';
+import Breathe from '../games/Breathe';
+import Summit from '../games/Summit';
+import WindowWiper from '../games/WindowWiper';
+import CrossRally from '../games/CrossRally';
 import { GAME_IDS, GAME_DISPLAY_NAMES } from '../constants/games';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { preloadPoseAssets } from '../utils/preloadPose';
@@ -27,6 +31,10 @@ const GAME_COMPONENTS = {
   [GAME_IDS.CANVAS_AIR]: CanvasAir,
   [GAME_IDS.CLOUD_REACH]: CloudReach,
   [GAME_IDS.PUSH_WALL]: PushWall,
+  [GAME_IDS.BREATHE]: Breathe,
+  [GAME_IDS.SUMMIT]: Summit,
+  [GAME_IDS.WINDOW_WIPER]: WindowWiper,
+  [GAME_IDS.CROSS_RALLY]: CrossRally,
 };
 
 const GameEngine = () => {
