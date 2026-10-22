@@ -49,6 +49,24 @@ function pose(move, side, u) {
     const x0 = sh.x + s * 52, x1 = 130 - s * 62;
     return { hand: { x: x0 + (x1 - x0) * k, y: 104 - 12 * Math.sin(k * Math.PI) }, straight: false };
   }
+  if (move.motion === "swing") {
+    const a = 26 * Math.sin(u * Math.PI * 4);
+    return { hand: { x: sh.x + 84 * Math.sin(rad(a)), y: sh.y + 84 * Math.cos(rad(a)) }, straight: true };
+  }
+  if (move.motion === "row") {
+    const k = 0.5 - 0.5 * Math.cos(u * Math.PI * 4); // two strokes per loop: 0 = arms out, 1 = elbows pulled back
+    const lerp = (a, b) => a + (b - a) * k;
+    return {
+      hand: { x: sh.x + s * lerp(8, 12), y: sh.y + lerp(40, 46) },
+      elbow: { x: sh.x + s * lerp(6, 46), y: sh.y + lerp(22, 34) },
+    };
+  }
+  if (move.motion === "tasks") {
+    const low = { x: sh.x + s * 4, y: sh.y + 84 };
+    const P = [low, { x: sh.x + s * 6, y: 8 }, low, { x: 130 + s * 8, y: 58 }, low, { x: 130 + s * 34, y: 34 }, low, { x: 130 - s * 22, y: sh.y + 2 }, low];
+    const f = clamp(u * 8, 0, 7.999), i = Math.floor(f), t = ease(f - i);
+    return { hand: { x: P[i].x + (P[i + 1].x - P[i].x) * t, y: P[i].y + (P[i + 1].y - P[i].y) * t } };
+  }
   let k = bump(u);
   if (move.motion === "climb") k = Math.round(k * 5) / 5; // five stops
   const a = peak * k;
@@ -62,7 +80,7 @@ function pose(move, side, u) {
 function Arm({ side, move, u, active, color }) {
   const sh = SH[side];
   const p = active ? pose(move, side, u) : { hand: { x: sh.x + (side === "left" ? -6 : 6), y: sh.y + 84 }, straight: true };
-  const elbow = p.front ? { x: (sh.x + p.hand.x) / 2 + (side === "left" ? -3 : 3), y: (sh.y + p.hand.y) / 2 } : elbowFor(sh, p.hand, side);
+  const elbow = p.elbow ? p.elbow : p.front ? { x: (sh.x + p.hand.x) / 2 + (side === "left" ? -3 : 3), y: (sh.y + p.hand.y) / 2 } : elbowFor(sh, p.hand, side);
   const pts = `${sh.x},${sh.y} ${elbow.x.toFixed(1)},${elbow.y.toFixed(1)} ${p.hand.x.toFixed(1)},${p.hand.y.toFixed(1)}`;
   const trail = [];
   if (active) for (let i = 1; i <= 6; i++) { const q = pose(move, side, (u - i * 0.018 + 1) % 1).hand; trail.push(q); }
@@ -84,7 +102,7 @@ export default function MoveDemo({ move, caption, u: fixedU }) {
     if (fixedU != null) return undefined;
     let raf; const t0 = performance.now(); let last = 0;
     const loop = (now) => {
-      if (now - last > 33) { setT(((now - t0) % PERIOD_MS) / PERIOD_MS); last = now; }
+      if (now - last > 33) { setT((Math.max(0, now - t0) % PERIOD_MS) / PERIOD_MS); last = now; }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -92,7 +110,7 @@ export default function MoveDemo({ move, caption, u: fixedU }) {
   }, [fixedU]);
   const u = fixedU != null ? fixedU : t;
   const m = move || { motion: "raise", plane: "side", arm: "both", peak: 90 };
-  const oneHand = m.motion === "sweep" || m.motion === "cross";
+  const oneHand = ["sweep", "cross", "tasks", "swing"].includes(m.motion);
   const leftOn = oneHand ? m.arm === "left" : m.arm !== "right";
   const rightOn = oneHand ? m.arm !== "left" : m.arm !== "left";
   const lead = rightOn ? "right" : "left";

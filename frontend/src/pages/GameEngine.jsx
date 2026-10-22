@@ -12,6 +12,10 @@ import Breathe from '../games/Breathe';
 import Summit from '../games/Summit';
 import WindowWiper from '../games/WindowWiper';
 import CrossRally from '../games/CrossRally';
+import Pendulum from '../games/Pendulum';
+import Regatta from '../games/Regatta';
+import DailyTasks from '../games/DailyTasks';
+import RhythmStudio from '../games/RhythmStudio';
 import { GAME_IDS, GAME_DISPLAY_NAMES } from '../constants/games';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { preloadPoseAssets } from '../utils/preloadPose';
@@ -35,7 +39,26 @@ const GAME_COMPONENTS = {
   [GAME_IDS.SUMMIT]: Summit,
   [GAME_IDS.WINDOW_WIPER]: WindowWiper,
   [GAME_IDS.CROSS_RALLY]: CrossRally,
+  [GAME_IDS.PENDULUM]: Pendulum,
+  [GAME_IDS.REGATTA]: Regatta,
+  [GAME_IDS.DAILY_TASKS]: DailyTasks,
+  [GAME_IDS.RHYTHM_STUDIO]: RhythmStudio,
 };
+
+class GameErrorBoundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  render() {
+    if (this.state.err) return (
+      <div style={{ padding: 24, color: '#fff', background: '#0f172a', minHeight: '100vh' }}>
+        <h2 style={{ fontWeight: 800, fontSize: 20 }}>This game hit a problem</h2>
+        <p style={{ opacity: 0.8, margin: '8px 0' }}>Please send this message to Laksh/Hari:</p>
+        <pre style={{ whiteSpace: 'pre-wrap', background: '#1e293b', padding: 12, borderRadius: 8 }}>{String(this.state.err?.stack || this.state.err)}</pre>
+      </div>
+    );
+    return this.props.children;
+  }
+}
 
 const GameEngine = () => {
   const { gameId } = useParams();
@@ -209,13 +232,13 @@ const GameEngine = () => {
             onBack={() => navigate('/games')}
           />
         )}
-        {gate === 'open' && <GameComponent
+        {gate === 'open' && <GameErrorBoundary><GameComponent
           onSessionEnd={handleSessionEnd}
           onBack={() => navigate('/games')}
           patientId={patientId || 'guest'}
           gameId={gameId}
           isTestMode={isTestMode}
-        />}
+        /></GameErrorBoundary>}
       </div>
     </div>
   );

@@ -85,7 +85,7 @@ const sessionSchema = new mongoose.Schema(
     },
     gameType: {
       type: String,
-      enum: ["rehab_slicer", "catch_flex", "precision_reach", "canvas_air", "cloud_reach", "push_wall", "breathe", "summit", "window_wiper", "cross_rally"],
+      enum: ["rehab_slicer", "catch_flex", "precision_reach", "canvas_air", "cloud_reach", "push_wall", "breathe", "summit", "window_wiper", "cross_rally", "pendulum", "regatta", "daily_tasks", "rhythm_studio"],
       default: "rehab_slicer",
     },
     // score/accuracy/combo: every game has a genuine, always-meaningful

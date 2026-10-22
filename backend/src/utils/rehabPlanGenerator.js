@@ -272,6 +272,34 @@ const GAMES_LIBRARY = {
     name: "Window Wiper",
     description: "Sweep wide arcs with your hand to wipe the rain off a night windshield.",
   },
+  "pendulum": {
+    gameId: "pendulum",
+    tier: "Easy",
+    tags: ["frozen shoulder", "rotator cuff", "fracture"],
+    name: "Pendulum",
+    description: "Let your arm hang and swing it gently with a clock pendulum to loosen a stiff shoulder.",
+  },
+  "regatta": {
+    gameId: "regatta",
+    tier: "Medium",
+    tags: ["fracture", "stroke", "parkinson", "rotator cuff"],
+    name: "Regatta",
+    description: "Row a boat down the lane by pulling both elbows back and stretching out again.",
+  },
+  "daily-tasks": {
+    gameId: "daily-tasks",
+    tier: "Medium",
+    tags: ["stroke", "hand surgery", "fracture"],
+    name: "Daily Tasks",
+    description: "Practise everyday movements: sip a drink, brush your hair and reach a shelf.",
+  },
+  "rhythm-studio": {
+    gameId: "rhythm-studio",
+    tier: "Hard",
+    tags: ["parkinson", "stroke"],
+    name: "Rhythm Studio",
+    description: "Swing your arms big and in time with the beat to build movement size and rhythm.",
+  },
 };
 // Clinical ROM targets for game-based rehab entries, keyed by the exact
 // session.gameType string each game records (NOT GAMES_LIBRARY's hyphenated

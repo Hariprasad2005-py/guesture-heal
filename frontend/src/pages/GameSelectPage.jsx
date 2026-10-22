@@ -5,7 +5,7 @@ import { useAppStore } from '../store/appStore';
 import { 
   Target, Sword, ShoppingBasket, Palette, Cloud, Play, ChevronRight, 
   Settings, Zap, Heart, Activity, Move, Brain, Clock, Hand, Waves,
-  TrendingUp, Shield, Eye, Star, Wind, Mountain, CloudRain,
+  TrendingUp, Shield, Eye, Star, Wind, Mountain, CloudRain, Coffee, Music,
   Flame, CheckCircle2, X, PartyPopper, Trophy
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -46,6 +46,10 @@ const GAME_ICON_MAP = {
   [GAME_IDS.SUMMIT]: Mountain,
   [GAME_IDS.WINDOW_WIPER]: CloudRain,
   [GAME_IDS.CROSS_RALLY]: Zap,
+  [GAME_IDS.PENDULUM]: Clock,
+  [GAME_IDS.REGATTA]: Waves,
+  [GAME_IDS.DAILY_TASKS]: Coffee,
+  [GAME_IDS.RHYTHM_STUDIO]: Music,
 };
 
 // --- Presentation-only metadata (does not touch game data/constants) ---
@@ -60,6 +64,10 @@ const EXERCISE_TAG = {
   [GAME_IDS.SUMMIT]: 'Shoulder Raise',
   [GAME_IDS.WINDOW_WIPER]: 'Shoulder Sweep',
   [GAME_IDS.CROSS_RALLY]: 'Cross-Body Reach',
+  [GAME_IDS.PENDULUM]: 'Relaxed Swing',
+  [GAME_IDS.REGATTA]: 'Elbow Rowing',
+  [GAME_IDS.DAILY_TASKS]: 'Everyday Reach',
+  [GAME_IDS.RHYTHM_STUDIO]: 'Rhythm & Size',
 };
 
 const DIFFICULTY = {
@@ -73,6 +81,10 @@ const DIFFICULTY = {
   [GAME_IDS.SUMMIT]: 'Easy',
   [GAME_IDS.WINDOW_WIPER]: 'Medium',
   [GAME_IDS.CROSS_RALLY]: 'Easy',
+  [GAME_IDS.PENDULUM]: 'Easy',
+  [GAME_IDS.REGATTA]: 'Medium',
+  [GAME_IDS.DAILY_TASKS]: 'Medium',
+  [GAME_IDS.RHYTHM_STUDIO]: 'Hard',
 };
 
 const DIFFICULTY_DOT = { Easy: 'bg-emerald-500', Medium: 'bg-amber-500', Hard: 'bg-rose-500' };
@@ -88,6 +100,10 @@ const ACCENT_COLOR = {
   [GAME_IDS.SUMMIT]: '#F59E0B',
   [GAME_IDS.WINDOW_WIPER]: '#0EA5E9',
   [GAME_IDS.CROSS_RALLY]: '#10B981',
+  [GAME_IDS.PENDULUM]: '#CA8A04',
+  [GAME_IDS.REGATTA]: '#2563EB',
+  [GAME_IDS.DAILY_TASKS]: '#0D9488',
+  [GAME_IDS.RHYTHM_STUDIO]: '#9333EA',
 };
 
 const GAMES = [
@@ -133,7 +149,7 @@ const GAMES = [
     icon: GAME_ICON_MAP[GAME_IDS.PUSH_WALL],
     ...GAME_COLORS[GAME_IDS.PUSH_WALL],
   },
-  ...[GAME_IDS.BREATHE, GAME_IDS.SUMMIT, GAME_IDS.WINDOW_WIPER, GAME_IDS.CROSS_RALLY].map((id) => ({
+  ...[GAME_IDS.BREATHE, GAME_IDS.SUMMIT, GAME_IDS.WINDOW_WIPER, GAME_IDS.CROSS_RALLY, GAME_IDS.PENDULUM, GAME_IDS.REGATTA, GAME_IDS.DAILY_TASKS, GAME_IDS.RHYTHM_STUDIO].map((id) => ({
     id,
     name: GAME_DISPLAY_NAMES[id],
     description: GAME_DESCRIPTIONS[id],

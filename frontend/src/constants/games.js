@@ -10,6 +10,10 @@ export const GAME_IDS = {
   SUMMIT: 'summit',
   WINDOW_WIPER: 'window-wiper',
   CROSS_RALLY: 'cross-rally',
+  PENDULUM: 'pendulum',
+  REGATTA: 'regatta',
+  DAILY_TASKS: 'daily-tasks',
+  RHYTHM_STUDIO: 'rhythm-studio',
 };
 
 export const GAME_TYPE_MAP = {
@@ -23,6 +27,10 @@ export const GAME_TYPE_MAP = {
   'summit': 'summit',
   'window-wiper': 'window_wiper',
   'cross-rally': 'cross_rally',
+  'pendulum': 'pendulum',
+  'regatta': 'regatta',
+  'daily-tasks': 'daily_tasks',
+  'rhythm-studio': 'rhythm_studio',
 };
 
 export const GAME_DISPLAY_NAMES = {
@@ -36,6 +44,10 @@ export const GAME_DISPLAY_NAMES = {
   'summit': 'Summit',
   'window-wiper': 'Window Wiper',
   'cross-rally': 'Table Rally',
+  'pendulum': 'Pendulum',
+  'regatta': 'Regatta',
+  'daily-tasks': 'Daily Tasks',
+  'rhythm-studio': 'Rhythm Studio',
 };
 
 export const GAME_ICONS = {
@@ -49,6 +61,10 @@ export const GAME_ICONS = {
   'summit': 'Mountain',
   'window-wiper': 'CloudRain',
   'cross-rally': 'Zap',
+  'pendulum': 'Clock',
+  'regatta': 'Waves',
+  'daily-tasks': 'Coffee',
+  'rhythm-studio': 'Music',
 };
 
 export const GAME_COLORS = {
@@ -62,6 +78,10 @@ export const GAME_COLORS = {
   'summit': { bg: 'bg-amber-50', text: 'text-amber-600' },
   'window-wiper': { bg: 'bg-sky-50', text: 'text-sky-600' },
   'cross-rally': { bg: 'bg-emerald-50', text: 'text-emerald-600' },
+  'pendulum': { bg: 'bg-yellow-50', text: 'text-yellow-700' },
+  'regatta': { bg: 'bg-blue-50', text: 'text-blue-600' },
+  'daily-tasks': { bg: 'bg-teal-50', text: 'text-teal-600' },
+  'rhythm-studio': { bg: 'bg-purple-50', text: 'text-purple-600' },
 };
 
 export const GAME_DESCRIPTIONS = {
@@ -75,4 +95,8 @@ export const GAME_DESCRIPTIONS = {
   'summit': 'Climb a mountain route by raising your arm higher, one checkpoint at a time.',
   'window-wiper': 'Sweep wide arcs with your hand to wipe the rain off a night windshield.',
   'cross-rally': 'Play table tennis with your hand as the paddle, reaching across your body to return the ball.',
+  'pendulum': 'Let your arm hang and swing it gently with a clock pendulum to loosen a stiff shoulder.',
+  'regatta': 'Row a boat down the lane by pulling both elbows back and stretching out again.',
+  'daily-tasks': 'Practise everyday movements: sip a drink, brush your hair and reach a shelf.',
+  'rhythm-studio': 'Swing your arms big and in time with the beat to build movement size and rhythm.',
 };
