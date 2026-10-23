@@ -365,6 +365,7 @@ const HomePage = () => {
   const [scrolled, setScrolled] = useState(false);
   const [activeFaq, setActiveFaq] = useState(null);
   const [showRoleModal, setShowRoleModal] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(false);
 
   useEffect(() => {
     const handleScroll = () => setScrolled(window.scrollY > 20);
@@ -373,11 +374,47 @@ const HomePage = () => {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
+  // Auto-scroll: begins after the hero video finishes its first play-through.
+  // Mouse movement, wheel and touch do NOT stop it; clicking a button or link does.
+  useEffect(() => {
+    if (!autoScroll) return;
+    const SPEED = 60; // pixels per second (raise = faster)
+    let raf, last = null, pos = window.scrollY, stopped = false;
+
+    const step = (now) => {
+      if (stopped) return;
+      if (last !== null) {
+        // if the user scrolled by hand, carry on from where they are
+        if (Math.abs(window.scrollY - pos) > 2) pos = window.scrollY;
+        pos += (SPEED * (now - last)) / 1000;
+        window.scrollTo({ top: pos, behavior: 'instant' });
+        if (pos >= document.documentElement.scrollHeight - window.innerHeight) return;
+      }
+      last = now;
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+
+    const onClick = (e) => {
+      if (e.target.closest('button, a')) {
+        stopped = true;
+        cancelAnimationFrame(raf);
+      }
+    };
+    document.addEventListener('click', onClick, true);
+
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(raf);
+      document.removeEventListener('click', onClick, true);
+    };
+  }, [autoScroll]);
+
   return (
     <div className="min-h-screen bg-white font-sans antialiased overflow-x-hidden text-[#0C3C44] scroll-smooth">
       <RoleModal showRoleModal={showRoleModal} setShowRoleModal={setShowRoleModal} />
       <Navbar scrolled={scrolled} isOpen={isOpen} setIsOpen={setIsOpen} setShowRoleModal={setShowRoleModal} />
-      <Hero setShowRoleModal={setShowRoleModal} />
+      <Hero setShowRoleModal={setShowRoleModal} onVideoComplete={() => setAutoScroll(true)} />
       <Services />
       <WhyGestureHeal />
       <Workflow setShowRoleModal={setShowRoleModal} />
@@ -491,10 +528,22 @@ const Navbar = ({ scrolled, isOpen, setIsOpen, setShowRoleModal }) => {
 /* ──────────────────────────────────────────────────────────────────────────
   Hero — video background kept, light overlay
   ────────────────────────────────────────────────────────────────────────── */
-const Hero = ({ setShowRoleModal }) => {
+const Hero = ({ setShowRoleModal, onVideoComplete }) => {
   const controls = useAnimation();
   const ref = useRef(null);
   const inView = useInView(ref, { once: true });
+  const lastTime = useRef(0);
+  const finished = useRef(false);
+
+  // The video loops, so "finished" = playback wrapped back to the start
+  const handleTimeUpdate = (e) => {
+    const t = e.currentTarget.currentTime;
+    if (!finished.current && t < lastTime.current) {
+      finished.current = true;
+      onVideoComplete?.();
+    }
+    lastTime.current = t;
+  };
 
   useEffect(() => {
     if (inView) controls.start('visible');
@@ -505,6 +554,7 @@ const Hero = ({ setShowRoleModal }) => {
     <section ref={ref} id="home" className="relative mt-[64px] aspect-video overflow-hidden bg-[#02060f] scroll-mt-24 flex items-center">
       <video
         autoPlay loop muted playsInline
+        onTimeUpdate={handleTimeUpdate}
         className="absolute inset-0 w-full h-full object-contain"
         style={{ objectPosition: 'center 20%', filter: 'brightness(1) contrast(1.08) saturate(1.15)' }}
       >
