@@ -437,12 +437,7 @@ const Navbar = ({ scrolled, isOpen, setIsOpen, setShowRoleModal }) => {
             </div>
 
             <div className="hidden lg:flex items-center gap-2">
-              <button
-                onClick={() => setShowRoleModal(true)}
-                className="px-4 py-2 text-[13.5px] font-semibold text-slate-700 hover:text-[#137F7E] rounded-lg transition-colors"
-              >
-                Log in
-              </button>
+
               <motion.button
                 whileHover={{ y: -1 }}
                 whileTap={{ scale: 0.98 }}
@@ -479,9 +474,7 @@ const Navbar = ({ scrolled, isOpen, setIsOpen, setShowRoleModal }) => {
                   </a>
                 ))}
                 <div className="pt-4 flex gap-3">
-                  <button onClick={() => setShowRoleModal(true)} className="flex-1 px-4 py-2.5 text-sm font-semibold text-slate-700 border border-[#F3DDD1] rounded-lg">
-                    Log in
-                  </button>
+
                   <button onClick={() => setShowRoleModal(true)} className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-[#137F7E] rounded-lg">
                     Get started
                   </button>
