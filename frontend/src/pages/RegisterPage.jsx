@@ -186,7 +186,7 @@ export default function RegisterPage() {
 
         {/* FOOTNOTE */}
         <p className="text-center text-xs text-slate-400 mt-4">
-          Encrypted · HIPAA-ready architecture
+          Privacy-focused architecture
         </p>
       </div>
     </div>

@@ -76,7 +76,7 @@ export default function PatientPortalPage() {
   const features = [
     { icon: Brain, label: "AI Motion Tracking", desc: "Real-time pose analysis" },
     { icon: Activity, label: "Progress Analytics", desc: "Visual recovery metrics" },
-    { icon: Shield, label: "HIPAA Compliant", desc: "Enterprise-grade security" },
+    { icon: Shield, label: "Privacy Focused", desc: "Enterprise-grade security" },
     { icon: Calendar, label: "Smart Scheduling", desc: "Automated session planning" },
   ];
 
@@ -220,8 +220,8 @@ export default function PatientPortalPage() {
             transition={{ delay: 0.6 }}
           >
             {[
-              { icon: Shield, label: "HIPAA Compliant" },
-              { icon: Lock, label: "256-bit Encryption" },
+              { icon: Shield, label: "Privacy Focused" },
+              { icon: Lock, label: "Data Privacy" },
               { icon: Award, label: "FDA Cleared" },
             ].map((badge, i) => (
               <div key={i} className="flex items-center gap-1.5">
@@ -395,11 +395,11 @@ export default function PatientPortalPage() {
               >
                 <span className="flex items-center gap-1">
                   <span className="w-1 h-1 bg-teal-400 rounded-full" />
-                  End-to-end encrypted
+                  Your privacy matters
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="w-1 h-1 bg-teal-400 rounded-full" />
-                  HIPAA compliant
+                  Privacy Focused
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="w-1 h-1 bg-teal-400 rounded-full" />

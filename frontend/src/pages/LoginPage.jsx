@@ -58,7 +58,7 @@ export default function LoginPage() {
           {/* Feature pills */}
           <div className="flex flex-wrap gap-3 mt-8">
             {[
-              { icon: Shield, label: "HIPAA-Aligned" },
+              { icon: Shield, label: "Privacy Focused" },
               { icon: Activity, label: "Real-Time Motion" },
               { icon: Heart, label: "Patient-Centered" },
             ].map(({ icon: Icon, label }) => (

@@ -169,7 +169,7 @@ export default function PatientRegistrationPage() {
               <span className="text-white font-semibold text-sm">Secure Data</span>
             </div>
             <p className="text-teal-100 text-xs">
-              Your medical information is encrypted and stored according to clinical standards.
+              Your medical information Your privacy matters and stored according to clinical standards.
             </p>
           </div>
         </div>

@@ -140,8 +140,8 @@ const RoleModal = ({ showRoleModal, setShowRoleModal }) => {
 
             <div className="flex flex-wrap gap-3 mt-4">
               {[
-                { icon: Shield, label: "HIPAA Ready" },
-                { icon: Lock, label: "End-to-End Encryption" },
+                { icon: Shield, label: "Privacy Focused" },
+                { icon: Lock, label: "Privacy Focused" },
                 { icon: Sparkles, label: "AI Motion Tracking" },
               ].map((badge, i) => (
                 <span
@@ -263,13 +263,13 @@ const RoleModal = ({ showRoleModal, setShowRoleModal }) => {
               {[
                 { 
                   icon: Shield, 
-                  label: "HIPAA Compliant", 
+                  label: "Privacy Focused", 
                   desc: "Enterprise-grade security",
                   color: "blue" 
                 },
                 { 
                   icon: Lock, 
-                  label: "End-to-End Encrypted", 
+                  label: "Your privacy matters", 
                   desc: "Your data is protected",
                   color: "teal" 
                 },
@@ -323,7 +323,7 @@ const RoleModal = ({ showRoleModal, setShowRoleModal }) => {
 
           <p className="text-center text-[10px] text-slate-400 mt-4 flex items-center justify-center gap-1.5">
             <Lock className="w-3 h-3" />
-            Your data is encrypted and HIPAA compliant
+            Your privacy matters
           </p>
         </div>
       </motion.div>
@@ -638,7 +638,7 @@ const WhyGestureHeal = () => {
     { icon: Award, title: 'Doctor-approved', description: 'Clinically validated' },
     { icon: Cloud, title: 'Cloud sync', description: 'Progress, everywhere' },
     { icon: Zap, title: 'Faster gains', description: 'Accelerated protocols' },
-    { icon: Lock, title: 'Secure', description: 'HIPAA-compliant' },
+    { icon: Lock, title: 'Secure', description: 'Privacy Focused' },
     { icon: Users, title: 'Inclusive', description: 'Built for all abilities' },
   ];
 
@@ -950,7 +950,7 @@ const Testimonials = () => {
 const FAQ = ({ activeFaq, setActiveFaq }) => {
   const faqs = [
     { q: 'How does Gesture Heal work?', a: "Gesture Heal uses AI and computer vision to analyze your movements through your device's camera. The system provides real-time feedback and personalized exercise programs to help you recover effectively from the comfort of your home." },
-    { q: 'Is my data secure and private?', a: 'Yes, Gesture Heal is fully HIPAA compliant. All your health data is encrypted and stored securely. We never share your information with third parties without your explicit consent.' },
+    { q: 'Is my data secure and private?', a: 'Yes, Gesture Heal is fully Privacy Focused. All your health data Your privacy matters and stored securely. We never share your information with third parties without your explicit consent.' },
     { q: 'Do I need any special equipment?', a: 'No, you only need a device with a camera (smartphone, tablet, or computer) and an internet connection. Our AI technology works with standard cameras to track your movements.' },
     { q: 'What conditions can Gesture Heal help with?', a: "Gesture Heal supports rehabilitation for stroke, knee injuries, shoulder rehabilitation, hand therapy, post-surgery recovery, Parkinson's disease." },
     { q: 'How is this different from traditional physical therapy?', a: 'Gesture Heal combines the convenience of remote therapy with AI-powered analysis and real-time feedback. You get the benefits of professional guidance with the flexibility of home-based rehabilitation.' },
@@ -1074,8 +1074,8 @@ const Footer = () => (
         <div>
           <h4 className="text-xs font-semibold uppercase tracking-[0.14em] text-[#FFC857] mb-4">Trust & security</h4>
           <ul className="space-y-3 text-[14.5px] text-white/70">
-            <li className="flex items-center gap-2.5"><ShieldCheck className="w-4 h-4 text-[#FFC857]" /> HIPAA-ready</li>
-            <li className="flex items-center gap-2.5"><Lock className="w-4 h-4 text-[#FFC857]" /> End-to-end encryption</li>
+            <li className="flex items-center gap-2.5"><ShieldCheck className="w-4 h-4 text-[#FFC857]" /> Privacy Focused</li>
+            <li className="flex items-center gap-2.5"><Lock className="w-4 h-4 text-[#FFC857]" /> Privacy Focused</li>
             <li className="flex items-center gap-2.5"><Stethoscope className="w-4 h-4 text-[#FFC857]" /> Clinician supervised</li>
           </ul>
         </div>
