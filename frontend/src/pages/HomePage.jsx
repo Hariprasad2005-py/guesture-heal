@@ -421,12 +421,7 @@ const Navbar = ({ scrolled, isOpen, setIsOpen, setShowRoleModal }) => {
           </div>
 
           <div className="hidden md:flex items-center gap-3">
-            <button
-              onClick={() => setShowRoleModal(true)}
-              className="px-4 py-2 text-[13.5px] font-semibold text-slate-700 hover:text-teal-600 transition-colors"
-            >
-              Log in
-            </button>
+
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
@@ -796,9 +791,6 @@ const Workflow = () => {
   chrome, sidebar, and a credible metric layout instead of placeholder tiles
   ────────────────────────────────────────────────────────────────────────── */
 const DashboardPreview = () => {
-  const weeklyData = [65, 72, 68, 80, 75, 88, 85];
-  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
   return (
     <section id="ai-technology" className="py-24 lg:py-32 bg-[#F3EFE6] text-slate-800 relative overflow-hidden">
       <div
@@ -841,104 +833,16 @@ const DashboardPreview = () => {
               <span className="w-2.5 h-2.5 rounded-full bg-teal-400/80" />
             </div>
             <div className="ml-3 px-3 py-1 rounded-md bg-slate-100 text-[11px] text-slate-500 font-mono">
-              app.gestureheal.com/dashboard
+              app.gestureheal.com/admin
             </div>
           </div>
 
-          <div className="grid lg:grid-cols-[260px_1fr]">
-            {/* sidebar */}
-            <div className="hidden lg:flex flex-col gap-1 p-5 border-r border-slate-100 bg-slate-50/60">
-              {[
-                { icon: Gauge, label: 'Overview', active: true },
-                { icon: Dumbbell, label: 'Exercises' },
-                { icon: Calendar, label: 'Sessions' },
-                { icon: LineChart, label: 'Reports' },
-                { icon: Settings, label: 'Settings' },
-              ].map((item, i) => (
-                <div
-                  key={i}
-                  className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium ${
-                    item.active ? 'bg-gradient-to-r from-teal-100 to-[#FFE4DC] text-teal-700 border border-teal-200' : 'text-slate-500'
-                  }`}
-                >
-                  <item.icon className="w-4 h-4" strokeWidth={1.75} />
-                  {item.label}
-                </div>
-              ))}
-            </div>
-
-            {/* main panel */}
-            <div className="p-6 sm:p-8">
-              <div className="grid sm:grid-cols-[auto_1fr] gap-8 mb-8">
-                <div className="flex sm:flex-col items-center sm:items-start gap-6 sm:gap-4">
-                  <div className="relative w-28 h-28 flex-shrink-0">
-                    <svg className="w-28 h-28 transform -rotate-90">
-                      <circle className="text-slate-100" strokeWidth="6" stroke="currentColor" fill="transparent" r="50" cx="56" cy="56" />
-                      <circle
-                        className="text-[#FF7043]"
-                        strokeWidth="6"
-                        strokeLinecap="round"
-                        stroke="currentColor"
-                        fill="transparent"
-                        r="50"
-                        cx="56"
-                        cy="56"
-                        strokeDasharray={314}
-                        strokeDashoffset={314 * 0.23}
-                      />
-                    </svg>
-                    <div className="absolute inset-0 flex flex-col items-center justify-center">
-                      <div className="text-2xl font-bold text-slate-900">77%</div>
-                      <div className="text-[10px] text-slate-500">Recovery</div>
-                    </div>
-                  </div>
-                  <div className="text-[13px] text-slate-500">
-                    <span className="text-teal-600 font-semibold">+8%</span> since last week
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  {[
-                    { label: 'Exercises', value: '24', delta: '+12', icon: Dumbbell },
-                    { label: 'Sessions', value: '18', delta: '+3', icon: Calendar },
-                    { label: 'Accuracy', value: '94%', delta: '+2%', icon: Target },
-                    { label: 'Streak', value: '12d', delta: '🔥', icon: Flame },
-                  ].map((stat, i) => (
-                    <div key={i} className="bg-teal-50/50 border border-teal-100 rounded-xl p-4 hover:border-teal-300 transition-colors">
-                      <div className="flex items-center justify-between mb-3">
-                        <stat.icon className="w-4 h-4 text-slate-400" strokeWidth={1.75} />
-                        <span className="text-[10px] font-medium text-teal-600">{stat.delta}</span>
-                      </div>
-                      <div className="text-xl font-bold tracking-tight text-slate-900">{stat.value}</div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">{stat.label}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-teal-50/50 border border-teal-100 rounded-xl p-5 sm:p-6">
-                <div className="flex items-center justify-between mb-5">
-                  <h4 className="text-[13px] font-semibold text-slate-700">Weekly session intensity</h4>
-                  <span className="text-[11px] font-medium text-teal-600">+15% vs. last week</span>
-                </div>
-                <div className="flex items-end justify-between h-28 gap-3">
-                  {weeklyData.map((height, index) => (
-                    <div key={index} className="flex-1 flex flex-col items-center gap-2">
-                      <motion.div
-                        initial={{ height: 0 }}
-                        whileInView={{ height: `${height}%` }}
-                        viewport={{ once: true }}
-                        transition={{ duration: 0.6, delay: index * 0.07, ease: 'easeOut' }}
-                        className={`w-full rounded-md ${index === 5 ? 'bg-gradient-to-t from-[#FF7043] to-[#FF8A65]' : 'bg-gradient-to-t from-teal-500/70 to-teal-400/40'}`}
-                        style={{ height: `${height}%` }}
-                      />
-                      <span className="text-[10px] text-slate-500">{days[index]}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
+          {/* real dashboard screenshot */}
+          <img
+            src="/admin-dashboard.png.jpeg"
+            alt="Gesture Heal admin dashboard"
+            className="w-full h-auto block"
+          />
         </motion.div>
       </div>
     </section>
@@ -949,71 +853,18 @@ const DashboardPreview = () => {
   Conditions — colour-varied icon tiles, distinct from other card sections
   ────────────────────────────────────────────────────────────────────────── */
 const Conditions = () => {
-  const conditions = [
-  {
-    icon: '💪',
-    title: 'Rotator cuff',
-    desc: 'Shoulder strength & mobility',
-    tint: 'bg-orange-100 text-[#C2410C]',
-    hoverBorder: 'hover:border-orange-300',
-    hoverShadow: 'hover:shadow-orange-200/80',
-    photo: 'https://imgs.search.brave.com/4_A5NewKtboEvrdwWhE3B95jFBbvY_Os3DGbTMtwN5Y/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly9pbWcu/bGIud2JtZHN0YXRp/Yy5jb20vdmltL2xp/dmUvd2VibWQvY29u/c3VtZXJfYXNzZXRz/L3NpdGVfaW1hZ2Vz/L2FydGljbGVfdGh1/bWJuYWlscy9CaWdC/ZWFkL3JvdGF0b3Jf/Y3VmZl90ZWFyX2Jp/Z2JlYWQvMTgwMHgx/MjAwX3JvdGF0b3Jf/Y3VmZl90ZWFyX2Jp/Z2JlYWQuanBnP3Jl/c2l6ZT03NTBweDoq/Jm91dHB1dC1xdWFs/aXR5PTc1',
-  },
-  {
-    icon: '🧠',
-    title: 'Stroke rehab',
-    desc: 'Motor function & coordination',
-    tint: 'bg-teal-100 text-teal-700',
-    hoverBorder: 'hover:border-teal-300',
-    hoverShadow: 'hover:shadow-teal-200/80',
-    photo: 'https://imgs.search.brave.com/KnU1th36SepyFJWcyYWflG4kiIL_ON6mkDpf_r_EToE/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly9jZG4u/ZmxpbnRyZWhhYi5j/b20vdXBsb2Fkcy8y/MDIwLzAxL2V4ZXJj/aXNlcy1mb3Itc3Ry/b2tlLXBhdGllbnRz/NC5qcGc',
-  },
-  {
-    icon: '✋',
-    title: 'Hand surgery',
-    desc: 'Fine motor skill recovery',
-    tint: 'bg-orange-100 text-[#C2410C]',
-    hoverBorder: 'hover:border-orange-300',
-    hoverShadow: 'hover:shadow-orange-200/80',
-    photo: 'https://imgs.search.brave.com/b2Eb8qReKOJy5SKVjwtgBizjHHeVB05eaZDWsgRfRfQ/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly93d3cu/aGFuZHN1cmdlb25u/ZWFybWUuY29tL3dw/LWNvbnRlbnQvdXBs/b2Fkcy8yMDIzLzAy/L1NjcmVlbi1TaG90/LTIwMjMtMDItMDct/YXQtMi4zNi40OS1Q/TS5wbmc',
-  },
-  {
-    icon: '🦴',
-    title: 'Fracture recovery',
-    desc: 'Guided bone healing support',
-    tint: 'bg-teal-100 text-teal-700',
-    hoverBorder: 'hover:border-teal-300',
-    hoverShadow: 'hover:shadow-teal-200/80',
-    photo: 'https://imgs.search.brave.com/K57juuXknn-92axkxDZmb1BZiQe1l3eQJ4Hs2QwQNCE/rs:fit:0:180:1:0/g:ce/aHR0cHM6Ly9waHlz/aW9zdW5pdC5jb20v/d3AtY29udGVudC91/cGxvYWRzLzIwMjEv/MDQvV3Jpc3QtZmxl/eGlvbi1leHRlbnNp/b24tZXhlcmNpc2Ut/YWZ0ZXItZWxib3ct/ZnJhY3R1cmUtMTAy/NHgzMzYuanBn',
-  },
-  {
-    icon: '⚡',
-    title: 'Nerve injury',
-    desc: 'Sensation & nerve function',
-    tint: 'bg-orange-100 text-[#C2410C]',
-    hoverBorder: 'hover:border-orange-300',
-    hoverShadow: 'hover:shadow-orange-200/80',
-    photo: 'https://imgs.search.brave.com/57nlx7gikHTQpvA-lK91zZv0Zw8EBj5E4Lwqgs3VpcE/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly9vcnRo/b2luZm8uYWFvcy5v/cmcvY29udGVudGFz/c2V0cy8zYTEzYmUx/Y2FlNTM0MmM2OTUz/NGNlZjU5YjdiMWU2/NC9jYXJwYWwtdHVu/bmVsLXRodW1ibmFp/bC5qcGc',
-  },
-  {
-    icon: '✋',
-    title: 'Wrist rehab',
-    desc: 'Strength & flexibility',
-    tint: 'bg-teal-100 text-teal-700',
-    hoverBorder: 'hover:border-teal-300',
-    hoverShadow: 'hover:shadow-teal-200/80',
-    photo: 'https://imgs.search.brave.com/VLyOoSUJwcIl_mCYN9OheDMNJHCxJFciH3aVD2QJC8s/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly9tZWRp/YS5jdWgubmhzLnVr/L2ltYWdlcy9BY3Rp/aXZlX3dyaXN0X3Rl/bm9kZXNpcy53aWR0/aC04NDAucG5n',
-  },
-  {
-    icon: '🧘',
-    title: "Parkinson's",
-    desc: 'Symptom & mobility management',
-    tint: 'bg-orange-100 text-[#C2410C]',
-    hoverBorder: 'hover:border-orange-300',
-    hoverShadow: 'hover:shadow-orange-200/80',
-    photo: 'https://imgs.search.brave.com/-FoszdrSb-OAaFFfW3xSbGw2rK52oB0EoFlnOtP_Iac/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly9pbWFn/ZXMuZXZlcnlkYXlo/ZWFsdGguY29tL2lt/YWdlcy8yMDI2L3Bo/eXNpY2FsLWFjdGl2/aXR5LWFkdmFuY2Vk/LXBhcmtpbnNvbnMt/c3RheS1hY3RpdmUt/MTQ0MHg4MTAuanBn',
-  },
-];
+      const conditions = [
+    { icon: '🥶', title: 'Frozen shoulder', desc: 'Gentle, pain-free stretching', hoverBorder: 'hover:border-orange-300', hoverShadow: 'hover:shadow-orange-200/80', photo: '/frozen.jpeg' },
+    { icon: '🦾', title: 'Shoulder impingement', desc: 'Mobility & pain-free motion', hoverBorder: 'hover:border-teal-300', hoverShadow: 'hover:shadow-teal-200/80', photo: '/shoulder%20mobility.jpeg' },
+    { icon: '💪', title: 'Rotator cuff', desc: 'Shoulder strength & mobility', hoverBorder: 'hover:border-orange-300', hoverShadow: 'hover:shadow-orange-200/80', photo: '/rotator.jpeg' },
+    { icon: '🧠', title: 'Stroke rehab', desc: 'Motor function & coordination', hoverBorder: 'hover:border-teal-300', hoverShadow: 'hover:shadow-teal-200/80', photo: '/stroke.jpeg' },
+    { icon: '✋', title: 'Hand surgery', desc: 'Fine motor skill recovery', hoverBorder: 'hover:border-orange-300', hoverShadow: 'hover:shadow-orange-200/80', photo: '/hand%20surgery.jpeg' },
+    { icon: '🦴', title: 'Fracture recovery', desc: 'Guided bone healing support', hoverBorder: 'hover:border-teal-300', hoverShadow: 'hover:shadow-teal-200/80', photo: '/fracture%20recovery.jpeg' },
+    { icon: '⚡', title: 'Nerve injury', desc: 'Sensation & nerve function', hoverBorder: 'hover:border-orange-300', hoverShadow: 'hover:shadow-orange-200/80', photo: '/nerve%20injury.jpeg' },
+    { icon: '🤲', title: 'Wrist rehab', desc: 'Strength & flexibility', hoverBorder: 'hover:border-teal-300', hoverShadow: 'hover:shadow-teal-200/80', photo: '/wrist.jpeg' },
+    { icon: '🧘', title: "Parkinson's", desc: 'Symptom & mobility management', hoverBorder: 'hover:border-orange-300', hoverShadow: 'hover:shadow-orange-200/80', photo: '/parkisons.jpeg' },
+  ];
+
   return (
     <section className="py-24 lg:py-32 bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -1026,11 +877,12 @@ const Conditions = () => {
           <div className="max-w-xl">
             <span className="text-xs font-semibold text-teal-600 uppercase tracking-[0.14em]">Conditions</span>
             <h2 className="text-3xl md:text-[2.75rem] font-bold tracking-tight text-slate-800 mt-3 leading-[1.1]">
-              Conditions we support</h2>
+              Conditions we support
+            </h2>
           </div>
         </motion.div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {conditions.map((condition, index) => (
             <motion.div
               key={index}
@@ -1040,19 +892,30 @@ const Conditions = () => {
               transition={{ delay: index * 0.04 }}
               whileHover={{ y: -3 }}
               className={`bg-white rounded-2xl border-2 border-slate-100 shadow-sm hover:shadow-lg transition-all overflow-hidden relative ${condition.hoverBorder} ${condition.hoverShadow}`}
->
-  {/* clear, fully visible photo strip */}
-  <div
-    className="w-full h-28 bg-cover bg-center"
-    style={{ backgroundImage: `url('${condition.photo}')` }}
-  />
-  <div className="p-6">
-    <div className={`w-11 h-11 rounded-xl ${condition.tint} flex items-center justify-center text-xl mb-4 shadow-sm -mt-11 relative z-10 ring-4 ring-white`}>
-      {condition.icon}
-    </div>
-    <h3 className="font-semibold text-[14.5px] text-slate-900 mb-1">{condition.title}</h3>
-    <p className="text-[13px] text-slate-500 leading-snug">{condition.desc}</p>
-  </div>
+            >
+              {/* full panel image, not cropped */}
+              <div
+                className={`relative w-full aspect-[3/2] overflow-hidden flex items-center justify-center text-7xl ${
+                  index % 2 === 0
+                    ? 'bg-gradient-to-br from-orange-100 via-orange-50 to-amber-100'
+                    : 'bg-gradient-to-br from-teal-100 via-teal-50 to-cyan-100'
+                }`}
+              >
+                <span className="drop-shadow-sm">{condition.icon}</span>
+                {condition.photo && (
+                  <img
+                    src={condition.photo}
+                    alt={condition.title}
+                    className="absolute inset-0 w-full h-full object-cover bg-slate-900"
+                    onError={(e) => { console.error('Image failed:', e.currentTarget.src); e.currentTarget.style.display = 'none'; }}
+                  />
+                )}
+              </div>
+
+              <div className="p-6">
+                <h3 className="font-semibold text-[14.5px] text-slate-900 mb-1">{condition.title}</h3>
+                <p className="text-[13px] text-slate-500 leading-snug">{condition.desc}</p>
+              </div>
             </motion.div>
           ))}
         </div>
@@ -1082,7 +945,7 @@ const StatCard = ({ stat, index }) => {
           setCount(end);
           clearInterval(timer);
         } else {
-          setCount(Math.floor(start));
+          setCount(stat.decimals ? Number(start.toFixed(stat.decimals)) : Math.floor(start));
         }
       }, 16);
 
@@ -1101,7 +964,7 @@ const StatCard = ({ stat, index }) => {
     >
       <stat.icon className="w-5 h-5 text-[#FFD4C2] mb-4" strokeWidth={1.75} />
       <div className="text-4xl md:text-5xl font-bold tracking-tight">
-        {count.toLocaleString()}{stat.suffix}
+        {count.toLocaleString(undefined, { minimumFractionDigits: stat.decimals || 0, maximumFractionDigits: stat.decimals || 0 })}{stat.suffix}
       </div>
       <div className="text-sm text-white/60 mt-1.5">{stat.label}</div>
     </motion.div>
@@ -1110,10 +973,10 @@ const StatCard = ({ stat, index }) => {
 
 const Statistics = () => {
   const stats = [
-    { number: 10000, label: 'Patients recovering', suffix: '+', icon: Users },
-    { number: 97, label: 'Movement accuracy', suffix: '%', icon: Target },
-    { number: 150, label: 'Partner clinics', suffix: '+', icon: AwardIcon },
-    { number: 24, label: 'Monitoring availability', suffix: '/7', icon: Clock },
+    { number: 9, label: 'Active patients', suffix: '', icon: Users },
+    { number: 28, label: "Today's sessions", suffix: '', icon: Activity },
+    { number: 337, label: 'Total sessions completed', suffix: '', icon: Calendar },
+    { number: 33.3, label: 'Engagement rate', suffix: '%', icon: TrendingUp, decimals: 1 },
   ];
 
   return (
@@ -1140,26 +1003,15 @@ const Statistics = () => {
   Testimonials — one large featured quote + two compact supporting cards
   ────────────────────────────────────────────────────────────────────────── */
 const Testimonials = () => {
-  const testimonials = [
-    {
-      name: 'Sarah Johnson',
-      role: 'Stroke survivor',
-      image: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&h=200&fit=crop&crop=face',
-      quote: 'Gesture Heal helped me regain my independence after my stroke. The AI-powered exercises made recovery feel possible and achievable.',
-      featured: true,
-    },
-    {
-      name: 'Dr. Michael Chen',
-      role: 'Rehabilitation specialist',
-      image: 'https://images.unsplash.com/photo-1559839734-2b71ea197ec2?w=160&h=160&fit=crop&crop=face',
-      quote: 'I recommend it to every patient — the remote monitoring rivals in-person therapy.',
-    },
-    {
-      name: 'Emily Rodriguez',
-      role: 'Sports injury recovery',
-      image: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=160&h=160&fit=crop&crop=face',
-      quote: 'Returning after my ACL injury felt impossible, until this got me back on the field stronger.',
-    },
+      const patients = [
+    { name: 'Emma Clarke', role: 'Stroke Rehabilitation', image: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=600&h=750&fit=crop&crop=faces' },
+    { name: 'Daniel Moreno', role: 'Rotator Cuff', image: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=600&h=750&fit=crop&crop=faces' },
+    { name: 'Robert Hansen', role: 'Frozen Shoulder', image: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=600&h=750&fit=crop&crop=faces' },
+    { name: 'Lucas Fernandez', role: 'Fracture Recovery', image: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=600&h=750&fit=crop&crop=faces' },
+    { name: 'Sophie Laurent', role: 'Wrist Rehabilitation', image: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=600&h=750&fit=crop&crop=faces' },
+    { name: 'Marcus Weber', role: 'Frozen Shoulder', image: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=600&h=750&fit=crop&crop=faces' },
+    { name: 'Olivia Bennett', role: 'Frozen Shoulder', image: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=600&h=750&fit=crop&crop=faces' },
+    { name: 'James Whitaker', role: 'Shoulder Impingement', image: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=600&h=750&fit=crop&crop=faces' },
   ];
 
   return (
@@ -1177,61 +1029,32 @@ const Testimonials = () => {
           </h2>
         </motion.div>
 
-        <div className="grid lg:grid-cols-2 gap-6">
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="relative bg-gradient-to-br from-teal-600 via-teal-800 to-[#C2410C] text-white rounded-3xl overflow-hidden grid sm:grid-cols-[140px_1fr] shadow-lg shadow-teal-900/20"
-          >
-            {/* portrait photo column */}
-            <div
-              className="hidden sm:block bg-cover bg-center min-h-[280px]"
-              style={{
-                backgroundImage: `url('${testimonials[0].image.replace('w=200&h=200', 'w=400&h=600')}')`,
-              }}
-            />
-            <div className="p-10 flex flex-col justify-between">
-              <Quote className="w-9 h-9 text-[#FFD4C2]/50 mb-6" />
-              <p className="text-xl sm:text-2xl leading-snug font-medium mb-10">
-                "{testimonials[0].quote}"
-              </p>
-              <div className="flex items-center gap-3.5">
-                <img src={testimonials[0].image} alt={testimonials[0].name} className="w-11 h-11 rounded-full object-cover sm:hidden" />
-                <div>
-                  <div className="font-semibold text-[14px]">{testimonials[0].name}</div>
-                  <div className="text-[12.5px] text-white/70">{testimonials[0].role}</div>
-                </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
+          {patients.map((p, index) => (
+            <motion.div
+              key={index}
+              initial={{ opacity: 0, y: 16 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ delay: (index % 4) * 0.06 }}
+              className="bg-white rounded-2xl border border-teal-100 shadow-sm hover:shadow-md hover:shadow-teal-100/60 transition-shadow overflow-hidden flex flex-col"
+            >
+              <div className="w-full aspect-[4/5] overflow-hidden bg-slate-100">
+                <img
+                  src={p.image}
+                  alt={p.name}
+                  className="w-full h-full object-cover"
+                  style={{ objectPosition: 'center 20%' }}
+                />
               </div>
-            </div>
-          </motion.div>
-
-          <div className="grid sm:grid-cols-1 gap-6">
-            {testimonials.slice(1).map((t, index) => (
-              <motion.div
-                key={index}
-                initial={{ opacity: 0, y: 16 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: index * 0.08 }}
-                className="bg-white rounded-2xl p-7 border border-teal-100 shadow-sm hover:shadow-md hover:shadow-teal-100/60 transition-shadow flex-1"
-              >
-                <div className="flex gap-1 mb-4">
-                  {[...Array(5)].map((_, i) => (
-                    <Star key={i} className="w-3.5 h-3.5 fill-[#FF7043] text-[#FF7043]" />
-                  ))}
-                </div>
-                <p className="text-slate-700 leading-relaxed text-[14.5px] mb-6">"{t.quote}"</p>
-                <div className="flex items-center gap-3">
-                  <img src={t.image} alt={t.name} className="w-9 h-9 rounded-full object-cover ring-2 ring-teal-100" />
-                  <div>
-                    <div className="font-semibold text-[13px] text-slate-900">{t.name}</div>
-                    <div className="text-[12px] text-slate-500">{t.role}</div>
-                  </div>
-                </div>
-              </motion.div>
-            ))}
-          </div>
+              <div className="p-4 text-center h-[96px] flex flex-col items-center justify-center">
+                <div className="font-semibold text-[16px] text-slate-900">{p.name}</div>
+                <span className="mt-2 inline-block px-3 py-1 rounded-full bg-teal-50 text-teal-700 text-[12px] font-medium">
+                  {p.role}
+                </span>
+              </div>
+            </motion.div>
+          ))}
         </div>
       </div>
     </section>
