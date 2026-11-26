@@ -33,7 +33,6 @@ const app = express();
 app.set('trust proxy', 1);
 
 // ─── Connect Database ─────────────────────────────────────────────────────────
-connectDB();
 
 // ─── Security Middleware ──────────────────────────────────────────────────────
 app.use(helmet());
@@ -90,9 +89,26 @@ app.use(errorHandler);
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
-  console.log(`\n🚀 GestureHeal server running on port ${PORT} [${process.env.NODE_ENV}]`);
-});
+
+let server;
+
+async function startServer() {
+  try {
+    await connectDB();
+
+    server = app.listen(PORT, () => {
+      console.log(
+        `\n🚀 GestureHeal server running on port ${PORT} [${process.env.NODE_ENV}]`
+      );
+    });
+
+  } catch (error) {
+    console.error("❌ Server startup failed:", error);
+    process.exit(1);
+  }
+}
+
+startServer();
 
 // ─── Graceful Shutdown ──────────────────────────────────────────────────────
 async function gracefulShutdown(signal) {

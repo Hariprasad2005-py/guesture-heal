@@ -7,7 +7,7 @@ const getToken = () => {
     return stored?.state?.token || null;
   } catch {
     return null;
-  }
+  }a
 };
 
 async function request(endpoint, options = {}) {
@@ -23,10 +23,20 @@ async function request(endpoint, options = {}) {
   }
 
   try {
-    const response = await fetch(url, {
-      ...options,
-      headers,
-    });
+    const controller = new AbortController();
+
+// Allow Render cold start (50+ seconds)
+const timeout = setTimeout(() => {
+  controller.abort();
+}, 90000); // 90 seconds
+
+const response = await fetch(url, {
+  ...options,
+  headers,
+  signal: controller.signal,
+});
+
+clearTimeout(timeout);
 
     if (response.status === 204) return null;
 
@@ -54,6 +64,15 @@ async function request(endpoint, options = {}) {
     }
     return data;
   } catch (error) {
+
+    if (error.name === "AbortError") {
+      const timeoutError = new Error(
+        "Server is waking up. Please try again in a few seconds."
+      );
+      timeoutError.isTimeout = true;
+      throw timeoutError;
+    }
+
     if (error.name === "TypeError" && error.message.includes("fetch")) {
       const networkError = new Error("Network error - please check your connection");
       networkError.isNetworkError = true;
