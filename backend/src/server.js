@@ -28,6 +28,15 @@ const adminRoutes = require("./routes/admin");
 const telemetryRoutes = require("./routes/telemetryRoutes");
 
 const app = express();
+const BUILD_ID = process.env.RENDER_GIT_COMMIT || process.env.BUILD_ID || "local";
+
+// Keep this ahead of every middleware and route so Render logs prove which
+// process received a request, even when a later handler returns an error.
+app.use((req, res, next) => {
+  res.setHeader("X-GestureHeal-Build", BUILD_ID);
+  console.log(`[request] build=${BUILD_ID} pid=${process.pid} ${req.method} ${req.originalUrl}`);
+  next();
+});
 
 // ⚠️ CRITICAL FIX FOR RENDER: Trust the proxy so express-rate-limit works
 app.set('trust proxy', 1);
@@ -66,7 +75,7 @@ if (process.env.NODE_ENV === "development") app.use(morgan("dev"));
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) => {
-  res.json({ success: true, message: "GestureHeal API is running", timestamp: new Date() });
+  res.json({ success: true, message: "GestureHeal API is running", build: BUILD_ID, timestamp: new Date() });
 });
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -83,7 +92,6 @@ app.use("/api/exercises", exerciseRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/telemetry", telemetryRoutes);
-console.log("AUTH ROUTES LOADED");
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((req, res) => {
@@ -101,6 +109,8 @@ let server;
 async function startServer() {
   try {
     await connectDB();
+
+    console.log(`[startup] build=${BUILD_ID} pid=${process.pid} entry=${__filename}`);
 
     server = app.listen(PORT, () => {
       console.log(
@@ -144,3 +154,6 @@ process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 module.exports = app;
+
+app.use((req,res,next)=>{console.log('[request]',req.method,req.originalUrl);next();});
+app.get('/api/build-check',(req,res)=>res.json({build:'85daf5a-debug'}));
