@@ -62,55 +62,62 @@ exports.login = async (req, res, next) => {
 
 // ─── NEW: Patient Login with Patient ID ─────────────────────────────────────
 exports.patientLogin = async (req, res, next) => {
+  const start = Date.now();
+
   try {
+    console.log("?? PATIENT LOGIN START");
+
     const { patientId } = req.body;
 
-    if (!patientId || !String(patientId).startsWith("GH-")) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Valid Patient ID (GH-XXXXX) is required." 
-      });
-    }
+    console.log("Received patientId:", patientId);
 
-    // Find the patient by their patientId
-    const patient = await Patient.findOne({ 
-      patientId: String(patientId).toUpperCase(), 
-      isActive: true 
-    });
+    const cleanId = String(patientId || "")
+      .trim()
+      .toUpperCase();
+
+    console.log("Clean ID:", cleanId);
+
+    console.log("Before Mongo query");
+
+    const patient = await Patient.findOne({
+      patientId: cleanId,
+      isActive: true
+    }).maxTimeMS(5000);
+
+    console.log(
+      "After Mongo query:",
+      Date.now() - start,
+      "ms"
+    );
 
     if (!patient) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Patient not found. Please check your Patient ID." 
+      console.log("Patient not found");
+
+      return res.status(404).json({
+        success:false,
+        message:"Patient not found"
       });
     }
 
-    // Generate a JWT token for the patient
+    console.log("Patient found:", patient.patientId);
+
     const token = signToken(patient._id);
 
-    res.json({ 
-      success: true, 
-      token, 
-      patient: {
-        id: patient._id,
-        patientId: patient.patientId,
-        name: patient.name,
-        condition: patient.condition,
-        currentDay: patient.currentDay,
-        totalSessions: patient.totalSessions,
-        averageAccuracy: patient.averageAccuracy,
-        rehabPlan: patient.rehabPlan,
-        painLevel: patient.painLevel,
-        goals: patient.goals,
-        age: patient.age,
-        gender: patient.gender,
-        surgeryDate: patient.surgeryDate,
-        surgeryType: patient.surgeryType,
-        affectedSide: patient.affectedSide,
-      }
+    console.log(
+      "Sending response:",
+      Date.now() - start,
+      "ms"
+    );
+
+    res.json({
+      success:true,
+      token,
+      patient
     });
-  } catch (err) {
-    next(err);
+
+  } catch(error) {
+    console.error("PATIENT LOGIN ERROR:", error);
+    next(error);
   }
 };
 
