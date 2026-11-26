@@ -70,6 +70,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
+console.log("AUTH ROUTES LOADED");
 app.use("/api/auth", authRoutes);
 app.use("/api/patients", patientRoutes);
 app.use("/api/sessions", sessionRoutes);
@@ -78,6 +79,7 @@ app.use("/api/exercises", exerciseRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/telemetry", telemetryRoutes);
+console.log("AUTH ROUTES LOADED");
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((req, res) => {
