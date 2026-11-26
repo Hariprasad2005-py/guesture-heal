@@ -71,6 +71,10 @@ app.get("/api/health", (_req, res) => {
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 console.log("AUTH ROUTES LOADED");
+console.log(
+  "Auth router stack:",
+  authRoutes.stack.map(r => r.route?.path).filter(Boolean)
+);
 app.use("/api/auth", authRoutes);
 app.use("/api/patients", patientRoutes);
 app.use("/api/sessions", sessionRoutes);
